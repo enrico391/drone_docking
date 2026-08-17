@@ -17,14 +17,14 @@ def generate_launch_description():
         DeclareLaunchArgument('image_topic', default_value='/camera/image_raw'),
         DeclareLaunchArgument('camera_info_topic', default_value='/camera/camera_info'),
         DeclareLaunchArgument('dock_frame', default_value='dock_target'),
-        DeclareLaunchArgument('python_executable', default_value='/usr/bin/python3'),
+        #DeclareLaunchArgument('python_executable', default_value='/usr/bin/python3'),
 
         Node(
             package='dock_apriltag_localizer',
             executable='dock_localizer',
             name='dock_apriltag_localizer',
             output='screen',
-            prefix=[LaunchConfiguration('python_executable')],
+            #prefix=[LaunchConfiguration('python_executable')],
             parameters=[{
                 'config_file': LaunchConfiguration('config_file'),
                 'image_topic': LaunchConfiguration('image_topic'),
