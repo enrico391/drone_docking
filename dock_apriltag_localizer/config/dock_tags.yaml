@@ -60,5 +60,5 @@ tags:
     role: central
     size_m: 0.12
     dock_to_tag:
-      xyz_m: [0.0, 0.0, 0.291]
+      xyz_m: [0.0, 0.0, 0.0]
       rpy_deg: [0.0, 0.0, 0.0]

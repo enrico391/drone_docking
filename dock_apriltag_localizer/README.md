@@ -23,12 +23,17 @@ python3 -m pip install pupil-apriltags pyyaml
 
 ## Build
 ```bash
-cd ~/ros2_ws/src
-cp -r /path/to/dock_apriltag_localizer .
-cd ~/ros2_ws
-colcon build --symlink-install --packages-select dock_apriltag_localizer
+cd /home/ubuntu/drone_ws
+source /opt/ros/lyrical/setup.bash
+source apriltag_venv/bin/activate
+python -m colcon build --symlink-install \
+  --packages-select dock_apriltag_localizer
 source install/setup.bash
 ```
+
+Use `python -m colcon`, not the `/usr/bin/colcon` executable. The latter has a
+system-Python shebang and can generate a `dock_localizer` entry point that
+cannot import packages installed only in `apriltag_venv`.
 
 ## Run
 ```bash
@@ -109,6 +114,40 @@ ros2 launch dock_apriltag_localizer \
 - `/dock/mode`: `OUTER`, `CENTRAL_ACQUIRING`, `CENTRAL`, or `NO_TARGET`.
 - `/dock/visible_tag_ids`
 - `/dock/debug_image`
+
+## MAVLink dock-pose bridge
+
+For standalone precision-landing debugging, launch the bridge after the
+localizer and MAVProxy are running:
+
+```bash
+ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py
+```
+
+The bridge subscribes to `/dock/pose`, converts the downward camera optical
+position to MAVLink Body-FRD, and sends a position-valid `LANDING_TARGET` for
+every received pose. It listens on UDP port `14551` by default and discovers
+the return address from incoming MAVLink traffic, matching the workspace's
+MAVProxy setup.
+
+The camera origin offset from the vehicle body origin is configurable in
+Body-FRD. For example:
+
+```bash
+ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py \
+  udp_port:=14551 camera_down_m:=0.206
+```
+
+Only one process should send landing targets through this UDP endpoint. Do not
+run this bridge at the same time as `drone_mission_manager` with
+`landing_backend:=ardupilot`.
+
+To start mavlink bridge:
+
+```bash
+source .venvs/mavproxy/bin/activate
+mavproxy.py     --master=/dev/ttyAMA0,921600     --out=udp:127.0.0.1:14551
+```
 
 ## Pose convention
 

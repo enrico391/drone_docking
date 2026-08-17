@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'dock_localizer = dock_apriltag_localizer.dock_localizer:main',
+            'dock_pose_mavlink = dock_apriltag_localizer.dock_pose_mavlink:main',
         ],
     },
 )
