@@ -23,6 +23,12 @@ def generate_launch_description():
         "config",
         "ov5647_800x600.yaml",
     )
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    default_python_executable = (
+        os.path.join(virtual_env, "bin", "python")
+        if virtual_env
+        else "/usr/bin/python3"
+    )
 
     image_topic = LaunchConfiguration("image_topic")
     camera_info_topic = LaunchConfiguration("camera_info_topic")
@@ -79,6 +85,7 @@ def generate_launch_description():
         executable="dock_localizer",
         name="dock_apriltag_localizer",
         output="screen",
+        prefix=[LaunchConfiguration("python_executable")],
         parameters=[
             {
                 "config_file": LaunchConfiguration("config_file"),
@@ -110,6 +117,10 @@ def generate_launch_description():
                 "camera_info_topic", default_value="/camera/camera_info"
             ),
             DeclareLaunchArgument("dock_frame", default_value="dock_target"),
+            DeclareLaunchArgument(
+                "python_executable",
+                default_value=default_python_executable,
+            ),
             DeclareLaunchArgument(
                 "publish_debug_image", default_value="true"
             ),
