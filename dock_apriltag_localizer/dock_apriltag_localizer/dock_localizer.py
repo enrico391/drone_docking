@@ -287,7 +287,9 @@ class DockLocalizer(Node):
             self.get_logger().info('Switching to CENTRAL docking target.')
         elif self.central_active and self.central_missing_frames > dropout_frames:
             self.central_active = False
-            self.get_logger().warn('Central tag lost: falling back to OUTER tags.')
+            self.get_logger().warning(
+                'Central tag lost: falling back to OUTER tags.'
+            )
 
         if self.central_active and central_pose is not None:
             return central_pose, 'CENTRAL'
@@ -340,7 +342,9 @@ class DockLocalizer(Node):
 
     def _image_cb(self, msg):
         if self.K is None:
-            self.get_logger().warn('Waiting for CameraInfo...', throttle_duration_sec=3.0)
+            self.get_logger().warning(
+                'Waiting for CameraInfo...', throttle_duration_sec=3.0
+            )
             return
 
         bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
