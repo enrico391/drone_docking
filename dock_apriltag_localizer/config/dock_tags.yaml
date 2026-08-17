@@ -1,0 +1,64 @@
+# All distances are in meters.
+# Dock frame matches the Gazebo model: x points through the open front, y left, z up.
+# Each dock_to_tag transform is the pose of the physical TAG frame expressed
+# in the DOCK frame. Tag axes are X through the open front, Y left, Z up; the
+# localizer corrects the planar PnP axes to this convention before applying it.
+
+detector:
+  family: tag36h11
+  nthreads: 2
+  quad_decimate: 1.0
+  quad_sigma: 0.0
+  refine_edges: 1
+  decode_sharpening: 0.25
+  min_decision_margin: 20.0
+
+switching:
+  # Central tag must be closer than this before it can take control.
+  central_switch_distance_m: 1.50
+  # Require consecutive valid detections to avoid a sudden one-frame switch.
+  central_stable_frames: 8
+  # Keep central mode through a few missed frames, then fall back to outer tags.
+  central_dropout_frames: 5
+
+fusion:
+  # Reject an outer-tag dock estimate if it disagrees too much with the median.
+  max_candidate_position_error_m: 0.35
+
+tags:
+  # Geometry from drone_docking_base_structure/model.sdf.
+  # Change ONLY size_m when you print a different physical size.
+  - id: 0
+    role: outer
+    size_m: 0.30
+    dock_to_tag:
+      xyz_m: [ 0.520,  0.520, 0.001]
+      rpy_deg: [0.0, 0.0, 0.0]
+
+  - id: 1
+    role: outer
+    size_m: 0.30
+    dock_to_tag:
+      xyz_m: [-0.520,  0.520, 0.001]
+      rpy_deg: [0.0, 0.0, 0.0]
+
+  - id: 2
+    role: outer
+    size_m: 0.30
+    dock_to_tag:
+      xyz_m: [-0.520, -0.520, 0.001]
+      rpy_deg: [0.0, 0.0, 0.0]
+
+  - id: 3
+    role: outer
+    size_m: 0.30
+    dock_to_tag:
+      xyz_m: [ 0.520, -0.520, 0.001]
+      rpy_deg: [0.0, 0.0, 0.0]
+
+  - id: 4
+    role: central
+    size_m: 0.12
+    dock_to_tag:
+      xyz_m: [0.0, 0.0, 0.291]
+      rpy_deg: [0.0, 0.0, 0.0]

@@ -1,0 +1,12 @@
+# X500 uses the standard ArduPilot Quad-X motor order.
+FRAME_CLASS      1
+FRAME_TYPE       1
+
+# Match the PWM range configured in the ArduPilot Gazebo control channels.
+MOT_PWM_MIN      1100
+MOT_PWM_MAX      1900
+
+# Enable the companion-computer precision-landing backend. It remains idle
+# unless LANDING_TARGET messages arrive and the vehicle enters LAND/RTL.
+PLND_ENABLED     1
+PLND_TYPE        1
