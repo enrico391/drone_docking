@@ -19,6 +19,7 @@ from std_srvs.srv import Trigger
 from .control import camera_offset_to_body_velocity
 from .landing_target import (
     MavlinkLandingTargetSender,
+    camera_dock_orientation_to_body_yaw_error,
     camera_target_to_body_frd,
 )
 from .landing_wait import (
@@ -224,6 +225,7 @@ class MissionManager(Node):
         self._circle_progress = 0.0
         self._alignment_started_at: Optional[float] = None
         self._landing_target_started_at: Optional[float] = None
+        self._landing_yaw_command_sent = False
         self._landing_timeout_warned = False
         self._disarm_timeout_warned = False
         self._state_started_at = time.monotonic()
@@ -327,6 +329,8 @@ class MissionManager(Node):
         self._state = state
         self._state_started_at = time.monotonic()
         self._alignment_started_at = None
+        if state == MissionState.SET_LAND:
+            self._landing_yaw_command_sent = False
         if state == MissionState.WAIT_LANDED:
             self._landing_timeout_warned = False
         elif state == MissionState.WAIT_DISARM:
@@ -524,6 +528,7 @@ class MissionManager(Node):
             self._begin_call("land_mode", self._mode_client.call_async(request))
             return
         if self._state == MissionState.WAIT_LANDED:
+            self._send_native_landing_yaw(now)
             status = self._status
             action = touchdown_wait_action(
                 armed=status.armed if status is not None else True,
@@ -738,6 +743,37 @@ class MissionManager(Node):
             return False
         warmup = float(self.get_parameter("landing_target_warmup_s").value)
         return now - self._landing_target_started_at >= warmup
+
+    def _send_native_landing_yaw(self, now: float) -> None:
+        if (
+            self._landing_backend != "ardupilot"
+            or self._landing_yaw_command_sent
+            or not self._dock_target_is_fresh(now)
+        ):
+            return
+        sender = self._landing_target_sender
+        if sender is None:
+            return
+
+        orientation = self._dock_pose.pose.orientation
+        try:
+            yaw_error = camera_dock_orientation_to_body_yaw_error(
+                quaternion_x=orientation.x,
+                quaternion_y=orientation.y,
+                quaternion_z=orientation.z,
+                quaternion_w=orientation.w,
+            )
+        except ValueError as exception:
+            self.get_logger().warning(str(exception))
+            return
+
+        if sender.send_condition_yaw(yaw_error_rad=yaw_error):
+            self._landing_yaw_command_sent = True
+            self.get_logger().info(
+                "Sent MAV_CMD_CONDITION_YAW during ArduPilot LAND; "
+                "current drone-to-dock yaw error="
+                f"{math.degrees(yaw_error):.1f} deg"
+            )
 
     def _dock_body_velocity(self) -> Tuple[float, float]:
         position = self._dock_pose.pose.position

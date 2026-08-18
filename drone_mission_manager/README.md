@@ -39,6 +39,19 @@ After a one-second measurement warmup it enters LAND; ArduPilot then owns both
 horizontal correction and descent. The X500 defaults set `PLND_ENABLED=1` and
 `PLND_TYPE=1`, and the mission checks those live values before arming.
 
+After LAND mode is confirmed, the native backend also calculates the signed
+drone-to-dock yaw error from `/dock/pose` and sends one relative
+`MAV_CMD_CONDITION_YAW` in a MAVLink `COMMAND_LONG`. ArduPilot converts this
+into a persistent heading target, so its closed-loop yaw controller rejects
+disturbances such as wind and returns the vehicle to the commanded heading; it
+is not a one-time yaw-rate impulse. One command is appropriate while the dock
+orientation is fixed and the initial visual measurement is reliable. It does
+not track a dock that rotates after the command or correct a bad initial visual
+estimate. Supporting those cases would require filtered periodic updates with
+a deadband, preferably using absolute heading targets to avoid accumulating
+relative corrections. The mission log records the yaw error used by the
+command.
+
 Landing completion is event-driven. While ArduPilot reports `flying=true`, the
 mission remains in `WAIT_LANDED` and continues the `LANDING_TARGET` stream. A
 `dock_land_timeout_s` overrun emits one warning but does not fail the mission.
@@ -54,7 +67,13 @@ Start the docking simulation first and wait for ArduPilot and DDS readiness:
 ```bash
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch drone_bringup docking_sim.launch.py
+ros2 launch drone_bringup docking_sim.launch.py 
+```
+
+use the following command if your system does not support OpenGL hardware acceleration (WSL):
+
+```bash
+LIBGL_ALWAYS_SOFTWARE=1 ros2 launch drone_bringup docking_sim.launch.py
 ```
 
 In a second sourced terminal, build after changes and launch the mission with
