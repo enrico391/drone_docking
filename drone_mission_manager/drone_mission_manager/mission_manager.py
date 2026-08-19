@@ -27,7 +27,7 @@ from .landing_wait import (
     disarm_wait_action,
     touchdown_wait_action,
 )
-from .mission import CircleMission, load_circle_mission
+from .mission import CircleMission, load_mission
 
 
 GUIDED_MODE = 4
@@ -56,6 +56,7 @@ class MissionState(Enum):
     SET_LAND = auto()
     WAIT_LANDED = auto()
     WAIT_DISARM = auto()
+    REPEAT_DELAY = auto()
     COMPLETE = auto()
     FAILED = auto()
 
@@ -115,7 +116,7 @@ class MissionManager(Node):
         self.declare_parameter("dock_mode_topic", "/dock/mode")
 
         mission_path = str(self.get_parameter("mission_file").value)
-        self._mission: CircleMission = load_circle_mission(mission_path)
+        self._mission: CircleMission = load_mission(mission_path)
         self._validate_landing_parameters()
         self._landing_backend = str(
             self.get_parameter("landing_backend").value
@@ -212,6 +213,7 @@ class MissionManager(Node):
 
         self._pose: Optional[PoseStamped] = None
         self._pose_received_at = 0.0
+        self._mission_origin: Optional[Tuple[float, float]] = None
         self._status: Optional[Status] = None
         self._has_seen_armed = False
         self._dock_pose: Optional[PoseStamped] = None
@@ -223,6 +225,8 @@ class MissionManager(Node):
         self._pending_deadline = 0.0
         self._next_prearm_at = 0.0
         self._circle_progress = 0.0
+        self._iteration = 1
+        self._repeat_at = 0.0
         self._alignment_started_at: Optional[float] = None
         self._landing_target_started_at: Optional[float] = None
         self._landing_yaw_command_sent = False
@@ -244,7 +248,9 @@ class MissionManager(Node):
             raise ValueError("update_rate_hz must be greater than zero")
         self._timer = self.create_timer(1.0 / update_rate, self._update)
         self.get_logger().info(
-            f"Loaded mission '{self._mission.name}' from {mission_path}; "
+            f"Loaded {self._mission.mission_type.value} mission "
+            f"'{self._mission.name}' from {mission_path}; "
+            f"repeat_count={self._mission.repeat_count}; "
             f"landing_backend={self._landing_backend}; "
             f"state={self._state.name}"
         )
@@ -484,8 +490,21 @@ class MissionManager(Node):
         if self._state == MissionState.FAILED:
             self._publish_velocity(0.0, 0.0, 0.0)
             return
+        if self._state == MissionState.REPEAT_DELAY:
+            if now >= self._repeat_at:
+                self._start_next_iteration(now)
+            return
         if self._state == MissionState.WAITING_FOR_AP:
             if self._services_ready() and self._pose_is_fresh(now):
+                if self._mission_origin is None:
+                    position = self._pose.pose.position
+                    self._mission_origin = (position.x, position.y)
+                    self.get_logger().info(
+                        "Captured mission initial pose at "
+                        f"({position.x:.2f}, {position.y:.2f}) m; "
+                        "coordinate_reference="
+                        f"{self._mission.coordinate_reference.value}"
+                    )
                 next_state = (
                     MissionState.CHECK_LANDING_CONFIG
                     if self._landing_backend == "ardupilot"
@@ -608,9 +627,13 @@ class MissionManager(Node):
                 self._set_state(MissionState.GO_TO_CIRCLE)
             return
         if self._state == MissionState.GO_TO_CIRCLE:
-            target = (
-                self._mission.circle_center_x_m + self._mission.circle_radius_m,
+            center_x, center_y = self._mission_xy(
+                self._mission.circle_center_x_m,
                 self._mission.circle_center_y_m,
+            )
+            target = (
+                center_x + self._mission.circle_radius_m,
+                center_y,
                 self._mission.takeoff_altitude_m,
             )
             if self._fly_to(target):
@@ -621,9 +644,12 @@ class MissionManager(Node):
             self._fly_circle(dt)
             return
         if self._state == MissionState.RETURN_TO_DOCK:
+            dock_x, dock_y = self._mission_xy(
+                self._mission.dock_x_m, self._mission.dock_y_m
+            )
             target = (
-                self._mission.dock_x_m,
-                self._mission.dock_y_m,
+                dock_x,
+                dock_y,
                 self._mission.hover_altitude_m,
             )
             if self._fly_to(target):
@@ -639,10 +665,13 @@ class MissionManager(Node):
                     )
             return
         if self._state == MissionState.HOVER_OVER_DOCK:
+            dock_x, dock_y = self._mission_xy(
+                self._mission.dock_x_m, self._mission.dock_y_m
+            )
             self._fly_to(
                 (
-                    self._mission.dock_x_m,
-                    self._mission.dock_y_m,
+                    dock_x,
+                    dock_y,
                     self._mission.hover_altitude_m,
                 )
             )
@@ -693,9 +722,42 @@ class MissionManager(Node):
         return math.hypot(position.x, position.y)
 
     def _complete_landing(self) -> None:
+        if self._mission.has_next_iteration(self._iteration):
+            completed_iteration = self._iteration
+            self._iteration += 1
+            self._repeat_at = time.monotonic() + self._mission.repeat_delay_s
+            self._set_state(MissionState.REPEAT_DELAY)
+            self.get_logger().info(
+                f"Completed iteration {completed_iteration}/"
+                f"{self._mission.repeat_count}; vehicle is disarmed on the "
+                f"dock; next iteration starts in "
+                f"{self._mission.repeat_delay_s:.1f}s"
+            )
+            return
+
         self._set_state(MissionState.COMPLETE)
         self.get_logger().info(
-            "Precision landing complete; vehicle is disarmed on the dock"
+            f"Precision landing complete after {self._iteration} iteration(s); "
+            "vehicle is disarmed on the dock"
+        )
+
+    def _start_next_iteration(self, now: float) -> None:
+        """Reset transient flight state and begin the next configured cycle."""
+        self._pending = None
+        self._pending_name = ""
+        self._next_prearm_at = 0.0
+        self._circle_progress = 0.0
+        self._alignment_started_at = None
+        self._landing_target_started_at = None
+        self._landing_yaw_command_sent = False
+        self._landing_timeout_warned = False
+        self._disarm_timeout_warned = False
+        self._has_seen_armed = False
+        self._last_update_at = now
+        self._set_state(MissionState.WAITING_FOR_AP)
+        self.get_logger().info(
+            f"Starting mission iteration {self._iteration}/"
+            f"{self._mission.repeat_count}"
         )
 
     def _stream_native_landing_target(self, now: float) -> None:
@@ -899,8 +961,12 @@ class MissionManager(Node):
         direction = -1.0 if self._mission.circle_clockwise else 1.0
         angle = direction * self._circle_progress
         radius = self._mission.circle_radius_m
-        target_x = self._mission.circle_center_x_m + radius * math.cos(angle)
-        target_y = self._mission.circle_center_y_m + radius * math.sin(angle)
+        center_x, center_y = self._mission_xy(
+            self._mission.circle_center_x_m,
+            self._mission.circle_center_y_m,
+        )
+        target_x = center_x + radius * math.cos(angle)
+        target_y = center_y + radius * math.sin(angle)
         feedforward_x = -direction * self._mission.circle_speed_m_s * math.sin(angle)
         feedforward_y = direction * self._mission.circle_speed_m_s * math.cos(angle)
         correction = self._position_velocity(
@@ -912,6 +978,12 @@ class MissionManager(Node):
             correction[2],
         )
         self._publish_velocity(*velocity)
+
+    def _mission_xy(self, x_m: float, y_m: float) -> Tuple[float, float]:
+        """Resolve horizontal coordinates against the start pose."""
+        if self._mission_origin is None:
+            raise RuntimeError("mission origin was not captured before flight")
+        return self._mission.resolve_xy(x_m, y_m, *self._mission_origin)
 
     def _fly_to(self, target: Tuple[float, float, float]) -> bool:
         velocity = self._position_velocity(target)

@@ -8,8 +8,8 @@
       - Model origin is centered on the dock at ground level.
       - +Z is upward.
       - The Fusion STL spans 1.600 x 1.600 x 1.060 m.
-      - Its exported Z range is -1.280235648..-0.220235586 m, so the
-        mesh is translated upward by 1.280235648 m to place it on z=0.
+      - Its exported Z range is -0.000235591..1.059764385 m, so the
+        mesh is translated upward by 0.000235591 m to place it on z=0.
       - Outer AprilTags lie on the large z=1.000 m surface.
       - The center AprilTag lies on the z=0.880 m recess floor.
     -->
@@ -20,7 +20,7 @@
       <!-- Exact mating geometry. This collision requires the Bullet
            Featherstone backend selected by gazebo_docking.launch.py. -->
       <collision name="base_collision">
-        <pose>0 0 1.2802356481552124 0 0 0</pose>
+        <pose>0 0 0.00023559096734970808 0 0 0</pose>
         <geometry>
           <mesh>
             <scale>1 1 1</scale>
@@ -38,7 +38,7 @@
       </collision>
 
       <visual name="base_visual">
-        <pose>0 0 1.2802356481552124 0 0 0</pose>
+        <pose>0 0 0.00023559096734970808 0 0 0</pose>
         <geometry>
           <mesh>
             <scale>1 1 1</scale>

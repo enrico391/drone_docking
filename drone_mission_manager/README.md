@@ -1,13 +1,20 @@
 # Drone Mission Manager
 
-This package provides a non-blocking ROS 2 mission manager for the first
-complete simulation mission:
+This package provides a non-blocking ROS 2 mission manager with typed mission
+profiles and a shared precision-landing sequence. Two profiles are included:
+
+- `simple_circle`: take off from the ground start, fly the original circle,
+  return to the fixed dock, and land;
+- `dock_circle`: take off from the dock, fly a 2 m radius circle around it,
+  return overhead, and precision-land on the same dock.
+
+The common execution sequence is:
 
 1. wait for AP_DDS and a valid local pose;
 2. retry the pre-arm check while ArduPilot initializes, then enter GUIDED mode,
    arm, and take off;
 3. fly one configurable circle using `/ap/v1/cmd_vel`;
-4. return to the simulated dock at `(10, 0)`;
+4. return to the configured dock;
 5. acquire the dock pose from the outer or central AprilTags; and
 6. land using either the ROS velocity controller or ArduPilot's native
    `LANDING_TARGET` precision-landing controller.
@@ -17,10 +24,40 @@ The launch file starts `dock_apriltag_localizer` by default. Pass
 
 ## Mission files
 
-Store version-controlled mission definitions in `config/missions/`. The first
-mission is `config/missions/simple_circle.yaml`. Controller tuning and AP_DDS
-interface names remain in `config/mission_manager.yaml`; this keeps a mission's
-geometry separate from node/runtime configuration.
+Store version-controlled mission definitions in `config/missions/`. The
+included files are `simple_circle.yaml` and `dock_circle.yaml`. Controller
+tuning and AP_DDS interface names remain in `config/mission_manager.yaml`;
+this keeps mission geometry separate from node/runtime configuration.
+
+Every mission declares `mission.type`. Parsers are registered in
+`drone_mission_manager/mission.py`, so another mission schema can be added
+without changing how YAML files are selected. The current types are `circle`
+(an explicit center) and `dock_circle` (the return dock is also the center).
+
+`mission.coordinates.reference` controls horizontal coordinates:
+
+- `map`: X/Y values are absolute local ENU map coordinates;
+- `initial_pose`: X/Y values are offsets from the pose captured before arming.
+
+The dock mission uses `initial_pose`, which makes its `(0, 0)` dock and circle
+center follow the selected simulation start point.
+
+Missions can repeat a complete takeoff-to-landing cycle with the optional
+`mission.repeat` section. `count` is the total number of executions, not the
+number of extra repetitions. `delay_s` is the settling time after confirmed
+disarm and before the next pre-arm sequence. For example:
+
+```yaml
+mission:
+  repeat:
+    count: 3
+    delay_s: 3.0
+```
+
+The checked-in `dock_circle.yaml` defaults to `count: 1`. Increase it to the
+required number of complete dock-circle missions. Repetition greater than one
+requires precision landing because each new cycle starts only after landing
+and automatic disarm have been confirmed.
 
 The coarse mission coordinates use the ROS local ENU `map` convention: X east,
 Y north, and Z up. Precision corrections use `base_link`: the downward optical
@@ -67,7 +104,7 @@ Start the docking simulation first and wait for ArduPilot and DDS readiness:
 ```bash
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch drone_bringup docking_sim.launch.py 
+ros2 launch drone_bringup docking_sim.launch.py
 ```
 
 use the following command if your system does not support OpenGL hardware acceleration (WSL):
@@ -82,8 +119,8 @@ the explicit flight opt-in:
 ```bash
 colcon build --symlink-install --packages-select drone_mission_manager
 source install/setup.bash
-ros2 launch drone_mission_manager simple_circle_mission.launch.py \
-  auto_start:=true landing_backend:=ros
+ros2 launch drone_mission_manager mission.launch.py \
+  mission:=simple_circle auto_start:=true landing_backend:=ros
 ```
 
 To use ArduPilot's native precision landing, rebuild both changed packages and
@@ -94,8 +131,8 @@ second backend:
 colcon build --symlink-install \
   --packages-select drone_description drone_mission_manager
 source install/setup.bash
-ros2 launch drone_mission_manager simple_circle_mission.launch.py \
-  auto_start:=true landing_backend:=ardupilot
+ros2 launch drone_mission_manager mission.launch.py \
+  mission:=simple_circle auto_start:=true landing_backend:=ardupilot
 ```
 
 The two accepted launch values are:
@@ -122,10 +159,38 @@ ros2 topic echo /dock/pose
 ros2 topic hz /dock/debug_image
 ```
 
-To run another checked-in mission, pass its installed or absolute source path:
+To run the new dock-origin mission, start the simulator at the named dock point:
 
 ```bash
-ros2 launch drone_mission_manager simple_circle_mission.launch.py \
+ros2 launch drone_bringup docking_sim.launch.py initial_point:=dock
+```
+
+Then start the mission in another sourced terminal:
+
+```bash
+ros2 launch drone_mission_manager mission.launch.py \
+  mission:=dock_circle auto_start:=true landing_backend:=ros
+```
+
+If `dock_circle.yaml` has `repeat.count: 3`, the manager performs three full
+takeoff-circle-precision-land cycles. Between cycles it publishes
+`REPEAT_DELAY` on `/mission_manager/state`, waits for `repeat.delay_s`, and then
+starts the normal pre-arm sequence again.
+
+The simulation accepts `initial_point:=ground` (the backward-compatible
+default), `initial_point:=dock`, or `initial_point:=custom`. For a custom point,
+pass world coordinates explicitly, for example:
+
+```bash
+ros2 launch drone_bringup docking_sim.launch.py \
+  initial_point:=custom spawn_x:=4.0 spawn_y:=-2.0 spawn_z:=-0.032 \
+  spawn_yaw:=1.57
+```
+
+To run an external typed mission, pass its absolute source path:
+
+```bash
+ros2 launch drone_mission_manager mission.launch.py \
   mission_file:=/absolute/path/to/mission.yaml auto_start:=true
 ```
 

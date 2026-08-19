@@ -7,7 +7,7 @@ adds the AprilTags as separate Gazebo visuals.
 
 - Base mesh: `meshes/base.stl`
 - Mesh size: **1.600 x 1.600 x 1.060 m**
-- Mesh pose: translated **+1.280235648 m** in Z so its bottom is at `z=0`
+- Mesh pose: translated **+0.000235591 m** in Z so its bottom is at `z=0`
 - Large upper surface: `z=1.000 m`
 - Central tag recess floor: `z=0.880 m`
 

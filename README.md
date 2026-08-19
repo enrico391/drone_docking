@@ -10,8 +10,8 @@ the packages below it.
 - `drone_description`: Gazebo models, worlds, resource-path hooks, and the
   simulation launch file.
 - `dock_apriltag_localizer`: Existing camera-to-dock localization package.
-- `drone_mission_manager`: Non-blocking takeoff, circle, return-to-dock, and
-  staged AprilTag precision-landing controller.
+- `drone_mission_manager`: Typed, non-blocking missions with a shared staged
+  AprilTag precision-landing controller.
 - `drone_bringup`: Top-level launch package for the project-owned stack.
 
 The grouping directory is deliberate. Upstream packages remain directly under
@@ -102,12 +102,13 @@ ros2 launch drone_bringup docking_sim.launch.py
 ```
 
 Set `use_gz_sim_gui:=false` for a server-only run. Set `spawn_robot:=false`
-to inspect only the docking world and station without starting SITL. The X500
-landing-base offset is exposed as `spawn_z` and defaults to `-0.032` metres:
+to inspect only the docking world and station without starting SITL. Select
+`initial_point:=ground` (default), `initial_point:=dock`, or use explicit
+coordinates with `initial_point:=custom`:
 
 ```bash
 ros2 launch drone_bringup docking_sim.launch.py \
-  use_gz_sim_gui:=false spawn_z:=-0.032
+  initial_point:=custom spawn_x:=2.0 spawn_y:=1.0 spawn_z:=-0.032
 ```
 
 The launch defaults to `gz-physics-bullet-featherstone-plugin`. Bullet is

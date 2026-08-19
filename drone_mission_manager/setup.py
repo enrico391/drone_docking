@@ -28,7 +28,7 @@ setup(
     zip_safe=True,
     maintainer="Enrico",
     maintainer_email="user@example.com",
-    description="Circle mission and precision landing manager for drone docking.",
+    description="Typed mission and precision landing manager for drone docking.",
     license="MIT",
     tests_require=["pytest"],
     entry_points={

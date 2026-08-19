@@ -2,7 +2,7 @@
 <package format="3">
   <name>drone_mission_manager</name>
   <version>0.1.0</version>
-  <description>Circle mission and precision landing manager for autonomous drone docking.</description>
+  <description>Typed mission and precision landing manager for autonomous drone docking.</description>
   <maintainer email="user@example.com">Enrico</maintainer>
   <license>MIT</license>
 

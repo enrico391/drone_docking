@@ -1,5 +1,10 @@
 mission:
   name: simple_circle_precision_land
+  type: circle
+
+  coordinates:
+    # Absolute coordinates in ArduPilot's local ROS ENU map frame.
+    reference: map
 
   # All positions are metres in ArduPilot's local ROS ENU map frame.
   takeoff:
