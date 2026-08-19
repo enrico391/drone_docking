@@ -17,6 +17,8 @@
     <link name="base_link">
       <pose>0 0 0 0 0 0</pose>
 
+      <!-- Exact mating geometry. This collision requires the Bullet
+           Featherstone backend selected by gazebo_docking.launch.py. -->
       <collision name="base_collision">
         <pose>0 0 1.2802356481552124 0 0 0</pose>
         <geometry>
@@ -26,12 +28,6 @@
           </mesh>
         </geometry>
         <surface>
-          <contact>
-            <ode>
-              <min_depth>0.001</min_depth>
-              <max_vel>0</max_vel>
-            </ode>
-          </contact>
           <friction>
             <ode>
               <mu>1.0</mu>

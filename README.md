@@ -103,12 +103,17 @@ ros2 launch drone_bringup docking_sim.launch.py
 
 Set `use_gz_sim_gui:=false` for a server-only run. Set `spawn_robot:=false`
 to inspect only the docking world and station without starting SITL. The X500
-landing-gear offset is exposed as `spawn_z` and defaults to `-0.013` metres:
+landing-base offset is exposed as `spawn_z` and defaults to `-0.032` metres:
 
 ```bash
 ros2 launch drone_bringup docking_sim.launch.py \
-  use_gz_sim_gui:=false spawn_z:=-0.013
+  use_gz_sim_gui:=false spawn_z:=-0.032
 ```
+
+The launch defaults to `gz-physics-bullet-featherstone-plugin`. Bullet is
+required because the dock and triangular drone base use their exact STL mating
+surfaces as collision geometry; DART supports the visuals but rejects those
+mesh collisions.
 
 SITL state is stored in the instance-specific directory (for instance `0/`)
 instead of reusing the workspace-root EEPROM. This keeps X500 parameters

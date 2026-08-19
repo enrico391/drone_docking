@@ -11,8 +11,9 @@ adds the AprilTags as separate Gazebo visuals.
 - Large upper surface: `z=1.000 m`
 - Central tag recess floor: `z=0.880 m`
 
-The base is static and the same low-polygon STL is used for its visual and
-collision geometry.
+The base is static and uses the STL for both rendering and exact collision.
+The model must be run with Bullet Featherstone physics because DART does not
+construct mesh collisions from SDF.
 
 ## AprilTags
 
