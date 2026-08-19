@@ -13,6 +13,7 @@ install(
     models/drone_docking_base_structure
     models/mono_cam
     models/x500
+    models/x500_triangular_base
     models/x500_mono_cam_down
     models/x500_with_ardupilot
   DESTINATION share/${PROJECT_NAME}/models

@@ -127,10 +127,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("y", default_value="0.0"),
             DeclareLaunchArgument(
                 "z",
-                default_value="-0.013",
-                description="Model spawn offset that places the X500 feet on z=0.",
+                default_value="-0.032",
+                description="Model spawn offset that places the triangular base on z=0.",
             ),
             DeclareLaunchArgument("yaw", default_value="0.0"),
             OpaqueFunction(function=create_robot_actions),
         ]
     )
+
