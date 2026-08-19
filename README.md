@@ -27,15 +27,15 @@ continue to use names such as `drone_description` and `drone_bringup`.
 - `models/mono_cam` is the downward-facing monochrome camera sensor.
 - `models/x500_mono_cam_down` composes the airframe with that camera. It is not
   a second airframe copy: the active ArduPilot adapter includes this composition.
-- `models/drone_docking_base_structure` is the raised, recessed docking base
-  with AprilTags 0-4. Its world entity remains named `dock_station` and fixed at
-  the docking position.
+- `models/drone_docking_base_structure` is the Fusion 360 docking-base mesh
+  with separate AprilTag visuals 0-4. Its world entity remains named
+  `dock_station` and fixed at the docking position.
 
 ## Current milestone
 
 Phase 1 adds the static docking base at `(10, 0, 0)`. The base has four 300 mm
-outer tags at `(x, y) = (+/-0.52, +/-0.52)` and a 120 mm central tag in the
-recess at `z=0.291`. Phase 2 adds a separate `x500_with_ardupilot` adapter around
+outer tags at `(x, y, z) = (+/-0.52, +/-0.52, 1.001)` and a 120 mm central tag
+in the recess at `z=0.881`. Phase 2 adds a separate `x500_with_ardupilot` adapter around
 the imported `x500` model and reuses the known-working ArduPilot SITL + AP_DDS
 launch infrastructure. Phase 3 activates the downward camera composition and
 bridges its image and calibration data into ROS 2.

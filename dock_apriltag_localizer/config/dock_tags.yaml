@@ -32,33 +32,33 @@ tags:
     role: outer
     size_m: 0.30
     dock_to_tag:
-      xyz_m: [ 0.520,  0.520, 0.001]
+      xyz_m: [ 0.520,  0.520, 1.001]
       rpy_deg: [0.0, 0.0, 0.0]
 
   - id: 1
     role: outer
     size_m: 0.30
     dock_to_tag:
-      xyz_m: [-0.520,  0.520, 0.001]
+      xyz_m: [-0.520,  0.520, 1.001]
       rpy_deg: [0.0, 0.0, 0.0]
 
   - id: 2
     role: outer
     size_m: 0.30
     dock_to_tag:
-      xyz_m: [-0.520, -0.520, 0.001]
+      xyz_m: [-0.520, -0.520, 1.001]
       rpy_deg: [0.0, 0.0, 0.0]
 
   - id: 3
     role: outer
     size_m: 0.30
     dock_to_tag:
-      xyz_m: [ 0.520, -0.520, 0.001]
+      xyz_m: [ 0.520, -0.520, 1.001]
       rpy_deg: [0.0, 0.0, 0.0]
 
   - id: 4
     role: central
     size_m: 0.12
     dock_to_tag:
-      xyz_m: [0.0, 0.0, 0.0]
+      xyz_m: [0.0, 0.0, 0.881]
       rpy_deg: [0.0, 0.0, 0.0]
