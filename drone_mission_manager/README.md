@@ -132,7 +132,8 @@ colcon build --symlink-install \
   --packages-select drone_description drone_mission_manager
 source install/setup.bash
 ros2 launch drone_mission_manager mission.launch.py \
-  mission:=simple_circle auto_start:=true landing_backend:=ardupilot
+  mission:=simple_circle auto_start:=true landing_backend:=ardupilot \
+  landing_yaw_correction_enabled:=true
 ```
 
 The two accepted launch values are:
@@ -140,6 +141,10 @@ The two accepted launch values are:
 - `landing_backend:=ros`: ROS commands perform visual alignment and descent;
 - `landing_backend:=ardupilot`: ROS supplies visual target measurements and
   ArduPilot precision landing performs the complete descent in LAND mode.
+
+Set `landing_yaw_correction_enabled:=false` to keep the vehicle's existing
+heading during ArduPilot precision landing. It defaults to `true` to preserve
+the original dock-relative yaw correction.
 
 Port 14551 must remain available to the mission manager. MAVProxy already
 publishes vehicle traffic to this port in the workspace's SITL launch, so no

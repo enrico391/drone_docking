@@ -9,6 +9,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -53,6 +54,15 @@ def generate_launch_description() -> LaunchDescription:
                     "LANDING_TARGET precision landing."
                 ),
             ),
+            DeclareLaunchArgument(
+                "landing_yaw_correction_enabled",
+                default_value="true",
+                choices=["true", "false"],
+                description=(
+                    "Send one dock-relative yaw correction after entering "
+                    "ArduPilot LAND mode."
+                ),
+            ),
             DeclareLaunchArgument("start_localizer", default_value="true"),
             DeclareLaunchArgument("image_topic", default_value="/camera/image_raw"),
             DeclareLaunchArgument(
@@ -74,6 +84,12 @@ def generate_launch_description() -> LaunchDescription:
                         "auto_start": LaunchConfiguration("auto_start"),
                         "landing_backend": LaunchConfiguration(
                             "landing_backend"
+                        ),
+                        "landing_yaw_correction_enabled": ParameterValue(
+                            LaunchConfiguration(
+                                "landing_yaw_correction_enabled"
+                            ),
+                            value_type=bool,
                         ),
                     },
                 ],

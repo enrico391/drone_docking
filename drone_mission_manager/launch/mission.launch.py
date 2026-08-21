@@ -10,6 +10,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def create_mission_manager(context: LaunchContext, package_share: Path):
@@ -37,6 +38,12 @@ def create_mission_manager(context: LaunchContext, package_share: Path):
                     "mission_file": mission_file,
                     "auto_start": LaunchConfiguration("auto_start"),
                     "landing_backend": LaunchConfiguration("landing_backend"),
+                    "landing_yaw_correction_enabled": ParameterValue(
+                        LaunchConfiguration(
+                            "landing_yaw_correction_enabled"
+                        ),
+                        value_type=bool,
+                    ),
                 },
             ],
         )
@@ -90,6 +97,15 @@ def generate_launch_description() -> LaunchDescription:
                 description=(
                     "Use ROS velocity alignment/descent or ArduPilot native "
                     "LANDING_TARGET precision landing."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "landing_yaw_correction_enabled",
+                default_value="true",
+                choices=["true", "false"],
+                description=(
+                    "Send one dock-relative yaw correction after entering "
+                    "ArduPilot LAND mode."
                 ),
             ),
             DeclareLaunchArgument("start_localizer", default_value="true"),

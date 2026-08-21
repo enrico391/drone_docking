@@ -33,6 +33,7 @@ mission_manager:
     # alignment/descent in this node; "ardupilot" sends MAVLink
     # LANDING_TARGET and switches to LAND after the stream is stable.
     landing_backend: ros
+    landing_yaw_correction_enabled: true
     landing_target_warmup_s: 1.0
     landing_target_bind_address: 0.0.0.0
     landing_target_udp_port: 14551

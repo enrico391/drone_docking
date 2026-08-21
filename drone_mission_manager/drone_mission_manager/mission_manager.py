@@ -92,6 +92,7 @@ class MissionManager(Node):
         self.declare_parameter("dock_land_timeout_s", 30.0)
         self.declare_parameter("dock_disarm_timeout_s", 20.0)
         self.declare_parameter("landing_backend", "ros")
+        self.declare_parameter("landing_yaw_correction_enabled", True)
         self.declare_parameter("landing_target_warmup_s", 1.0)
         self.declare_parameter("landing_target_bind_address", "0.0.0.0")
         self.declare_parameter("landing_target_udp_port", 14551)
@@ -99,7 +100,7 @@ class MissionManager(Node):
         self.declare_parameter("landing_target_source_component", 191)
         self.declare_parameter("landing_target_camera_forward_m", 0.0)
         self.declare_parameter("landing_target_camera_right_m", 0.0)
-        self.declare_parameter("landing_target_camera_down_m", 0.14)
+        self.declare_parameter("landing_target_camera_down_m", 0.19)
         self.declare_parameter("prearm_service", "/ap/v1/prearm_check")
         self.declare_parameter("mode_service", "/ap/v1/mode_switch")
         self.declare_parameter("arm_service", "/ap/v1/arm_motors")
@@ -809,6 +810,9 @@ class MissionManager(Node):
     def _send_native_landing_yaw(self, now: float) -> None:
         if (
             self._landing_backend != "ardupilot"
+            or not bool(
+                self.get_parameter("landing_yaw_correction_enabled").value
+            )
             or self._landing_yaw_command_sent
             or not self._dock_target_is_fresh(now)
         ):
