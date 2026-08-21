@@ -29,6 +29,6 @@ mission:
   repeat:
     # Total number of complete takeoff-circle-land cycles. Increase this value
     # to repeat the mission; one keeps the original single-cycle behavior.
-    count: 1
+    count: 3
     # Time for the vehicle and autopilot to settle after automatic disarm.
     delay_s: 3.0

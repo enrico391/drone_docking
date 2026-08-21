@@ -111,10 +111,10 @@ ros2 launch drone_bringup docking_sim.launch.py \
   initial_point:=custom spawn_x:=2.0 spawn_y:=1.0 spawn_z:=-0.032
 ```
 
-The launch defaults to `gz-physics-bullet-featherstone-plugin`. Bullet is
-required because the dock and triangular drone base use their exact STL mating
-surfaces as collision geometry; DART supports the visuals but rejects those
-mesh collisions.
+The launch defaults to `gz-physics-bullet-featherstone-plugin`. The exact dock
+and triangular-base STLs are visual-only; stable primitive collision proxies
+are used at their mating surfaces. Bullet Featherstone remains the tested
+backend for the complete articulated X500 model.
 
 SITL state is stored in the instance-specific directory (for instance `0/`)
 instead of reusing the workspace-root EEPROM. This keeps X500 parameters

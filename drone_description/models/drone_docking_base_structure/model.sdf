@@ -17,15 +17,22 @@
     <link name="base_link">
       <pose>0 0 0 0 0 0</pose>
 
-      <!-- Exact mating geometry. This collision requires the Bullet
-           Featherstone backend selected by gazebo_docking.launch.py. -->
-      <collision name="base_collision">
-        <pose>0 0 0.00023559096734970808 0 0 0</pose>
+      <!--
+        Stable collision proxy for the dock body and central recess.
+
+        The visual STL is a concave, close-fitting CAD mesh. Using it as a
+        collider against the dynamic triangular-base STL creates invalid
+        interior contacts in Bullet. The boxes below retain the load-bearing
+        surfaces while leaving an 800 mm square physics opening around the
+        insert. The larger invisible opening keeps Bullet's contact margin
+        away from the vehicle body during passive settling and takeoff.
+      -->
+      <collision name="lower_body_collision">
+        <pose>0 0 0.440 0 0 0</pose>
         <geometry>
-          <mesh>
-            <scale>1 1 1</scale>
-            <uri>model://drone_docking_base_structure/meshes/base.stl</uri>
-          </mesh>
+          <box>
+            <size>1.600 1.600 0.880</size>
+          </box>
         </geometry>
         <surface>
           <friction>
@@ -35,6 +42,26 @@
             </ode>
           </friction>
         </surface>
+      </collision>
+
+      <!-- The upper deck starts outside a 0.8 m square clearance envelope.
+           This keeps its collision geometry away from the X500 body and
+           propeller links while preserving the deck for external contacts. -->
+      <collision name="top_north_collision">
+        <pose>0 0.600 0.940 0 0 0</pose>
+        <geometry><box><size>1.600 0.400 0.120</size></box></geometry>
+      </collision>
+      <collision name="top_south_collision">
+        <pose>0 -0.600 0.940 0 0 0</pose>
+        <geometry><box><size>1.600 0.400 0.120</size></box></geometry>
+      </collision>
+      <collision name="top_east_collision">
+        <pose>0.600 0 0.940 0 0 0</pose>
+        <geometry><box><size>0.400 0.800 0.120</size></box></geometry>
+      </collision>
+      <collision name="top_west_collision">
+        <pose>-0.600 0 0.940 0 0 0</pose>
+        <geometry><box><size>0.400 0.800 0.120</size></box></geometry>
       </collision>
 
       <visual name="base_visual">

@@ -11,9 +11,12 @@ adds the AprilTags as separate Gazebo visuals.
 - Large upper surface: `z=1.000 m`
 - Central tag recess floor: `z=0.880 m`
 
-The base is static and uses the STL for both rendering and exact collision.
-The model must be run with Bullet Featherstone physics because DART does not
-construct mesh collisions from SDF.
+The base STL is used for rendering. Collision uses primitive boxes for the
+lower body, center recess floor, and upper deck outside an `0.8 x 0.8 m`
+vehicle-clearance envelope. The matching triangular drone insert uses four
+spherical point contacts at its bottom face. Keeping the close-fitting CAD
+meshes out of the physics contact pair prevents startup impulses, tilting, and
+blocked takeoff while preserving the exact visual geometry.
 
 ## AprilTags
 

@@ -136,6 +136,29 @@
           </friction>
         </surface>
       </collision>
+      <!-- Stable point contacts for the insert's bottom face. They live on the
+           canonical link so Bullet does not route ground forces through the
+           fixed visual / inertia child link. -->
+      <collision name="triangular_base_foot_front_left">
+        <pose>0.045 0.045 -0.203 0 0 0</pose>
+        <geometry><sphere><radius>0.005</radius></sphere></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+      </collision>
+      <collision name="triangular_base_foot_front_right">
+        <pose>0.045 -0.045 -0.203 0 0 0</pose>
+        <geometry><sphere><radius>0.005</radius></sphere></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+      </collision>
+      <collision name="triangular_base_foot_rear_left">
+        <pose>-0.045 0.045 -0.203 0 0 0</pose>
+        <geometry><sphere><radius>0.005</radius></sphere></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+      </collision>
+      <collision name="triangular_base_foot_rear_right">
+        <pose>-0.045 -0.045 -0.203 0 0 0</pose>
+        <geometry><sphere><radius>0.005</radius></sphere></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+      </collision>
       <sensor name="air_pressure_sensor" type="air_pressure">
         <always_on>1</always_on>
         <update_rate>50</update_rate>
@@ -187,23 +210,6 @@
           <specular>0.15 0.15 0.15 1</specular>
         </material>
       </visual>
-      <!-- Exact mating geometry; requires Bullet Featherstone physics. -->
-      <collision name="triangular_base_collision">
-        <geometry>
-          <mesh>
-            <scale>1 1 1</scale>
-            <uri>model://x500_triangular_base/meshes/triangular_base.stl</uri>
-          </mesh>
-        </geometry>
-        <surface>
-          <friction>
-            <ode>
-              <mu>1.0</mu>
-              <mu2>1.0</mu2>
-            </ode>
-          </friction>
-        </surface>
-      </collision>
     </link>
     <joint name="triangular_base_joint" type="fixed">
       <parent>base_link</parent>
