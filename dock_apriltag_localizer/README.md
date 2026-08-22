@@ -8,6 +8,8 @@ ROS 2 node for two-stage precision docking with multiple AprilTags.
 - Every detected tag is converted to the same `dock_target` frame using the fixed geometry in `config/dock_tags.yaml`.
 - Multiple outer tag estimates are fused.
 - Central switching uses distance threshold + consecutive-frame hysteresis.
+- The selected pose is temporally smoothed and implausible position jumps are
+  rejected before `/dock/pose` is published.
 
 ## Dependencies
 
@@ -109,11 +111,36 @@ ros2 launch dock_apriltag_localizer \
 ```
 
 ## Main outputs
-- `/dock/pose` (`geometry_msgs/PoseStamped`): dock center in camera optical frame.
+- `/dock/pose` (`geometry_msgs/PoseStamped`): filtered dock center in camera
+  optical frame. Its timestamp remains the source image acquisition time.
 - TF: `camera_frame -> dock_target`
 - `/dock/mode`: `OUTER`, `CENTRAL_ACQUIRING`, `CENTRAL`, or `NO_TARGET`.
 - `/dock/visible_tag_ids`
 - `/dock/debug_image`
+
+## Pose filter
+
+The temporal filter is enabled by default. It combines exponential position
+and rotation smoothing with a speed-aware position innovation gate. An
+isolated pose outside the gate is not published. Three mutually consistent
+rejected poses reacquire the target, avoiding permanent lockout after a real
+large displacement.
+
+The main controls are exposed as launch arguments:
+
+```bash
+ros2 launch dock_apriltag_localizer dock_localizer.launch.py \
+  pose_filter_enabled:=true \
+  pose_filter_time_constant_s:=0.12 \
+  pose_filter_max_translation_speed_m_s:=2.0 \
+  pose_filter_max_position_jump_m:=0.20 \
+  pose_filter_reacquire_frames:=3
+```
+
+Set `pose_filter_enabled:=false` for a raw-pose comparison. A smaller time
+constant follows motion more closely; a larger value smooths more but adds
+latency. The jump gate allows the configured fixed jump plus the configured
+translation speed multiplied by the sample interval.
 
 ## MAVLink dock-pose bridge
 
@@ -126,7 +153,9 @@ ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py
 
 The bridge subscribes to `/dock/pose`, converts the downward camera optical
 position to MAVLink Body-FRD, and sends a position-valid `LANDING_TARGET` for
-every received pose. It listens on UDP port `14551` by default and discovers
+every received pose. The MAVLink measurement timestamp comes from the source
+image rather than the bridge transmission time. It listens on UDP port `14551`
+by default and discovers
 the return address from incoming MAVLink traffic, matching the workspace's
 MAVProxy setup.
 

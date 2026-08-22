@@ -19,6 +19,14 @@ MAV_FRAME_BODY_FRD = 12
 LANDING_TARGET_TYPE_FIDUCIAL = 2
 
 
+def measurement_time_usec(
+    *, stamp_sec: int, stamp_nanosec: int, fallback_usec: int
+) -> int:
+    """Return a ROS acquisition timestamp or a fallback for an empty stamp."""
+    timestamp_usec = int(stamp_sec) * 1_000_000 + int(stamp_nanosec) // 1000
+    return timestamp_usec if timestamp_usec > 0 else int(fallback_usec)
+
+
 def camera_target_to_body_frd(
     camera_x_m: float,
     camera_y_m: float,
@@ -251,8 +259,13 @@ class DockPoseMavlinkBridge(Node):
         sender = self._sender
         if sender is None:
             return
+        stamp = message.header.stamp
         sent = sender.send(
-            time_usec=self.get_clock().now().nanoseconds // 1000,
+            time_usec=measurement_time_usec(
+                stamp_sec=stamp.sec,
+                stamp_nanosec=stamp.nanosec,
+                fallback_usec=self.get_clock().now().nanoseconds // 1000,
+            ),
             forward_m=forward_m,
             right_m=right_m,
             down_m=down_m,

@@ -95,6 +95,30 @@ def generate_launch_description():
                 "publish_debug_image": LaunchConfiguration(
                     "publish_debug_image"
                 ),
+                "pose_filter_enabled": ParameterValue(
+                    LaunchConfiguration("pose_filter_enabled"),
+                    value_type=bool,
+                ),
+                "pose_filter_time_constant_s": ParameterValue(
+                    LaunchConfiguration("pose_filter_time_constant_s"),
+                    value_type=float,
+                ),
+                "pose_filter_max_translation_speed_m_s": ParameterValue(
+                    LaunchConfiguration(
+                        "pose_filter_max_translation_speed_m_s"
+                    ),
+                    value_type=float,
+                ),
+                "pose_filter_max_position_jump_m": ParameterValue(
+                    LaunchConfiguration(
+                        "pose_filter_max_position_jump_m"
+                    ),
+                    value_type=float,
+                ),
+                "pose_filter_reacquire_frames": ParameterValue(
+                    LaunchConfiguration("pose_filter_reacquire_frames"),
+                    value_type=int,
+                ),
             }
         ],
     )
@@ -123,6 +147,22 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "publish_debug_image", default_value="true"
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_enabled", default_value="true"
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_time_constant_s", default_value="0.12"
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_max_translation_speed_m_s",
+                default_value="2.0",
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_max_position_jump_m", default_value="0.20"
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_reacquire_frames", default_value="3"
             ),
             camera_node,
             localizer_node,

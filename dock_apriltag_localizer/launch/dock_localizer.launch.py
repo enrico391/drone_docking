@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -38,6 +39,41 @@ def generate_launch_description():
                 'camera_info_topic': LaunchConfiguration('camera_info_topic'),
                 'dock_frame': LaunchConfiguration('dock_frame'),
                 'publish_debug_image': True,
+                'pose_filter_enabled': ParameterValue(
+                    LaunchConfiguration('pose_filter_enabled'),
+                    value_type=bool,
+                ),
+                'pose_filter_time_constant_s': ParameterValue(
+                    LaunchConfiguration('pose_filter_time_constant_s'),
+                    value_type=float,
+                ),
+                'pose_filter_max_translation_speed_m_s': ParameterValue(
+                    LaunchConfiguration(
+                        'pose_filter_max_translation_speed_m_s'
+                    ),
+                    value_type=float,
+                ),
+                'pose_filter_max_position_jump_m': ParameterValue(
+                    LaunchConfiguration('pose_filter_max_position_jump_m'),
+                    value_type=float,
+                ),
+                'pose_filter_reacquire_frames': ParameterValue(
+                    LaunchConfiguration('pose_filter_reacquire_frames'),
+                    value_type=int,
+                ),
             }]
-        )
+        ),
+        DeclareLaunchArgument('pose_filter_enabled', default_value='true'),
+        DeclareLaunchArgument(
+            'pose_filter_time_constant_s', default_value='0.12'
+        ),
+        DeclareLaunchArgument(
+            'pose_filter_max_translation_speed_m_s', default_value='2.0'
+        ),
+        DeclareLaunchArgument(
+            'pose_filter_max_position_jump_m', default_value='0.20'
+        ),
+        DeclareLaunchArgument(
+            'pose_filter_reacquire_frames', default_value='3'
+        ),
     ])

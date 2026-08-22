@@ -9,6 +9,7 @@ from drone_mission_manager.landing_target import (
     camera_target_to_body_frd,
     encode_condition_yaw,
     encode_landing_target,
+    measurement_time_usec,
 )
 
 
@@ -43,6 +44,26 @@ def test_landing_target_matches_known_mavlink2_frame():
         "0000000000000000000c0000a03f000000bf000040400000803f00000000"
         "0000000000000000020166fc"
     )
+
+
+def test_measurement_timestamp_prefers_ros_acquisition_time():
+    timestamp = measurement_time_usec(
+        stamp_sec=12,
+        stamp_nanosec=345_678_999,
+        fallback_usec=99,
+    )
+
+    assert timestamp == 12_345_678
+
+
+def test_measurement_timestamp_uses_fallback_for_empty_stamp():
+    timestamp = measurement_time_usec(
+        stamp_sec=0,
+        stamp_nanosec=0,
+        fallback_usec=99,
+    )
+
+    assert timestamp == 99
 
 
 @pytest.mark.parametrize(

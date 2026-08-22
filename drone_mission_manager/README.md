@@ -70,8 +70,10 @@ horizontal tolerance. A lost target causes an immediate hover and
 reacquisition.
 
 The `ardupilot` backend converts `/dock/pose` from camera optical coordinates
-to MAVLink Body-FRD and sends `LANDING_TARGET` at the mission update rate
-(10 Hz by default) through MAVProxy's dedicated UDP endpoint on port 14551.
+to MAVLink Body-FRD and checks for new measurements at the mission update rate
+(10 Hz by default). Each accepted filtered pose is sent at most once through
+MAVProxy's dedicated UDP endpoint on port 14551, using the source image
+timestamp; timer ticks no longer turn a stale pose into a new measurement.
 After a one-second measurement warmup it enters LAND; ArduPilot then owns both
 horizontal correction and descent. The X500 defaults set `PLND_ENABLED=1` and
 `PLND_TYPE=1`, and the mission checks those live values before arming.
@@ -133,7 +135,8 @@ colcon build --symlink-install \
 source install/setup.bash
 ros2 launch drone_mission_manager mission.launch.py \
   mission:=simple_circle auto_start:=true landing_backend:=ardupilot \
-  landing_yaw_correction_enabled:=true
+  landing_yaw_correction_enabled:=true \
+  pose_filter_enabled:=true
 ```
 
 The two accepted launch values are:
@@ -145,6 +148,11 @@ The two accepted launch values are:
 Set `landing_yaw_correction_enabled:=false` to keep the vehicle's existing
 heading during ArduPilot precision landing. It defaults to `true` to preserve
 the original dock-relative yaw correction.
+
+The localizer filter defaults can be tuned from this launch file with
+`pose_filter_time_constant_s`, `pose_filter_max_translation_speed_m_s`,
+`pose_filter_max_position_jump_m`, and `pose_filter_reacquire_frames`. See the
+`dock_apriltag_localizer` README for their behavior.
 
 Port 14551 must remain available to the mission manager. MAVProxy already
 publishes vehicle traffic to this port in the workspace's SITL launch, so no

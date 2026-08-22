@@ -72,6 +72,21 @@ def generate_launch_description() -> LaunchDescription:
             "image_topic": LaunchConfiguration("image_topic"),
             "camera_info_topic": LaunchConfiguration("camera_info_topic"),
             "python_executable": LaunchConfiguration("localizer_python"),
+            "pose_filter_enabled": LaunchConfiguration(
+                "pose_filter_enabled"
+            ),
+            "pose_filter_time_constant_s": LaunchConfiguration(
+                "pose_filter_time_constant_s"
+            ),
+            "pose_filter_max_translation_speed_m_s": LaunchConfiguration(
+                "pose_filter_max_translation_speed_m_s"
+            ),
+            "pose_filter_max_position_jump_m": LaunchConfiguration(
+                "pose_filter_max_position_jump_m"
+            ),
+            "pose_filter_reacquire_frames": LaunchConfiguration(
+                "pose_filter_reacquire_frames"
+            ),
         }.items(),
     )
 
@@ -117,6 +132,22 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "localizer_python", default_value=default_localizer_python
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_enabled", default_value="true"
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_time_constant_s", default_value="0.12"
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_max_translation_speed_m_s",
+                default_value="2.0",
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_max_position_jump_m", default_value="0.20"
+            ),
+            DeclareLaunchArgument(
+                "pose_filter_reacquire_frames", default_value="3"
             ),
             localizer,
             OpaqueFunction(

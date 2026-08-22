@@ -18,6 +18,8 @@ from tf2_ros import TransformBroadcaster
 
 from pupil_apriltags import Detector
 
+from .pose_filter import TemporalPoseFilter
+
 
 def rpy_to_rot(roll, pitch, yaw):
     cr, sr = math.cos(roll), math.sin(roll)
@@ -100,6 +102,15 @@ class DockLocalizer(Node):
         self.declare_parameter('dock_frame', 'dock_target')
         self.declare_parameter('publish_debug_image', True)
         self.declare_parameter('debug_image_topic', '/dock/debug_image')
+        self.declare_parameter('pose_filter_enabled', True)
+        self.declare_parameter('pose_filter_time_constant_s', 0.12)
+        self.declare_parameter(
+            'pose_filter_max_translation_speed_m_s', 2.0
+        )
+        self.declare_parameter('pose_filter_max_position_jump_m', 0.20)
+        self.declare_parameter('pose_filter_max_gate_dt_s', 0.20)
+        self.declare_parameter('pose_filter_reset_timeout_s', 1.0)
+        self.declare_parameter('pose_filter_reacquire_frames', 3)
 
         self.bridge = CvBridge()
         self.K = None
@@ -117,6 +128,34 @@ class DockLocalizer(Node):
             raise RuntimeError('Parameter config_file is required.')
         self._load_config()
 
+        self.pose_filter = TemporalPoseFilter(
+            enabled=bool(
+                self.get_parameter('pose_filter_enabled').value
+            ),
+            time_constant_s=float(
+                self.get_parameter('pose_filter_time_constant_s').value
+            ),
+            max_translation_speed_m_s=float(
+                self.get_parameter(
+                    'pose_filter_max_translation_speed_m_s'
+                ).value
+            ),
+            max_position_jump_m=float(
+                self.get_parameter(
+                    'pose_filter_max_position_jump_m'
+                ).value
+            ),
+            max_gate_dt_s=float(
+                self.get_parameter('pose_filter_max_gate_dt_s').value
+            ),
+            reset_timeout_s=float(
+                self.get_parameter('pose_filter_reset_timeout_s').value
+            ),
+            reacquire_frames=int(
+                self.get_parameter('pose_filter_reacquire_frames').value
+            ),
+        )
+
         det = self.detector_cfg
         self.detector = Detector(
             families=det.get('family', 'tag36h11'),
@@ -133,7 +172,11 @@ class DockLocalizer(Node):
         self.ids_pub = self.create_publisher(Int32MultiArray, '/dock/visible_tag_ids', 10)
         self.debug_pub = None
         if self.get_parameter('publish_debug_image').value:
-            self.debug_pub = self.create_publisher(Image, self.get_parameter('debug_image_topic').value, 2)
+            self.debug_pub = self.create_publisher(
+                Image,
+                self.get_parameter('debug_image_topic').value,
+                2,
+            )
 
         self.tf_broadcaster = TransformBroadcaster(self)
         self.reload_srv = self.create_service(Trigger, '~/reload_config', self._reload_cb)
@@ -174,6 +217,7 @@ class DockLocalizer(Node):
     def _reload_cb(self, request, response):
         try:
             self._load_config()
+            self.pose_filter.reset()
             self.central_active = False
             self.central_good_frames = 0
             self.central_missing_frames = 0
@@ -367,7 +411,23 @@ class DockLocalizer(Node):
 
         T, mode = self._select_pose(candidates)
         if T is not None:
-            self._publish_pose(T, msg.header, mode)
+            stamp_s = (
+                float(msg.header.stamp.sec)
+                + float(msg.header.stamp.nanosec) * 1.0e-9
+            )
+            filtered_T, filter_status = self.pose_filter.update(T, stamp_s)
+            if filtered_T is not None:
+                self._publish_pose(filtered_T, msg.header, mode)
+            else:
+                self.get_logger().warning(
+                    'Rejecting dock pose: '
+                    f'{filter_status}; raw position='
+                    f'({T[0, 3]:.2f}, {T[1, 3]:.2f}, {T[2, 3]:.2f}) m',
+                    throttle_duration_sec=1.0,
+                )
+                m = String()
+                m.data = mode
+                self.mode_pub.publish(m)
         else:
             m = String()
             m.data = mode

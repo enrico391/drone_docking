@@ -10,3 +10,12 @@ MOT_PWM_MAX      1900
 # unless LANDING_TARGET messages arrive and the vehicle enters LAND/RTL.
 PLND_ENABLED     1
 PLND_TYPE        1
+
+# disable kalman filter for landing target position estimation, use raw vision data instead
+PLND_EST_TYPE       0
+
+# change max distance to which the drone can discend
+PLND_XY_DIST_MAX    0.25
+
+# change max speed at which the drone can discend
+LAND_SPD_MS         0.25

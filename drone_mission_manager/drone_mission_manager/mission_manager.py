@@ -21,6 +21,7 @@ from .landing_target import (
     MavlinkLandingTargetSender,
     camera_dock_orientation_to_body_yaw_error,
     camera_target_to_body_frd,
+    measurement_time_usec,
 )
 from .landing_wait import (
     LandingWaitAction,
@@ -219,6 +220,8 @@ class MissionManager(Node):
         self._has_seen_armed = False
         self._dock_pose: Optional[PoseStamped] = None
         self._dock_pose_received_at = 0.0
+        self._dock_pose_generation = 0
+        self._last_streamed_dock_pose_generation = -1
         self._dock_mode = "NO_TARGET"
         self._dock_mode_received_at = 0.0
         self._pending = None
@@ -325,6 +328,7 @@ class MissionManager(Node):
     def _dock_pose_callback(self, message: PoseStamped) -> None:
         self._dock_pose = message
         self._dock_pose_received_at = time.monotonic()
+        self._dock_pose_generation += 1
 
     def _dock_mode_callback(self, message: String) -> None:
         self._dock_mode = message.data
@@ -683,7 +687,7 @@ class MissionManager(Node):
                 # IF ROS BACKEND START TO ALIGN WITH CMD_VEL
                 if self._landing_backend == "ros":
                     self._set_state(MissionState.ALIGN_DOCK)
-                # IF ARDUPILOT PRECISE LANDING IS USED SET LAND MODE TO USE DOCK POSE AS ALIGNMENT SYSTEM
+                # For native precision landing, LAND consumes the dock pose.
                 elif self._native_target_is_ready(now):
                     self._set_state(MissionState.SET_LAND)
                     self.get_logger().info(
@@ -776,6 +780,11 @@ class MissionManager(Node):
             if self._state == MissionState.ACQUIRE_DOCK:
                 self._landing_target_started_at = None
             return
+        if (
+            self._dock_pose_generation
+            == self._last_streamed_dock_pose_generation
+        ):
+            return
 
         position = self._dock_pose.pose.position
         forward_m, right_m, down_m = camera_target_to_body_frd(
@@ -793,11 +802,19 @@ class MissionManager(Node):
             ),
         )
         sent = sender.send(
-            time_usec=int(now * 1_000_000),
+            time_usec=measurement_time_usec(
+                stamp_sec=self._dock_pose.header.stamp.sec,
+                stamp_nanosec=self._dock_pose.header.stamp.nanosec,
+                fallback_usec=int(now * 1_000_000),
+            ),
             forward_m=forward_m,
             right_m=right_m,
             down_m=down_m,
         )
+        if sent:
+            self._last_streamed_dock_pose_generation = (
+                self._dock_pose_generation
+            )
         if sent and self._landing_target_started_at is None:
             self._landing_target_started_at = now
 
