@@ -30,7 +30,8 @@ def test_load_simple_circle_mission():
     assert mission.circle_radius_m == 3.0
     assert mission.circle_laps == 1.0
     assert (mission.dock_x_m, mission.dock_y_m) == (10.0, 0.0)
-    assert mission.hover_altitude_m == 5.0
+    assert mission.hover_altitude_m == 4.0
+    assert mission.dock_surface_z_m == pytest.approx(0.88)
     assert mission.precision_landing_enabled is True
 
 

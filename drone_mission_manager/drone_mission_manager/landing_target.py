@@ -3,17 +3,20 @@
 import math
 import socket
 import struct
-from typing import Optional, Tuple
+from collections import deque
+from typing import Deque, List, Optional, Tuple
 
 
 MAVLINK2_MAGIC = 0xFD
 MAVLINK1_MAGIC = 0xFE
 MAVLINK_MSG_ID_COMMAND_LONG = 76
 MAVLINK_MSG_ID_COMMAND_LONG_CRC = 152
+MAVLINK_MSG_ID_COMMAND_ACK = 77
 MAVLINK_MSG_ID_LANDING_TARGET = 149
 MAVLINK_MSG_ID_LANDING_TARGET_CRC = 200
 MAV_FRAME_BODY_FRD = 12
 MAV_CMD_CONDITION_YAW = 115
+MAV_CMD_DO_AUX_FUNCTION = 218
 LANDING_TARGET_TYPE_FIDUCIAL = 2
 ARDUPILOT_SYSTEM_ID = 1
 ARDUPILOT_COMPONENT_ID = 1
@@ -82,6 +85,33 @@ def camera_dock_orientation_to_body_yaw_error(
         dock_forward_body_right,
         dock_forward_body_forward,
     )
+
+
+def ros_enu_quaternion_to_mavlink_heading_deg(
+    quaternion_x: float,
+    quaternion_y: float,
+    quaternion_z: float,
+    quaternion_w: float,
+) -> float:
+    """Convert a ROS ENU attitude quaternion to clockwise NED heading."""
+    norm = math.sqrt(
+        quaternion_x**2
+        + quaternion_y**2
+        + quaternion_z**2
+        + quaternion_w**2
+    )
+    if norm <= 1.0e-9:
+        raise ValueError("vehicle orientation quaternion has zero length")
+    x = quaternion_x / norm
+    y = quaternion_y / norm
+    z = quaternion_z / norm
+    w = quaternion_w / norm
+    yaw_enu_rad = math.atan2(
+        2.0 * (w * z + x * y),
+        1.0 - 2.0 * (y * y + z * z),
+    )
+    heading_deg = math.degrees(math.pi / 2.0 - yaw_enu_rad) % 360.0
+    return 0.0 if heading_deg >= 360.0 - 1.0e-9 else heading_deg
 
 
 def _x25_crc(data: bytes, extra: int) -> int:
@@ -153,25 +183,18 @@ def encode_landing_target(
     )
 
 
-def encode_condition_yaw(
+def _encode_command_long(
     *,
     sequence: int,
     source_system: int,
     source_component: int,
-    yaw_error_rad: float,
+    params: Tuple[float, float, float, float, float, float, float],
+    command: int,
 ) -> bytes:
-    """Encode a relative MAV_CMD_CONDITION_YAW in a MAVLink 2 COMMAND_LONG."""
-    direction = 1.0 if yaw_error_rad >= 0.0 else -1.0
     payload = struct.pack(
         "<7fHBB",
-        abs(math.degrees(yaw_error_rad)),  # relative yaw angle
-        0.0,  # use ArduPilot's default yaw slew rate
-        direction,
-        1.0,  # relative to the current vehicle heading
-        0.0,
-        0.0,
-        0.0,
-        MAV_CMD_CONDITION_YAW,
+        *params,
+        command,
         ARDUPILOT_SYSTEM_ID,
         ARDUPILOT_COMPONENT_ID,
     )
@@ -195,6 +218,119 @@ def encode_condition_yaw(
     )
 
 
+def encode_condition_yaw(
+    *,
+    sequence: int,
+    source_system: int,
+    source_component: int,
+    yaw_error_rad: float,
+) -> bytes:
+    """Encode a relative MAV_CMD_CONDITION_YAW in a MAVLink 2 COMMAND_LONG."""
+    direction = 1.0 if yaw_error_rad >= 0.0 else -1.0
+    return _encode_command_long(
+        sequence=sequence,
+        source_system=source_system,
+        source_component=source_component,
+        params=(
+            abs(math.degrees(yaw_error_rad)),
+            0.0,
+            direction,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        ),
+        command=MAV_CMD_CONDITION_YAW,
+    )
+
+
+def encode_condition_yaw_absolute(
+    *,
+    sequence: int,
+    source_system: int,
+    source_component: int,
+    heading_deg: float,
+    yaw_rate_deg_s: float,
+) -> bytes:
+    """Encode an idempotent absolute-heading MAV_CMD_CONDITION_YAW."""
+    if not 0.0 <= heading_deg <= 360.0:
+        raise ValueError("heading_deg must be in [0, 360]")
+    if yaw_rate_deg_s <= 0.0:
+        raise ValueError("yaw_rate_deg_s must be positive")
+    return _encode_command_long(
+        sequence=sequence,
+        source_system=source_system,
+        source_component=source_component,
+        params=(heading_deg, yaw_rate_deg_s, 0.0, 0.0, 0.0, 0.0, 0.0),
+        command=MAV_CMD_CONDITION_YAW,
+    )
+
+
+def encode_aux_function(
+    *,
+    sequence: int,
+    source_system: int,
+    source_component: int,
+    function: int,
+    switch_position: int,
+) -> bytes:
+    """Encode MAV_CMD_DO_AUX_FUNCTION for a three-position auxiliary input."""
+    if switch_position not in (0, 1, 2):
+        raise ValueError("switch_position must be LOW=0, MIDDLE=1, or HIGH=2")
+    return _encode_command_long(
+        sequence=sequence,
+        source_system=source_system,
+        source_component=source_component,
+        params=(
+            float(function),
+            float(switch_position),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ),
+        command=MAV_CMD_DO_AUX_FUNCTION,
+    )
+
+
+def decode_command_acks(datagram: bytes) -> List[Tuple[int, int]]:
+    """Extract command/result pairs from MAVLink 1 or 2 datagrams."""
+    acknowledgements: List[Tuple[int, int]] = []
+    offset = 0
+    while offset < len(datagram):
+        magic = datagram[offset]
+        if magic == MAVLINK2_MAGIC and offset + 10 <= len(datagram):
+            payload_size = datagram[offset + 1]
+            incompatibility_flags = datagram[offset + 2]
+            message_id = (
+                datagram[offset + 7]
+                | datagram[offset + 8] << 8
+                | datagram[offset + 9] << 16
+            )
+            payload_offset = offset + 10
+            frame_size = 10 + payload_size + 2
+            if incompatibility_flags & 0x01:
+                frame_size += 13
+        elif magic == MAVLINK1_MAGIC and offset + 6 <= len(datagram):
+            payload_size = datagram[offset + 1]
+            message_id = datagram[offset + 5]
+            payload_offset = offset + 6
+            frame_size = 6 + payload_size + 2
+        else:
+            offset += 1
+            continue
+        if offset + frame_size > len(datagram):
+            break
+        if message_id == MAVLINK_MSG_ID_COMMAND_ACK and payload_size >= 3:
+            command, result = struct.unpack_from(
+                "<HB", datagram, payload_offset
+            )
+            acknowledgements.append((command, result))
+        offset += frame_size
+    return acknowledgements
+
+
 class MavlinkLandingTargetSender:
     """Send LANDING_TARGET back through a MAVProxy UDP output connection."""
 
@@ -213,6 +349,7 @@ class MavlinkLandingTargetSender:
         self._source_component = source_component
         self._sequence = 0
         self._peer: Optional[Tuple[str, int]] = None
+        self._command_acks: Deque[Tuple[int, int]] = deque()
 
     @property
     def connected(self) -> bool:
@@ -228,6 +365,15 @@ class MavlinkLandingTargetSender:
                 return
             if data and data[0] in (MAVLINK1_MAGIC, MAVLINK2_MAGIC):
                 self._peer = peer
+                self._command_acks.extend(decode_command_acks(data))
+
+    def take_command_ack(self, command: int) -> Optional[int]:
+        """Consume and return the oldest acknowledgement for *command*."""
+        for acknowledgement in tuple(self._command_acks):
+            if acknowledgement[0] == command:
+                self._command_acks.remove(acknowledgement)
+                return acknowledgement[1]
+        return None
 
     def send(
         self,
@@ -264,6 +410,42 @@ class MavlinkLandingTargetSender:
             source_system=self._source_system,
             source_component=self._source_component,
             yaw_error_rad=yaw_error_rad,
+        )
+        self._socket.sendto(packet, self._peer)
+        self._sequence = (self._sequence + 1) & 0xFF
+        return True
+
+    def send_condition_yaw_absolute(
+        self, *, heading_deg: float, yaw_rate_deg_s: float
+    ) -> bool:
+        """Send an absolute heading target that is safe to retry."""
+        self.poll()
+        if self._peer is None:
+            return False
+        packet = encode_condition_yaw_absolute(
+            sequence=self._sequence,
+            source_system=self._source_system,
+            source_component=self._source_component,
+            heading_deg=heading_deg,
+            yaw_rate_deg_s=yaw_rate_deg_s,
+        )
+        self._socket.sendto(packet, self._peer)
+        self._sequence = (self._sequence + 1) & 0xFF
+        return True
+
+    def send_aux_function(
+        self, *, function: int, switch_position: int
+    ) -> bool:
+        """Set an ArduPilot auxiliary function switch position."""
+        self.poll()
+        if self._peer is None:
+            return False
+        packet = encode_aux_function(
+            sequence=self._sequence,
+            source_system=self._source_system,
+            source_component=self._source_component,
+            function=function,
+            switch_position=switch_position,
         )
         self._socket.sendto(packet, self._peer)
         self._sequence = (self._sequence + 1) & 0xFF

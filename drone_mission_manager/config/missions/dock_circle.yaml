@@ -21,6 +21,8 @@ mission:
   return:
     dock_x_m: 0.0
     dock_y_m: 0.0
+    # This mission arms on the dock, so the landing surface is home altitude.
+    dock_surface_z_m: 0.0
     hover_altitude_m: 4.0
 
   precision_landing:

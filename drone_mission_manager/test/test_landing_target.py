@@ -1,15 +1,20 @@
 """Tests for native ArduPilot precision-landing message generation."""
 
 import math
+import struct
 
 import pytest
 
 from drone_mission_manager.landing_target import (
     camera_dock_orientation_to_body_yaw_error,
     camera_target_to_body_frd,
+    decode_command_acks,
+    encode_aux_function,
     encode_condition_yaw,
+    encode_condition_yaw_absolute,
     encode_landing_target,
     measurement_time_usec,
+    ros_enu_quaternion_to_mavlink_heading_deg,
 )
 
 
@@ -94,3 +99,58 @@ def test_condition_yaw_encodes_relative_right_turn():
         "fd20000008febf4c00000000f041000000000000803f0000803f00000000"
         "000000000000000073000101b464"
     )
+
+
+def test_absolute_condition_yaw_encodes_heading_and_rate():
+    """An absolute command can be retried without accumulating rotation."""
+    packet = encode_condition_yaw_absolute(
+        sequence=9,
+        source_system=254,
+        source_component=191,
+        heading_deg=120.0,
+        yaw_rate_deg_s=5.0,
+    )
+
+    params = struct.unpack_from("<7fHBB", packet, 10)
+    assert params[:4] == pytest.approx((120.0, 5.0, 0.0, 0.0))
+    assert params[7:] == (115, 1, 1)
+
+
+def test_aux_function_encodes_precision_loiter_high():
+    """Auxiliary function 39 HIGH enables ArduPilot Precision Loiter."""
+    packet = encode_aux_function(
+        sequence=10,
+        source_system=254,
+        source_component=191,
+        function=39,
+        switch_position=2,
+    )
+
+    params = struct.unpack_from("<7fHBB", packet, 10)
+    assert params[:2] == pytest.approx((39.0, 2.0))
+    assert params[7:] == (218, 1, 1)
+
+
+def test_command_ack_decoder_finds_mavlink2_ack():
+    """The sender can confirm autonomous yaw and auxiliary commands."""
+    payload = struct.pack("<HBBiBB", 218, 0, 100, 0, 254, 191)
+    header = bytes((len(payload), 0, 0, 7, 1, 1, 77, 0, 0))
+    datagram = bytes((0xFD,)) + header + payload + b"\x00\x00"
+
+    assert decode_command_acks(datagram) == [(218, 0)]
+
+
+@pytest.mark.parametrize(
+    ("quaternion", "expected_heading_deg"),
+    [
+        ((0.0, 0.0, 0.0, 1.0), 90.0),
+        ((0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)), 0.0),
+        ((0.0, 0.0, -math.sqrt(0.5), math.sqrt(0.5)), 180.0),
+    ],
+)
+def test_ros_enu_yaw_converts_to_mavlink_heading(
+    quaternion, expected_heading_deg
+):
+    heading = ros_enu_quaternion_to_mavlink_heading_deg(*quaternion)
+
+    assert heading == pytest.approx(expected_heading_deg)

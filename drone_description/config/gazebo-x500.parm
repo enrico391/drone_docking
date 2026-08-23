@@ -19,3 +19,9 @@ PLND_XY_DIST_MAX    0.25
 
 # change max speed at which the drone can discend
 LAND_SPD_MS         0.25
+
+# No rangefinder is installed. Disable the PrecLand sensor-height range so
+# target loss is not misclassified as out-of-range; the mission manager uses
+# the FCU local-height estimate and its 0.35 s ROS target timeout instead.
+PLND_ALT_MIN         0
+PLND_ALT_MAX         0

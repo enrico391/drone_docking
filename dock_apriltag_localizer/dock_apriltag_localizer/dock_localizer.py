@@ -169,6 +169,9 @@ class DockLocalizer(Node):
 
         self.pose_pub = self.create_publisher(PoseStamped, '/dock/pose', 10)
         self.mode_pub = self.create_publisher(String, '/dock/mode', 10)
+        self.filter_status_pub = self.create_publisher(
+            String, '/dock/filter_status', 10
+        )
         self.ids_pub = self.create_publisher(Int32MultiArray, '/dock/visible_tag_ids', 10)
         self.debug_pub = None
         if self.get_parameter('publish_debug_image').value:
@@ -343,7 +346,7 @@ class DockLocalizer(Node):
             return central_pose, 'CENTRAL_ACQUIRING'
         return None, 'NO_TARGET'
 
-    def _publish_pose(self, T, header, mode):
+    def _publish_pose(self, T, header):
         frame_id = header.frame_id or self.camera_frame or 'camera_optical_frame'
         stamp = header.stamp
         q = rot_to_quat(T[:3, :3])
@@ -366,10 +369,6 @@ class DockLocalizer(Node):
         tf.transform.translation.z = pose.pose.position.z
         tf.transform.rotation = pose.pose.orientation
         self.tf_broadcaster.sendTransform(tf)
-
-        m = String()
-        m.data = mode
-        self.mode_pub.publish(m)
 
     def _draw_debug(self, image, candidates, mode):
         for c in candidates:
@@ -410,28 +409,34 @@ class DockLocalizer(Node):
         self.ids_pub.publish(ids_msg)
 
         T, mode = self._select_pose(candidates)
+        filter_status = 'no_target'
+        filtered_T = None
         if T is not None:
             stamp_s = (
                 float(msg.header.stamp.sec)
                 + float(msg.header.stamp.nanosec) * 1.0e-9
             )
             filtered_T, filter_status = self.pose_filter.update(T, stamp_s)
-            if filtered_T is not None:
-                self._publish_pose(filtered_T, msg.header, mode)
-            else:
+            if filtered_T is None:
                 self.get_logger().warning(
                     'Rejecting dock pose: '
                     f'{filter_status}; raw position='
                     f'({T[0, 3]:.2f}, {T[1, 3]:.2f}, {T[2, 3]:.2f}) m',
                     throttle_duration_sec=1.0,
                 )
-                m = String()
-                m.data = mode
-                self.mode_pub.publish(m)
-        else:
-            m = String()
-            m.data = mode
-            self.mode_pub.publish(m)
+
+        status_message = String()
+        status_message.data = filter_status
+        self.filter_status_pub.publish(status_message)
+
+        mode_message = String()
+        mode_message.data = mode
+        self.mode_pub.publish(mode_message)
+
+        if T is not None and filtered_T is not None:
+            # Publish metadata first so consumers invalidate old evidence
+            # before accepting a pose from a changed source/filter epoch.
+            self._publish_pose(filtered_T, msg.header)
 
         if self.debug_pub is not None:
             dbg = self._draw_debug(bgr, candidates, mode)

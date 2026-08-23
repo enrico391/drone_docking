@@ -74,22 +74,35 @@ to MAVLink Body-FRD and checks for new measurements at the mission update rate
 (10 Hz by default). Each accepted filtered pose is sent at most once through
 MAVProxy's dedicated UDP endpoint on port 14551, using the source image
 timestamp; timer ticks no longer turn a stale pose into a new measurement.
-After a one-second measurement warmup it enters LAND; ArduPilot then owns both
-horizontal correction and descent. The X500 defaults set `PLND_ENABLED=1` and
-`PLND_TYPE=1`, and the mission checks those live values before arming.
+Advancement requires a continuous one-second stream at 5 Hz or faster, no gap
+over 0.25 s, pose age below 0.35 s, and horizontal error below 0.5 m.
 
-After LAND mode is confirmed, the native backend also calculates the signed
-drone-to-dock yaw error from `/dock/pose` and sends one relative
-`MAV_CMD_CONDITION_YAW` in a MAVLink `COMMAND_LONG`. ArduPilot converts this
-into a persistent heading target, so its closed-loop yaw controller rejects
-disturbances such as wind and returns the vehicle to the commanded heading; it
-is not a one-time yaw-rate impulse. One command is appropriate while the dock
-orientation is fixed and the initial visual measurement is reliable. It does
-not track a dock that rotates after the command or correct a bad initial visual
-estimate. Supporting those cases would require filtered periodic updates with
-a deadband, preferably using absolute heading targets to avoid accumulating
-relative corrections. The mission log records the yaw error used by the
-command.
+The native sequence then performs these autonomous stages:
+
+1. hold the coarse hover in GUIDED and align yaw from a stable OUTER estimate;
+2. enter LOITER, enable Precision Loiter through auxiliary function 39, and
+   require X/Y below 0.15 m plus yaw below 5 degrees for 1.5 s;
+3. switch directly from LOITER to LAND, with no ROS velocity commands;
+4. optionally send bounded absolute-heading corrections at the debounced 3 m
+   and 2 m height checkpoints; and
+5. validate a stable CENTRAL target at 1 m, then lock yaw for the final metre.
+
+The checkpoint height is the flight controller's filtered local Z minus the
+mission's `return.dock_surface_z_m`; no rangefinder is required. The X500
+defaults therefore set `PLND_ALT_MIN=0` and `PLND_ALT_MAX=0`, and the manager
+checks these values along with `PLND_ENABLED=1`, `PLND_TYPE=1`, and
+`PLND_EST_TYPE=0` before arming. `PLND_XY_DIST_MAX=0.25` and
+`LAND_SPD_MS=0.25` are checked as recommended tuning values.
+
+Source changes and filter initialization, gap reset, or reacquisition clear all
+accumulated stream/yaw stability. Above the low-clearance final region, a dock
+pose older than 0.35 s exits LAND, disables Precision Loiter, holds LOITER,
+reacquires, realigns in GUIDED, and repeats pre-alignment before restarting
+LAND. The default final target-loss policy is `continue`: it sends no stale
+target and adds no yaw command near touchdown. Set
+`landing_final_target_loss_action: retry` only when the dock has enough safe
+clearance for a low-altitude retry. The same choice is exposed as the
+`landing_final_target_loss_action:=continue|retry` launch argument.
 
 Landing completion is event-driven. While ArduPilot reports `flying=true`, the
 mission remains in `WAIT_LANDED` and continues the `LANDING_TARGET` stream. A
@@ -146,8 +159,8 @@ The two accepted launch values are:
   ArduPilot precision landing performs the complete descent in LAND mode.
 
 Set `landing_yaw_correction_enabled:=false` to keep the vehicle's existing
-heading during ArduPilot precision landing. It defaults to `true` to preserve
-the original dock-relative yaw correction.
+heading. It defaults to `true` for GUIDED pre-alignment and the bounded 3 m/2 m
+checkpoints; yaw is never commanded in the final metre.
 
 The localizer filter defaults can be tuned from this launch file with
 `pose_filter_time_constant_s`, `pose_filter_max_translation_speed_m_s`,
@@ -169,6 +182,7 @@ Useful visual-localization diagnostics are:
 ```bash
 ros2 topic echo /dock/mode
 ros2 topic echo /dock/pose
+ros2 topic echo /dock/filter_status
 ros2 topic hz /dock/debug_image
 ```
 

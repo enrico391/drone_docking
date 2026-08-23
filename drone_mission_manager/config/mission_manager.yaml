@@ -14,7 +14,7 @@ mission_manager:
 
     # Visual landing controller. Dock offsets arrive in the downward camera's
     # optical frame and are converted to body-frame velocity commands.
-    dock_pose_timeout_s: 0.5
+    dock_pose_timeout_s: 0.35
     dock_acquire_timeout_s: 20.0
     dock_horizontal_gain: 0.7
     dock_max_horizontal_speed_m_s: 0.5
@@ -31,10 +31,44 @@ mission_manager:
 
     # Landing implementation selected by the launch argument: "ros" keeps
     # alignment/descent in this node; "ardupilot" sends MAVLink
-    # LANDING_TARGET and switches to LAND after the stream is stable.
+    # LANDING_TARGET, performs GUIDED yaw alignment and Precision Loiter X/Y
+    # pre-alignment, then hands descent to native precision LAND.
     landing_backend: ros
     landing_yaw_correction_enabled: true
     landing_target_warmup_s: 1.0
+    landing_target_min_rate_hz: 5.0
+    landing_target_max_gap_s: 0.25
+    landing_coarse_horizontal_tolerance_m: 0.50
+    landing_yaw_window_s: 1.0
+    landing_yaw_jitter_max_deg: 3.0
+    landing_initial_yaw_rate_deg_s: 7.5
+    landing_initial_yaw_tolerance_deg: 5.0
+    landing_initial_yaw_stable_time_s: 1.0
+    precision_loiter_horizontal_tolerance_m: 0.15
+    precision_loiter_stable_time_s: 1.5
+    precision_loiter_yaw_realign_time_s: 0.5
+    landing_central_stable_time_s: 0.75
+    landing_reacquisition_quiet_time_s: 1.0
+    landing_checkpoint_confirm_time_s: 0.15
+    landing_yaw_3m_threshold_deg: 8.0
+    landing_yaw_3m_max_correction_deg: 15.0
+    landing_yaw_3m_rate_deg_s: 5.0
+    landing_yaw_3m_horizontal_max_m: 0.20
+    landing_yaw_2m_threshold_deg: 6.0
+    landing_yaw_2m_max_correction_deg: 10.0
+    landing_yaw_2m_rate_deg_s: 5.0
+    landing_yaw_2m_horizontal_max_m: 0.15
+    landing_yaw_hard_limit_deg: 15.0
+    landing_validation_yaw_max_deg: 8.0
+    landing_validation_horizontal_max_m: 0.15
+    landing_height_timeout_s: 0.35
+    landing_descent_speed_m_s: 0.25
+    landing_final_yaw_clearance_margin_m: 0.20
+    # "continue" avoids aggressive recovery below the low-clearance boundary;
+    # "retry" exits LAND even in that region.
+    landing_final_target_loss_action: continue
+    mavlink_command_timeout_s: 3.0
+    mavlink_command_retry_s: 0.5
     landing_target_bind_address: 0.0.0.0
     landing_target_udp_port: 14551
     landing_target_source_system: 254
@@ -54,3 +88,4 @@ mission_manager:
     velocity_topic: /ap/v1/cmd_vel
     dock_pose_topic: /dock/pose
     dock_mode_topic: /dock/mode
+    dock_filter_status_topic: /dock/filter_status

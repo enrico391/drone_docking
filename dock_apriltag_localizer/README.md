@@ -115,6 +115,10 @@ ros2 launch dock_apriltag_localizer \
   optical frame. Its timestamp remains the source image acquisition time.
 - TF: `camera_frame -> dock_target`
 - `/dock/mode`: `OUTER`, `CENTRAL_ACQUIRING`, `CENTRAL`, or `NO_TARGET`.
+- `/dock/filter_status`: filter result for each image (`accepted`,
+  `initialized`, `reset_after_gap`, `outlier_rejected`, `reacquired`, or
+  `no_target`). Consumers use reset/reacquisition states to invalidate old
+  stability evidence before accepting the next pose.
 - `/dock/visible_tag_ids`
 - `/dock/debug_image`
 

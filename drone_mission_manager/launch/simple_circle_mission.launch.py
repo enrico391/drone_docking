@@ -14,7 +14,9 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description() -> LaunchDescription:
     package_share = Path(get_package_share_directory("drone_mission_manager"))
-    default_mission = package_share / "config" / "missions" / "simple_circle.yaml"
+    default_mission = (
+        package_share / "config" / "missions" / "simple_circle.yaml"
+    )
     default_parameters = package_share / "config" / "mission_manager.yaml"
     localizer_share = Path(
         get_package_share_directory("dock_apriltag_localizer")
@@ -74,12 +76,23 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="true",
                 choices=["true", "false"],
                 description=(
-                    "Send one dock-relative yaw correction after entering "
-                    "ArduPilot LAND mode."
+                    "Enable stable GUIDED yaw alignment and bounded 3m/2m "
+                    "yaw checkpoints for ArduPilot native landing."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "landing_final_target_loss_action",
+                default_value="continue",
+                choices=["continue", "retry"],
+                description=(
+                    "Continue a low-clearance touchdown without stale visual "
+                    "data, or force a LOITER/GUIDED landing retry."
                 ),
             ),
             DeclareLaunchArgument("start_localizer", default_value="true"),
-            DeclareLaunchArgument("image_topic", default_value="/camera/image_raw"),
+            DeclareLaunchArgument(
+                "image_topic", default_value="/camera/image_raw"
+            ),
             DeclareLaunchArgument(
                 "camera_info_topic", default_value="/camera/camera_info"
             ),
@@ -121,6 +134,11 @@ def generate_launch_description() -> LaunchDescription:
                                 "landing_yaw_correction_enabled"
                             ),
                             value_type=bool,
+                        ),
+                        "landing_final_target_loss_action": (
+                            LaunchConfiguration(
+                                "landing_final_target_loss_action"
+                            )
                         ),
                     },
                 ],

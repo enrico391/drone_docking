@@ -44,6 +44,9 @@ def create_mission_manager(context: LaunchContext, package_share: Path):
                         ),
                         value_type=bool,
                     ),
+                    "landing_final_target_loss_action": LaunchConfiguration(
+                        "landing_final_target_loss_action"
+                    ),
                 },
             ],
         )
@@ -119,8 +122,17 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="true",
                 choices=["true", "false"],
                 description=(
-                    "Send one dock-relative yaw correction after entering "
-                    "ArduPilot LAND mode."
+                    "Enable stable GUIDED yaw alignment and bounded 3m/2m "
+                    "yaw checkpoints for ArduPilot native landing."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "landing_final_target_loss_action",
+                default_value="continue",
+                choices=["continue", "retry"],
+                description=(
+                    "Continue a low-clearance touchdown without stale visual "
+                    "data, or force a LOITER/GUIDED landing retry."
                 ),
             ),
             DeclareLaunchArgument("start_localizer", default_value="true"),

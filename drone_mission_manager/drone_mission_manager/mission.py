@@ -38,6 +38,7 @@ class CircleMission:
     circle_clockwise: bool
     dock_x_m: float
     dock_y_m: float
+    dock_surface_z_m: float
     hover_altitude_m: float
     precision_landing_enabled: bool
     repeat_count: int
@@ -68,6 +69,15 @@ def _mapping(
 
 def _number(parent: Dict[str, Any], key: str, path: str) -> float:
     value = parent.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{path}.{key} must be a number")
+    return float(value)
+
+
+def _optional_number(
+    parent: Dict[str, Any], key: str, path: str, default: float
+) -> float:
+    value = parent.get(key, default)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{path}.{key} must be a number")
     return float(value)
@@ -124,6 +134,12 @@ def _common_fields(mission: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "dock_x_m": _number(mission_return, "dock_x_m", "mission.return"),
         "dock_y_m": _number(mission_return, "dock_y_m", "mission.return"),
+        "dock_surface_z_m": _optional_number(
+            mission_return,
+            "dock_surface_z_m",
+            "mission.return",
+            0.0,
+        ),
         "hover_altitude_m": _number(
             mission_return, "hover_altitude_m", "mission.return"
         ),
