@@ -2,23 +2,18 @@
 
 import math
 import time
+from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import rclpy
-from ardupilot_msgs.msg import Status
-from ardupilot_msgs.srv import ArmMotors, ModeSwitch, Takeoff
-from geometry_msgs.msg import PoseStamped, TwistStamped
-from rcl_interfaces.msg import ParameterType
-from rcl_interfaces.srv import GetParameters
+from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
 
 from .control import camera_offset_to_body_velocity
 from .landing_target import (
-    MavlinkLandingTargetSender,
     camera_dock_orientation_to_body_yaw_error,
     camera_target_to_body_frd,
     measurement_time_usec,
@@ -29,10 +24,35 @@ from .landing_wait import (
     touchdown_wait_action,
 )
 from .mission import CircleMission, load_mission
+from .pymavlink_vehicle import MavlinkVehicle, VelocityFrame
 
 
 GUIDED_MODE = 4
 LAND_MODE = 9
+
+
+@dataclass(frozen=True)
+class _VehicleStatusView:
+    """Status fields consumed by the unchanged landing state machine."""
+
+    armed: bool
+    flying: bool
+
+
+def create_mavlink_vehicle(node: Node) -> MavlinkVehicle:
+    """Construct the direct flight-controller transport from ROS parameters."""
+    return MavlinkVehicle(
+        connection=str(node.get_parameter("mavlink_connection").value),
+        baud=int(node.get_parameter("mavlink_baud").value),
+        target_system=int(node.get_parameter("mavlink_target_system").value),
+        target_component=int(
+            node.get_parameter("mavlink_target_component").value
+        ),
+        source_system=int(node.get_parameter("mavlink_source_system").value),
+        source_component=int(
+            node.get_parameter("mavlink_source_component").value
+        ),
+    )
 
 
 class MissionState(Enum):
@@ -65,8 +85,12 @@ class MissionState(Enum):
 class MissionManager(Node):
     """Execute one configured simulation mission without blocking callbacks."""
 
-    def __init__(self) -> None:
-        super().__init__("mission_manager")
+    def __init__(
+        self,
+        vehicle_factory: Optional[Callable[[Node], MavlinkVehicle]] = None,
+        **node_kwargs,
+    ) -> None:
+        super().__init__("mission_manager", **node_kwargs)
         self.declare_parameter("mission_file", "")
         self.declare_parameter("auto_start", False)
         self.declare_parameter("update_rate_hz", 10.0)
@@ -76,7 +100,7 @@ class MissionManager(Node):
         self.declare_parameter("position_tolerance_m", 0.35)
         self.declare_parameter("altitude_tolerance_m", 0.25)
         self.declare_parameter("pose_timeout_s", 1.0)
-        self.declare_parameter("service_timeout_s", 10.0)
+        self.declare_parameter("mavlink_operation_timeout_s", 10.0)
         self.declare_parameter("prearm_timeout_s", 60.0)
         self.declare_parameter("prearm_retry_period_s", 1.0)
         self.declare_parameter("dock_pose_timeout_s", 0.5)
@@ -95,25 +119,16 @@ class MissionManager(Node):
         self.declare_parameter("landing_backend", "ros")
         self.declare_parameter("landing_yaw_correction_enabled", True)
         self.declare_parameter("landing_target_warmup_s", 1.0)
-        self.declare_parameter("landing_target_bind_address", "0.0.0.0")
-        self.declare_parameter("landing_target_udp_port", 14551)
-        self.declare_parameter("landing_target_source_system", 254)
-        self.declare_parameter("landing_target_source_component", 191)
         self.declare_parameter("landing_target_camera_forward_m", 0.0)
         self.declare_parameter("landing_target_camera_right_m", 0.0)
         self.declare_parameter("landing_target_camera_down_m", 0.19)
-        self.declare_parameter("prearm_service", "/ap/v1/prearm_check")
-        self.declare_parameter("mode_service", "/ap/v1/mode_switch")
-        self.declare_parameter("arm_service", "/ap/v1/arm_motors")
-        self.declare_parameter(
-            "takeoff_service", "/ap/v1/experimental/takeoff"
-        )
-        self.declare_parameter(
-            "get_parameters_service", "/ap/v1/get_parameters"
-        )
-        self.declare_parameter("pose_topic", "/ap/v1/pose/filtered")
-        self.declare_parameter("status_topic", "/ap/v1/status")
-        self.declare_parameter("velocity_topic", "/ap/v1/cmd_vel")
+        self.declare_parameter("mavlink_connection", "tcp:127.0.0.1:5760")
+        self.declare_parameter("mavlink_baud", 921600)
+        self.declare_parameter("mavlink_target_system", 1)
+        self.declare_parameter("mavlink_target_component", 1)
+        self.declare_parameter("mavlink_source_system", 254)
+        self.declare_parameter("mavlink_source_component", 191)
+        self.declare_parameter("mavlink_heartbeat_timeout_s", 2.5)
         self.declare_parameter("dock_pose_topic", "/dock/pose")
         self.declare_parameter("dock_mode_topic", "/dock/mode")
 
@@ -129,18 +144,6 @@ class MissionManager(Node):
             durability=DurabilityPolicy.VOLATILE,
             depth=5,
         )
-        self._pose_subscription = self.create_subscription(
-            PoseStamped,
-            str(self.get_parameter("pose_topic").value),
-            self._pose_callback,
-            sensor_qos,
-        )
-        self._status_subscription = self.create_subscription(
-            Status,
-            str(self.get_parameter("status_topic").value),
-            self._status_callback,
-            sensor_qos,
-        )
         self._dock_pose_subscription = self.create_subscription(
             PoseStamped,
             str(self.get_parameter("dock_pose_topic").value),
@@ -153,11 +156,6 @@ class MissionManager(Node):
             self._dock_mode_callback,
             sensor_qos,
         )
-        self._velocity_publisher = self.create_publisher(
-            TwistStamped,
-            str(self.get_parameter("velocity_topic").value),
-            sensor_qos,
-        )
         state_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -167,56 +165,13 @@ class MissionManager(Node):
             String, "~/state", state_qos
         )
 
-        self._prearm_client = self.create_client(
-            Trigger, str(self.get_parameter("prearm_service").value)
-        )
-        self._mode_client = self.create_client(
-            ModeSwitch, str(self.get_parameter("mode_service").value)
-        )
-        self._arm_client = self.create_client(
-            ArmMotors, str(self.get_parameter("arm_service").value)
-        )
-        self._takeoff_client = self.create_client(
-            Takeoff, str(self.get_parameter("takeoff_service").value)
-        )
-        self._get_parameters_client = self.create_client(
-            GetParameters,
-            str(self.get_parameter("get_parameters_service").value),
-        )
-
-        self._landing_target_sender = None
-        if self._landing_backend == "ardupilot":
-            try:
-                self._landing_target_sender = MavlinkLandingTargetSender(
-                    bind_address=str(
-                        self.get_parameter(
-                            "landing_target_bind_address"
-                        ).value
-                    ),
-                    port=int(
-                        self.get_parameter("landing_target_udp_port").value
-                    ),
-                    source_system=int(
-                        self.get_parameter(
-                            "landing_target_source_system"
-                        ).value
-                    ),
-                    source_component=int(
-                        self.get_parameter(
-                            "landing_target_source_component"
-                        ).value
-                    ),
-                )
-            except OSError as exception:
-                raise ValueError(
-                    "could not open MAVLink LANDING_TARGET UDP endpoint: "
-                    f"{exception}"
-                ) from exception
+        factory = vehicle_factory or create_mavlink_vehicle
+        self._vehicle = factory(self)
 
         self._pose: Optional[PoseStamped] = None
         self._pose_received_at = 0.0
         self._mission_origin: Optional[Tuple[float, float]] = None
-        self._status: Optional[Status] = None
+        self._status: Optional[_VehicleStatusView] = None
         self._has_seen_armed = False
         self._dock_pose: Optional[PoseStamped] = None
         self._dock_pose_received_at = 0.0
@@ -306,24 +261,31 @@ class MissionManager(Node):
             raise ValueError(
                 "landing_backend must be either 'ros' or 'ardupilot'"
             )
-        port = int(self.get_parameter("landing_target_udp_port").value)
-        if not 1 <= port <= 65535:
-            raise ValueError("landing_target_udp_port must be in [1, 65535]")
-        for name in (
-            "landing_target_source_system",
-            "landing_target_source_component",
+        heartbeat_timeout = float(
+            self.get_parameter("mavlink_heartbeat_timeout_s").value
+        )
+        if heartbeat_timeout <= 0.0:
+            raise ValueError("mavlink_heartbeat_timeout_s must be greater than zero")
+
+    def _sync_vehicle_state(self) -> None:
+        """Expose direct telemetry in the shapes used by existing states."""
+        state = self._vehicle.state
+        if (
+            state.position_enu_m is not None
+            and state.position_at >= self._pose_received_at
         ):
-            value = int(self.get_parameter(name).value)
-            if not 1 <= value <= 255:
-                raise ValueError(f"{name} must be in [1, 255]")
-
-    def _pose_callback(self, message: PoseStamped) -> None:
-        self._pose = message
-        self._pose_received_at = time.monotonic()
-
-    def _status_callback(self, message: Status) -> None:
-        self._status = message
-        self._has_seen_armed = self._has_seen_armed or message.armed
+            pose = PoseStamped()
+            pose.pose.position.x = state.position_enu_m[0]
+            pose.pose.position.y = state.position_enu_m[1]
+            pose.pose.position.z = state.position_enu_m[2]
+            self._pose = pose
+            self._pose_received_at = state.position_at
+        if state.armed is not None and state.flying is not None:
+            self._status = _VehicleStatusView(
+                armed=state.armed,
+                flying=state.flying,
+            )
+            self._has_seen_armed = self._has_seen_armed or state.armed
 
     def _dock_pose_callback(self, message: PoseStamped) -> None:
         self._dock_pose = message
@@ -354,18 +316,12 @@ class MissionManager(Node):
         message.data = self._state.name
         self._state_publisher.publish(message)
 
-    def _services_ready(self) -> bool:
-        clients = [
-            self._prearm_client,
-            self._mode_client,
-            self._arm_client,
-            self._takeoff_client,
-        ]
-        if self._landing_backend == "ardupilot":
-            clients.append(self._get_parameters_client)
-        return all(
-            client.service_is_ready()
-            for client in clients
+    def _vehicle_ready(self, now: float) -> bool:
+        return self._vehicle.ready(
+            now,
+            heartbeat_timeout_s=float(
+                self.get_parameter("mavlink_heartbeat_timeout_s").value
+            ),
         )
 
     def _pose_is_fresh(self, now: float) -> bool:
@@ -384,7 +340,9 @@ class MissionManager(Node):
     def _begin_call(self, name: str, future) -> None:
         self._pending_name = name
         self._pending = future
-        timeout = float(self.get_parameter("service_timeout_s").value)
+        timeout = float(
+            self.get_parameter("mavlink_operation_timeout_s").value
+        )
         self._pending_deadline = time.monotonic() + timeout
 
     def _fail(self, reason: str) -> None:
@@ -397,15 +355,17 @@ class MissionManager(Node):
         if self._pending is None:
             return False
         if now > self._pending_deadline:
-            self._fail(f"{self._pending_name} service call timed out")
+            self._fail(f"{self._pending_name} MAVLink operation timed out")
             return True
         if not self._pending.done():
             return True
 
         try:
             result = self._pending.result()
-        except Exception as exception:  # rclpy futures propagate service errors
-            self._fail(f"{self._pending_name} service call failed: {exception}")
+        except Exception as exception:
+            self._fail(
+                f"{self._pending_name} MAVLink operation failed: {exception}"
+            )
             return True
 
         name = self._pending_name
@@ -431,37 +391,30 @@ class MissionManager(Node):
             else:
                 self._set_state(MissionState.SET_GUIDED)
         elif name == "mode":
-            if not (result.status or result.curr_mode == GUIDED_MODE):
+            if not (
+                result.success or result.current_mode == GUIDED_MODE
+            ):
                 self._fail("ArduPilot rejected GUIDED mode")
             else:
                 self._set_state(MissionState.ARM)
         elif name == "arm":
-            if not result.result:
+            if not result.success:
                 self._fail("ArduPilot rejected the arm request")
             else:
                 self._set_state(MissionState.TAKEOFF)
         elif name == "takeoff":
-            if not result.status:
+            if not result.success:
                 self._fail("ArduPilot rejected the takeoff request")
             else:
                 self._set_state(MissionState.WAIT_TAKEOFF)
         elif name == "land_mode":
-            if not (result.status or result.curr_mode == LAND_MODE):
+            if not (result.success or result.current_mode == LAND_MODE):
                 self._fail("ArduPilot rejected LAND mode")
             else:
                 self._set_state(MissionState.WAIT_LANDED)
         elif name == "landing_config":
-            values = result.values
-            enabled = (
-                self._parameter_value_as_number(values[0])
-                if len(values) > 0
-                else None
-            )
-            backend = (
-                self._parameter_value_as_number(values[1])
-                if len(values) > 1
-                else None
-            )
+            enabled = result.parameters.get("PLND_ENABLED")
+            backend = result.parameters.get("PLND_TYPE")
             if enabled != 1.0 or backend != 1.0:
                 self._fail(
                     "ArduPilot native precision landing is not configured: "
@@ -472,18 +425,13 @@ class MissionManager(Node):
                 self._set_state(MissionState.PREARM)
         return True
 
-    @staticmethod
-    def _parameter_value_as_number(value) -> Optional[float]:
-        if value.type == ParameterType.PARAMETER_INTEGER:
-            return float(value.integer_value)
-        if value.type == ParameterType.PARAMETER_DOUBLE:
-            return float(value.double_value)
-        return None
-
     def _update(self) -> None:
         now = time.monotonic()
         dt = min(max(now - self._last_update_at, 0.0), 0.5)
         self._last_update_at = now
+
+        self._vehicle.poll(now)
+        self._sync_vehicle_state()
 
         # USED TO SEND DOCK POSE TO PRECISION LANDING VIA MAVLINK
         self._stream_native_landing_target(now)
@@ -500,7 +448,7 @@ class MissionManager(Node):
                 self._start_next_iteration(now)
             return
         if self._state == MissionState.WAITING_FOR_AP:
-            if self._services_ready() and self._pose_is_fresh(now):
+            if self._vehicle_ready(now) and self._pose_is_fresh(now):
                 if self._mission_origin is None:
                     position = self._pose.pose.position
                     self._mission_origin = (position.x, position.y)
@@ -518,38 +466,39 @@ class MissionManager(Node):
                 self._set_state(next_state)
             return
         if self._state == MissionState.CHECK_LANDING_CONFIG:
-            request = GetParameters.Request()
-            request.names = ["PLND_ENABLED", "PLND_TYPE"]
             self._begin_call(
                 "landing_config",
-                self._get_parameters_client.call_async(request),
+                self._vehicle.get_parameters_async(
+                    ("PLND_ENABLED", "PLND_TYPE"), now
+                ),
             )
             return
         if self._state == MissionState.PREARM:
             if now >= self._next_prearm_at:
                 self._begin_call(
-                    "prearm", self._prearm_client.call_async(Trigger.Request())
+                    "prearm", self._vehicle.prearm_async(now)
                 )
             return
         if self._state == MissionState.SET_GUIDED:
-            request = ModeSwitch.Request()
-            request.mode = GUIDED_MODE
-            self._begin_call("mode", self._mode_client.call_async(request))
+            self._begin_call(
+                "mode", self._vehicle.set_mode_async(GUIDED_MODE, now)
+            )
             return
         if self._state == MissionState.ARM:
-            request = ArmMotors.Request()
-            request.arm = True
-            self._begin_call("arm", self._arm_client.call_async(request))
+            self._begin_call("arm", self._vehicle.arm_async(True, now))
             return
         if self._state == MissionState.TAKEOFF:
-            request = Takeoff.Request()
-            request.alt = self._mission.takeoff_altitude_m
-            self._begin_call("takeoff", self._takeoff_client.call_async(request))
+            self._begin_call(
+                "takeoff",
+                self._vehicle.takeoff_async(
+                    self._mission.takeoff_altitude_m, now
+                ),
+            )
             return
         if self._state == MissionState.SET_LAND:
-            request = ModeSwitch.Request()
-            request.mode = LAND_MODE
-            self._begin_call("land_mode", self._mode_client.call_async(request))
+            self._begin_call(
+                "land_mode", self._vehicle.set_mode_async(LAND_MODE, now)
+            )
             return
         if self._state == MissionState.WAIT_LANDED:
             self._send_native_landing_yaw(now)
@@ -703,8 +652,8 @@ class MissionManager(Node):
                     and self._dock_target_is_fresh(now)
                 ):
                     reason = (
-                        "MAVProxy LANDING_TARGET endpoint did not become "
-                        "ready before timeout"
+                        "LANDING_TARGET stream did not become ready before "
+                        "timeout"
                     )
                 self._fail(reason)
             return
@@ -766,10 +715,8 @@ class MissionManager(Node):
         )
 
     def _stream_native_landing_target(self, now: float) -> None:
-        sender = self._landing_target_sender
-        if sender is None:
+        if self._landing_backend != "ardupilot":
             return
-        sender.poll()
         active_states = (
             MissionState.ACQUIRE_DOCK,
             MissionState.SET_LAND,
@@ -801,7 +748,7 @@ class MissionManager(Node):
                 self.get_parameter("landing_target_camera_down_m").value
             ),
         )
-        sent = sender.send(
+        sent = self._vehicle.send_landing_target(
             time_usec=measurement_time_usec(
                 stamp_sec=self._dock_pose.header.stamp.sec,
                 stamp_nanosec=self._dock_pose.header.stamp.nanosec,
@@ -834,10 +781,6 @@ class MissionManager(Node):
             or not self._dock_target_is_fresh(now)
         ):
             return
-        sender = self._landing_target_sender
-        if sender is None:
-            return
-
         orientation = self._dock_pose.pose.orientation
         try:
             yaw_error = camera_dock_orientation_to_body_yaw_error(
@@ -850,7 +793,7 @@ class MissionManager(Node):
             self.get_logger().warning(str(exception))
             return
 
-        if sender.send_condition_yaw(yaw_error_rad=yaw_error):
+        if self._vehicle.send_condition_yaw(yaw_error_rad=yaw_error):
             self._landing_yaw_command_sent = True
             self.get_logger().info(
                 "Sent MAV_CMD_CONDITION_YAW during ArduPilot LAND; "
@@ -1051,19 +994,24 @@ class MissionManager(Node):
         velocity_z: float,
         frame_id: str = "map",
     ) -> None:
-        command = TwistStamped()
-        command.header.stamp = self.get_clock().now().to_msg()
-        command.header.frame_id = frame_id
-        command.twist.linear.x = velocity_x
-        command.twist.linear.y = velocity_y
-        command.twist.linear.z = velocity_z
-        self._velocity_publisher.publish(command)
+        frame = (
+            VelocityFrame.BODY_FLU
+            if frame_id == "base_link"
+            else VelocityFrame.MAP_ENU
+        )
+        self._vehicle.send_velocity(
+            frame,
+            velocity_x,
+            velocity_y,
+            velocity_z,
+            now=time.monotonic(),
+        )
 
     def destroy_node(self):
-        """Release the optional MAVLink socket before destroying the node."""
-        if self._landing_target_sender is not None:
-            self._landing_target_sender.close()
-            self._landing_target_sender = None
+        """Stop direct commands and close the pymavlink connection."""
+        if getattr(self, "_vehicle", None) is not None:
+            self._vehicle.close()
+            self._vehicle = None
         return super().destroy_node()
 
 

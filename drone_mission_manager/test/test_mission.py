@@ -44,9 +44,9 @@ def test_load_dock_circle_mission_relative_to_initial_pose():
     assert (mission.circle_center_x_m, mission.circle_center_y_m) == (0.0, 0.0)
     assert mission.resolve_xy(0.0, 0.0, 12.0, -3.0) == (12.0, -3.0)
     assert mission.precision_landing_enabled is True
-    assert mission.repeat_count == 1
+    assert mission.repeat_count == 3
     assert mission.repeat_delay_s == 3.0
-    assert mission.has_next_iteration(1) is False
+    assert mission.has_next_iteration(1) is True
 
 
 def test_dock_circle_can_repeat_multiple_complete_cycles(tmp_path):
@@ -113,7 +113,7 @@ def test_rejects_zero_repeat_count(tmp_path):
     mission_file = tmp_path / "invalid_repeat.yaml"
     mission_file.write_text(
         DOCK_MISSION_FILE.read_text(encoding="utf-8").replace(
-            "count: 1", "count: 0"
+            "count: 3", "count: 0"
         ),
         encoding="utf-8",
     )

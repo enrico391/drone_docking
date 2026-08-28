@@ -38,6 +38,10 @@ def create_mission_manager(context: LaunchContext, package_share: Path):
                     "mission_file": mission_file,
                     "auto_start": LaunchConfiguration("auto_start"),
                     "landing_backend": LaunchConfiguration("landing_backend"),
+                    "mavlink_connection": LaunchConfiguration(
+                        "mavlink_connection"
+                    ),
+                    "mavlink_baud": LaunchConfiguration("mavlink_baud"),
                     "landing_yaw_correction_enabled": ParameterValue(
                         LaunchConfiguration(
                             "landing_yaw_correction_enabled"
@@ -105,6 +109,16 @@ def generate_launch_description() -> LaunchDescription:
                 ),
             ),
             DeclareLaunchArgument("auto_start", default_value="false"),
+            DeclareLaunchArgument(
+                "mavlink_connection",
+                default_value="tcp:127.0.0.1:5760",
+                description="Direct ArduPilot TCP or serial pymavlink endpoint.",
+            ),
+            DeclareLaunchArgument(
+                "mavlink_baud",
+                default_value="921600",
+                description="Baud rate used when mavlink_connection is serial.",
+            ),
             DeclareLaunchArgument(
                 "landing_backend",
                 default_value="ros",

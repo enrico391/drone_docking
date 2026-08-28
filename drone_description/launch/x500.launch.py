@@ -1,4 +1,4 @@
-"""Spawn the X500 and start the existing ArduPilot SITL/AP_DDS stack."""
+"""Spawn the X500 and start the configurable ArduPilot SITL stack."""
 
 import os
 import tempfile
@@ -29,7 +29,6 @@ def create_robot_actions(context: LaunchContext) -> List[IncludeLaunchDescriptio
         '<model name="x500_with_ardupilot">',
         f'<model name="{robot_name}">',
     )
-
     sim_address = LaunchConfiguration("sim_address").perform(context)
     robot_description = robot_description.replace(
         "<fdm_addr>127.0.0.1</fdm_addr>",
@@ -101,6 +100,7 @@ def create_robot_actions(context: LaunchContext) -> List[IncludeLaunchDescriptio
             "instance": LaunchConfiguration("instance"),
             "use_instance_dir": LaunchConfiguration("use_instance_dir"),
             "use_dds_agent": LaunchConfiguration("use_dds_agent"),
+            "use_mavproxy": LaunchConfiguration("use_mavproxy"),
             "use_gz_tf": LaunchConfiguration("use_gz_tf"),
         }.items(),
     )
@@ -122,6 +122,7 @@ def generate_launch_description() -> LaunchDescription:
                 description="Store SITL state in an instance-specific directory.",
             ),
             DeclareLaunchArgument("use_dds_agent", default_value="true"),
+            DeclareLaunchArgument("use_mavproxy", default_value="true"),
             DeclareLaunchArgument("use_gz_tf", default_value="true"),
             DeclareLaunchArgument("x", default_value="0.0"),
             DeclareLaunchArgument("y", default_value="0.0"),
@@ -134,4 +135,3 @@ def generate_launch_description() -> LaunchDescription:
             OpaqueFunction(function=create_robot_actions),
         ]
     )
-

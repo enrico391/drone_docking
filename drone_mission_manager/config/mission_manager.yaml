@@ -8,7 +8,7 @@ mission_manager:
     position_tolerance_m: 0.35
     altitude_tolerance_m: 0.25
     pose_timeout_s: 1.0
-    service_timeout_s: 10.0
+    mavlink_operation_timeout_s: 10.0
     prearm_timeout_s: 60.0
     prearm_retry_period_s: 1.0
 
@@ -35,22 +35,19 @@ mission_manager:
     landing_backend: ros
     landing_yaw_correction_enabled: true
     landing_target_warmup_s: 1.0
-    landing_target_bind_address: 0.0.0.0
-    landing_target_udp_port: 14551
-    landing_target_source_system: 254
-    landing_target_source_component: 191
+    # One direct pymavlink connection carries all flight-controller telemetry
+    # and commands. The TCP default connects directly to ArduPilot SITL.
+    mavlink_connection: tcp:127.0.0.1:5760
+    mavlink_baud: 921600
+    mavlink_target_system: 1
+    mavlink_target_component: 1
+    mavlink_source_system: 254
+    mavlink_source_component: 191
+    mavlink_heartbeat_timeout_s: 2.5
     # Camera origin relative to base_link in MAVLink Body-FRD.
     landing_target_camera_forward_m: 0.0
     landing_target_camera_right_m: 0.0
     landing_target_camera_down_m: 0.14
 
-    prearm_service: /ap/v1/prearm_check
-    mode_service: /ap/v1/mode_switch
-    arm_service: /ap/v1/arm_motors
-    takeoff_service: /ap/v1/experimental/takeoff
-    get_parameters_service: /ap/v1/get_parameters
-    pose_topic: /ap/v1/pose/filtered
-    status_topic: /ap/v1/status
-    velocity_topic: /ap/v1/cmd_vel
     dock_pose_topic: /dock/pose
     dock_mode_topic: /dock/mode

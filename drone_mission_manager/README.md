@@ -10,10 +10,10 @@ profiles and a shared precision-landing sequence. Two profiles are included:
 
 The common execution sequence is:
 
-1. wait for AP_DDS and a valid local pose;
+1. wait for a direct pymavlink heartbeat and valid local position;
 2. retry the pre-arm check while ArduPilot initializes, then enter GUIDED mode,
    arm, and take off;
-3. fly one configurable circle using `/ap/v1/cmd_vel`;
+3. fly one configurable circle using MAVLink velocity setpoints;
 4. return to the configured dock;
 5. acquire the dock pose from the outer or central AprilTags; and
 6. land using either the ROS velocity controller or ArduPilot's native
@@ -26,7 +26,8 @@ The launch file starts `dock_apriltag_localizer` by default. Pass
 
 Store version-controlled mission definitions in `config/missions/`. The
 included files are `simple_circle.yaml` and `dock_circle.yaml`. Controller
-tuning and AP_DDS interface names remain in `config/mission_manager.yaml`;
+tuning and direct MAVLink connection settings remain in
+`config/mission_manager.yaml`;
 this keeps mission geometry separate from node/runtime configuration.
 
 Every mission declares `mission.type`. Parsers are registered in
@@ -54,26 +55,27 @@ mission:
     delay_s: 3.0
 ```
 
-The checked-in `dock_circle.yaml` defaults to `count: 1`. Increase it to the
-required number of complete dock-circle missions. Repetition greater than one
-requires precision landing because each new cycle starts only after landing
-and automatic disarm have been confirmed.
+The checked-in `dock_circle.yaml` defaults to `count: 3`. Repetition greater
+than one requires precision landing because each new cycle starts only after
+landing and automatic disarm have been confirmed.
 
 The coarse mission coordinates use the ROS local ENU `map` convention: X east,
 Y north, and Z up. Precision corrections use `base_link`: the downward optical
 frame's X/Y offsets are converted to body FLU velocity commands.
 
-The `ros` landing backend centers and descends with `/ap/v1/cmd_vel`, switches
-to the central tag for the final approach, and enters ordinary LAND near
-touchdown. Descent is allowed only with a fresh dock pose inside the configured
-horizontal tolerance. A lost target causes an immediate hover and
-reacquisition.
+The compatibility-named `ros` landing backend keeps alignment and descent in
+the ROS mission manager, but sends its map-ENU and body-FLU velocity commands
+to ArduPilot through pymavlink. It switches to the central tag for the final
+approach and enters ordinary LAND near touchdown. Descent is allowed only with
+a fresh dock pose inside the configured horizontal tolerance. A lost target
+causes an immediate hover and reacquisition.
 
 The `ardupilot` backend converts `/dock/pose` from camera optical coordinates
 to MAVLink Body-FRD and checks for new measurements at the mission update rate
 (10 Hz by default). Each accepted filtered pose is sent at most once through
-MAVProxy's dedicated UDP endpoint on port 14551, using the source image
-timestamp; timer ticks no longer turn a stale pose into a new measurement.
+the same direct pymavlink connection used for telemetry and commands, using
+the source image timestamp; timer ticks no longer turn a stale pose into a new
+measurement.
 After a one-second measurement warmup it enters LAND; ArduPilot then owns both
 horizontal correction and descent. The X500 defaults set `PLND_ENABLED=1` and
 `PLND_TYPE=1`, and the mission checks those live values before arming.
@@ -101,12 +103,14 @@ finish without an artificial mission failure.
 
 ## Build and run
 
-Start the docking simulation first and wait for ArduPilot and DDS readiness:
+Start the docking simulation without AP_DDS or MAVProxy so the mission manager
+can own ArduPilot's TCP endpoint directly:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch drone_bringup docking_sim.launch.py
+ros2 launch drone_bringup docking_sim.launch.py \
+  use_dds_agent:=false use_mavproxy:=false
 ```
 
 use the following command if your system does not support OpenGL hardware acceleration (WSL):
@@ -141,9 +145,14 @@ ros2 launch drone_mission_manager mission.launch.py \
 
 The two accepted launch values are:
 
-- `landing_backend:=ros`: ROS commands perform visual alignment and descent;
+- `landing_backend:=ros`: the manager performs visual alignment and descent;
 - `landing_backend:=ardupilot`: ROS supplies visual target measurements and
   ArduPilot precision landing performs the complete descent in LAND mode.
+
+Both values use pymavlink for all flight-controller telemetry and commands.
+ROS 2 remains the application bus for dock localization and mission-state
+output. The current mission state sequence is unchanged, and onboard
+`DO_LAND_START` triggering is not enabled yet.
 
 Set `landing_yaw_correction_enabled:=false` to keep the vehicle's existing
 heading during ArduPilot precision landing. It defaults to `true` to preserve
@@ -154,9 +163,9 @@ The localizer filter defaults can be tuned from this launch file with
 `pose_filter_max_position_jump_m`, and `pose_filter_reacquire_frames`. See the
 `dock_apriltag_localizer` README for their behavior.
 
-Port 14551 must remain available to the mission manager. MAVProxy already
-publishes vehicle traffic to this port in the workspace's SITL launch, so no
-additional MAVLink process is required.
+SITL uses `mavlink_connection:=tcp:127.0.0.1:5760` by default. Exactly one
+process should own that endpoint. For hardware, pass a serial device and baud,
+for example `mavlink_connection:=/dev/ttyAMA0 mavlink_baud:=921600`.
 
 Monitor the state with:
 
@@ -175,7 +184,8 @@ ros2 topic hz /dock/debug_image
 To run the new dock-origin mission, start the simulator at the named dock point:
 
 ```bash
-ros2 launch drone_bringup docking_sim.launch.py initial_point:=dock
+ros2 launch drone_bringup docking_sim.launch.py initial_point:=dock \
+  use_dds_agent:=false use_mavproxy:=false
 ```
 
 Then start the mission in another sourced terminal:
@@ -197,7 +207,7 @@ pass world coordinates explicitly, for example:
 ```bash
 ros2 launch drone_bringup docking_sim.launch.py \
   initial_point:=custom spawn_x:=4.0 spawn_y:=-2.0 spawn_z:=-0.032 \
-  spawn_yaw:=1.57
+  spawn_yaw:=1.57 use_dds_agent:=false use_mavproxy:=false
 ```
 
 To run an external typed mission, pass its absolute source path:
