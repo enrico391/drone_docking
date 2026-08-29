@@ -50,9 +50,9 @@
     </light>
 
     <spherical_coordinates>
-      <latitude_deg>-35.3632621</latitude_deg>
-      <longitude_deg>149.1652374</longitude_deg>
-      <elevation>10.0</elevation>
+      <latitude_deg>45.3821944</latitude_deg>
+      <longitude_deg>12.0005833</longitude_deg>
+      <elevation>2.0</elevation>
       <heading_deg>0</heading_deg>
       <surface_model>EARTH_WGS84</surface_model>
     </spherical_coordinates>
@@ -86,7 +86,7 @@
     <include>
       <uri>model://drone_docking_base_structure</uri>
       <name>dock_station</name>
-      <pose>10 0 0 0 0 0</pose>
+      <pose>0 0 0 0 0 0</pose>
     </include>
   </world>
 </sdf>

@@ -21,7 +21,7 @@ def create_robot_actions(
         # Model z=-0.032 places the triangular base on the ground.
         "ground": ("0.0", "0.0", "-0.032"),
         # The dock recess floor is z=0.880, so add it to the model offset.
-        "dock": ("10.0", "0.0", "0.848"),
+        "dock": ("0.0", "0.0", "0.848"),
     }
     if initial_point == "custom":
         x = LaunchConfiguration("spawn_x").perform(context)

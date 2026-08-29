@@ -19,3 +19,14 @@ PLND_XY_DIST_MAX    0.25
 
 # change max speed at which the drone can discend
 LAND_SPD_MS         0.25
+
+# Geographic reference for the future docking station (latitude, longitude,
+# and altitude above mean sea level).
+SIM_OPOS_LAT        45.3821944
+SIM_OPOS_LNG        12.0005833
+SIM_OPOS_ALT        2.0
+
+
+PLND_ENABLED = 1
+PLND_TYPE    = 1
+LOG_DISARMED = 1

@@ -33,7 +33,7 @@ continue to use names such as `drone_description` and `drone_bringup`.
 
 ## Current milestone
 
-Phase 1 adds the static docking base at `(10, 0, 0)`. The base has four 300 mm
+Phase 1 adds the static docking base at `(0, 0, 0)`. The base has four 300 mm
 outer tags at `(x, y, z) = (+/-0.52, +/-0.52, 1.001)` and a 120 mm central tag
 in the recess at `z=0.881`. Phase 2 adds a separate `x500_with_ardupilot` adapter around
 the imported `x500` model and reuses the known-working ArduPilot SITL + AP_DDS
