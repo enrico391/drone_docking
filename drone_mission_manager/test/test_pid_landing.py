@@ -12,6 +12,7 @@ from drone_mission_manager.pid_landing import (
     PidLandingOutcome,
     PidLandingState,
     VehicleObservation,
+    VelocityCommand,
 )
 from drone_mission_manager.pymavlink_vehicle import VelocityFrame
 
@@ -733,3 +734,159 @@ def test_recovery_attempt_limit_fails_after_the_configured_number_of_climbs(
     assert failed.outcome is PidLandingOutcome.FAILED
     assert failed.reason == "central tag recovery attempts exhausted"
     assert failed.command.velocity_z == 0.0
+
+
+def zero_body_command():
+    return VelocityCommand(VelocityFrame.BODY_FLU, 0.0, 0.0, 0.0)
+
+
+def grounded_vehicle(now, *, armed=True, flying=False, landed_at=None):
+    return VehicleObservation(
+        position_enu_m=(4.0, -2.0, 0.0),
+        velocity_enu_m_s=(0.0, 0.0, 0.0),
+        armed=armed,
+        flying=flying,
+        mode=4,
+        landed_at=now if landed_at is None else landed_at,
+    )
+
+
+def enter_touchdown_approach(controller, vehicle):
+    enter_central_descent(controller, vehicle)
+    controller.update(2.4, central_observation(2.4, distance_m=0.25), vehicle)
+    return controller.update(
+        3.4, central_observation(3.4, distance_m=0.25), vehicle
+    )
+
+
+def advance_to_stable_ground(controller, vehicle):
+    enter_touchdown_approach(controller, vehicle)
+    controller.update(3.5, None, grounded_vehicle(3.5))
+    return controller.update(4.0, None, grounded_vehicle(4.0, landed_at=3.5))
+
+
+def test_central_descent_commits_only_after_fine_stability_at_commit_height(
+    controller, vehicle,
+):
+    enter_central_descent(controller, vehicle)
+
+    above_height = controller.update(
+        2.4, central_observation(2.4, distance_m=0.26), vehicle
+    )
+    unstable = controller.update(
+        3.4,
+        dock_observation(
+            3.4,
+            forward_m=0.08,
+            left_m=-0.05,
+            distance_m=0.25,
+            yaw_error_rad=0.05,
+            mode=DockTargetMode.CENTRAL,
+        ),
+        vehicle,
+    )
+    stable_start = controller.update(
+        3.5, central_observation(3.5, distance_m=0.25), vehicle
+    )
+    committed = controller.update(
+        4.5, central_observation(4.5, distance_m=0.25), vehicle
+    )
+
+    assert above_height.state is PidLandingState.DESCEND_CENTRAL
+    assert unstable.state is PidLandingState.DESCEND_CENTRAL
+    assert stable_start.state is PidLandingState.DESCEND_CENTRAL
+    assert committed.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert committed.command == zero_body_command()
+
+
+def test_touchdown_approach_commands_constant_descent_and_ignores_tag_loss(
+    controller, vehicle,
+):
+    transition = enter_touchdown_approach(controller, vehicle)
+
+    decision = controller.update(3.5, None, vehicle)
+
+    assert transition.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert transition.command == zero_body_command()
+    assert decision.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert decision.command == VelocityCommand(
+        VelocityFrame.BODY_FLU, 0.0, 0.0, -0.05, 0.0,
+    )
+
+
+def test_touchdown_timeout_fails_with_zero_command(vehicle):
+    controller = PidLandingController(default_config(touchdown_timeout_s=0.5))
+    enter_touchdown_approach(controller, vehicle)
+
+    timed_out = controller.update(3.89, None, vehicle)
+
+    assert timed_out.state is PidLandingState.TOUCHDOWN_APPROACH
+    failed = controller.update(3.91, None, vehicle)
+    assert failed.state is PidLandingState.FAILED
+    assert failed.outcome is PidLandingOutcome.FAILED
+    assert failed.command == zero_body_command()
+
+
+def test_touchdown_requires_fresh_continuous_false_flying_before_disarm(
+    controller, vehicle,
+):
+    enter_touchdown_approach(controller, vehicle)
+
+    stale = controller.update(3.5, None, grounded_vehicle(3.5, landed_at=2.4))
+    first_fresh = controller.update(3.6, None, grounded_vehicle(3.6))
+    unknown = controller.update(
+        3.8, None, grounded_vehicle(3.8, flying=None, landed_at=3.6)
+    )
+    restarted = controller.update(3.9, None, grounded_vehicle(3.9))
+    disarm = controller.update(4.4, None, grounded_vehicle(4.4, landed_at=3.9))
+
+    assert stale.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert first_fresh.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert unknown.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert restarted.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert disarm.state is PidLandingState.DISARM
+    assert disarm.request_disarm is True
+    assert disarm.command == zero_body_command()
+
+
+def test_disarm_rejection_retries_after_deadline_without_duplicate_requests(
+    controller, vehicle,
+):
+    initial = advance_to_stable_ground(controller, vehicle)
+    controller.notify_disarm_result(False, now=4.1)
+
+    before_retry = controller.update(5.09, None, grounded_vehicle(5.09, landed_at=4.2))
+    retry = controller.update(5.1, None, grounded_vehicle(5.1, landed_at=4.2))
+
+    assert initial.request_disarm is True
+    assert before_retry.state is PidLandingState.DISARM
+    assert before_retry.request_disarm is False
+    assert retry.state is PidLandingState.DISARM
+    assert retry.request_disarm is True
+    assert retry.command == zero_body_command()
+
+
+def test_disarm_acknowledgement_waits_for_disarmed_heartbeat(controller, vehicle):
+    advance_to_stable_ground(controller, vehicle)
+    controller.notify_disarm_result(True, now=4.1)
+
+    waiting = controller.update(4.2, None, grounded_vehicle(4.2, armed=True))
+    complete = controller.update(4.3, None, grounded_vehicle(4.3, armed=False))
+
+    assert waiting.outcome is PidLandingOutcome.RUNNING
+    assert waiting.request_disarm is False
+    assert complete.state is PidLandingState.COMPLETE
+    assert complete.outcome is PidLandingOutcome.COMPLETE
+    assert complete.command == zero_body_command()
+
+
+def test_disarm_flying_again_returns_to_touchdown_approach(controller, vehicle):
+    advance_to_stable_ground(controller, vehicle)
+
+    bounced = controller.update(4.1, None, vehicle_at(4.0, -2.0, 0.1))
+
+    assert bounced.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert bounced.request_disarm is False
+    assert bounced.command == VelocityCommand(
+        VelocityFrame.BODY_FLU, 0.0, 0.0, -0.05, 0.0,
+    )

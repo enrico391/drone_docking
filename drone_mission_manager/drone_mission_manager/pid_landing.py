@@ -217,6 +217,10 @@ class PidLandingController:
         self._descent_last_updated_at: Optional[float] = None
         self._recovery_attempts = 0
         self._recovery_target_altitude_m: Optional[float] = None
+        self._landed_stable_started_at: Optional[float] = None
+        self._disarm_request_in_flight = False
+        self._disarm_acknowledged = False
+        self._disarm_next_retry_at = 0.0
         self._failure_reason = ""
 
     def start(
@@ -243,6 +247,10 @@ class PidLandingController:
         self._descent_last_updated_at = None
         self._recovery_attempts = 0
         self._recovery_target_altitude_m = None
+        self._landed_stable_started_at = None
+        self._disarm_request_in_flight = False
+        self._disarm_acknowledged = False
+        self._disarm_next_retry_at = now
         self._failure_reason = ""
         self._reset_pids()
 
@@ -269,6 +277,16 @@ class PidLandingController:
             return self._update_descend_central(now, dock, vehicle)
         if self._state is PidLandingState.RECOVERY_CLIMB:
             return self._update_recovery_climb(now, vehicle)
+        if self._state is PidLandingState.TOUCHDOWN_APPROACH:
+            return self._update_touchdown_approach(now, vehicle)
+        if self._state is PidLandingState.DISARM:
+            return self._update_disarm(now, vehicle)
+        if self._state is PidLandingState.COMPLETE:
+            return PidLandingDecision(
+                self._state,
+                _zero_body_command(),
+                outcome=PidLandingOutcome.COMPLETE,
+            )
         if self._state is PidLandingState.FAILED:
             return PidLandingDecision(
                 self._state,
@@ -283,6 +301,16 @@ class PidLandingController:
             raise ValueError("success must be a bool")
         if not math.isfinite(now):
             raise ValueError("now must be finite")
+        if (
+            self._state is not PidLandingState.DISARM
+            or not self._disarm_request_in_flight
+        ):
+            return
+        self._disarm_request_in_flight = False
+        if success:
+            self._disarm_acknowledged = True
+            return
+        self._disarm_next_retry_at = now + self._config.disarm_retry_period_s
 
     def _update_acquire_dock(
         self, now: float, dock: Optional[DockObservation],
@@ -455,6 +483,19 @@ class PidLandingController:
             return PidLandingDecision(self._state, _zero_body_command())
 
         self._central_loss_started_at = None
+        if dock.distance_m <= self._config.touchdown_commit_height_m:
+            if self._alignment_is_stable(
+                now,
+                dock,
+                (
+                    self._config.fine_horizontal_tolerance_m,
+                    self._config.fine_yaw_tolerance_rad,
+                ),
+            ):
+                self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
+                return PidLandingDecision(self._state, _zero_body_command())
+        else:
+            self._alignment_stable_started_at = None
         self._advance_distance_setpoint(
             now, dock, self._config.central_descent_speed_m_s,
             self._config.fine_horizontal_tolerance_m,
@@ -462,6 +503,76 @@ class PidLandingController:
         )
         return PidLandingDecision(
             self._state, self._visual_command(now, dock, z_enabled=True)
+        )
+
+    def _update_touchdown_approach(
+        self, now: float, vehicle: VehicleObservation,
+    ) -> PidLandingDecision:
+        if now - self._state_started_at >= self._config.touchdown_timeout_s:
+            self._enter_state(PidLandingState.FAILED, now)
+            self._failure_reason = "touchdown was not confirmed before timeout"
+            return PidLandingDecision(
+                self._state,
+                _zero_body_command(),
+                outcome=PidLandingOutcome.FAILED,
+                reason=self._failure_reason,
+            )
+
+        if self._fresh_on_ground(now, vehicle):
+            if self._landed_stable_started_at is None:
+                self._landed_stable_started_at = now
+            if now - self._landed_stable_started_at >= (
+                self._config.landed_stable_time_s
+            ):
+                self._enter_state(PidLandingState.DISARM, now)
+                return self._update_disarm(now, vehicle)
+        else:
+            self._landed_stable_started_at = None
+
+        return PidLandingDecision(
+            self._state,
+            VelocityCommand(
+                VelocityFrame.BODY_FLU,
+                0.0,
+                0.0,
+                -self._config.touchdown_speed_m_s,
+            ),
+        )
+
+    def _update_disarm(
+        self, now: float, vehicle: VehicleObservation,
+    ) -> PidLandingDecision:
+        if vehicle.armed is False:
+            self._enter_state(PidLandingState.COMPLETE, now)
+            return PidLandingDecision(
+                self._state,
+                _zero_body_command(),
+                outcome=PidLandingOutcome.COMPLETE,
+            )
+
+        if not self._fresh_on_ground(now, vehicle):
+            self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
+            return PidLandingDecision(
+                self._state,
+                VelocityCommand(
+                    VelocityFrame.BODY_FLU,
+                    0.0,
+                    0.0,
+                    -self._config.touchdown_speed_m_s,
+                ),
+            )
+
+        if self._disarm_acknowledged:
+            return PidLandingDecision(self._state, _zero_body_command())
+        if now < self._disarm_next_retry_at:
+            return PidLandingDecision(self._state, _zero_body_command())
+
+        self._disarm_request_in_flight = True
+        self._disarm_next_retry_at = now + self._config.disarm_retry_period_s
+        return PidLandingDecision(
+            self._state,
+            _zero_body_command(),
+            request_disarm=True,
         )
 
     def _update_recovery_climb(
@@ -610,7 +721,21 @@ class PidLandingController:
         self._distance_setpoint_m = None
         self._descent_last_updated_at = None
         self._central_loss_started_at = None
+        self._landed_stable_started_at = None
+        self._disarm_request_in_flight = False
+        self._disarm_acknowledged = False
+        self._disarm_next_retry_at = now
         self._reset_pids()
+
+    def _fresh_on_ground(
+        self, now: float, vehicle: VehicleObservation,
+    ) -> bool:
+        return (
+            vehicle.flying is False
+            and math.isfinite(vehicle.landed_at)
+            and 0.0 <= now - vehicle.landed_at
+            <= self._config.landed_state_timeout_s
+        )
 
     @staticmethod
     def _usable_dock(dock: Optional[DockObservation]) -> bool:
