@@ -47,7 +47,7 @@ mission_manager:
     # Camera origin relative to base_link in MAVLink Body-FRD.
     landing_target_camera_forward_m: 0.0
     landing_target_camera_right_m: 0.0
-    landing_target_camera_down_m: 0.14
+    landing_target_camera_down_m: 0.19
 
     dock_pose_topic: /dock/pose
     dock_mode_topic: /dock/mode

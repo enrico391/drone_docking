@@ -433,7 +433,7 @@ class MissionManager(Node):
         self._vehicle.poll(now)
         self._sync_vehicle_state()
 
-        # USED TO SEND DOCK POSE TO PRECISION LANDING VIA MAVLINK
+        # USED TO SEND DOCK POSE TO PRECISION LANDING VIA PYMAVLINK
         self._stream_native_landing_target(now)
 
         if self._handle_pending_call(now):
