@@ -95,6 +95,7 @@ class PidLandingConfig:
     central_acquire_timeout_s: float
     central_loss_grace_s: float
     recovery_climb_m: float
+    recovery_altitude_tolerance_m: float
     max_recovery_attempts: int
     touchdown_commit_height_m: float
     touchdown_speed_m_s: float
@@ -126,6 +127,7 @@ class PidLandingConfig:
             "search_speed_m_s", "search_timeout_s",
             "central_transition_distance_m", "central_acquire_timeout_s",
             "central_loss_grace_s", "recovery_climb_m",
+            "recovery_altitude_tolerance_m",
             "touchdown_commit_height_m", "touchdown_speed_m_s",
             "touchdown_timeout_s", "landed_state_timeout_s",
             "landed_stable_time_s", "disarm_retry_period_s",
@@ -145,6 +147,7 @@ class PidLandingConfig:
             "search_speed_m_s", "search_timeout_s",
             "central_transition_distance_m", "central_acquire_timeout_s",
             "central_loss_grace_s", "recovery_climb_m",
+            "recovery_altitude_tolerance_m",
             "touchdown_commit_height_m", "touchdown_speed_m_s",
             "touchdown_timeout_s", "landed_state_timeout_s",
             "landed_stable_time_s", "disarm_retry_period_s",
@@ -163,6 +166,11 @@ class PidLandingConfig:
             self.max_recovery_attempts, bool
         ) or self.max_recovery_attempts < 1:
             raise ValueError("max_recovery_attempts must be at least one")
+        if self.recovery_altitude_tolerance_m >= self.recovery_climb_m:
+            raise ValueError(
+                "recovery_altitude_tolerance_m must be smaller than "
+                "recovery_climb_m"
+            )
         if self.touchdown_commit_height_m >= self.central_transition_distance_m:
             raise ValueError(
                 "touchdown_commit_height_m must be below "
@@ -438,6 +446,8 @@ class PidLandingController:
         ):
             if self._central_loss_started_at is None:
                 self._central_loss_started_at = now
+            self._descent_last_updated_at = None
+            self._reset_pids()
             if now - self._central_loss_started_at >= (
                 self._config.central_loss_grace_s
             ):
@@ -461,7 +471,7 @@ class PidLandingController:
         assert self._recovery_target_altitude_m is not None
         if altitude_m >= (
             self._recovery_target_altitude_m
-            - self._config.search_position_tolerance_m
+            - self._config.recovery_altitude_tolerance_m
         ):
             self._enter_state(PidLandingState.ACQUIRE_CENTRAL, now)
             return PidLandingDecision(self._state, _zero_body_command())
@@ -528,7 +538,9 @@ class PidLandingController:
             self._distance_setpoint_m = dock.distance_m
             self._descent_last_updated_at = now
             return
-        assert self._descent_last_updated_at is not None
+        if self._descent_last_updated_at is None:
+            self._descent_last_updated_at = now
+            return
         dt = max(0.0, now - self._descent_last_updated_at)
         if self._is_aligned(dock, horizontal_tolerance_m, yaw_tolerance_rad):
             self._distance_setpoint_m -= speed_m_s * dt
@@ -592,6 +604,7 @@ class PidLandingController:
     def _enter_state(self, state: PidLandingState, now: float) -> None:
         self._state = state
         self._state_started_at = now
+        self._tag_stable_started_at = None
         self._alignment_stable_started_at = None
         self._central_stable_started_at = None
         self._distance_setpoint_m = None

@@ -49,6 +49,7 @@ def default_config(**overrides):
         central_acquire_timeout_s=3.0,
         central_loss_grace_s=0.3,
         recovery_climb_m=0.3,
+        recovery_altitude_tolerance_m=0.05,
         max_recovery_attempts=3,
         touchdown_commit_height_m=0.25,
         touchdown_speed_m_s=0.05,
@@ -131,6 +132,14 @@ def dock_observation(
     [
         ("touchdown_commit_height_m", 1.0, "touchdown_commit_height_m"),
         ("recovery_climb_m", 0.0, "recovery_climb_m"),
+        (
+            "recovery_altitude_tolerance_m", 0.0,
+            "recovery_altitude_tolerance_m",
+        ),
+        (
+            "recovery_altitude_tolerance_m", 0.3,
+            "recovery_altitude_tolerance_m",
+        ),
         ("search_radius_m", 0.0, "search_radius_m"),
         ("initial_acquire_time_s", 0.0, "initial_acquire_time_s"),
         ("max_recovery_attempts", 0, "max_recovery_attempts"),
@@ -526,6 +535,21 @@ def test_missing_visual_observation_stops_outer_descent_before_transition(
     assert decision.command.yaw_rate_rad_s == 0.0
 
 
+def test_missing_outer_descent_requires_fresh_tag_stability_before_align(
+    controller, vehicle,
+):
+    enter_outer_descent(controller, vehicle)
+    controller.update(1.8, None, vehicle)
+
+    first = controller.update(1.9, outer_observation(1.9), vehicle)
+    almost_stable = controller.update(2.39, outer_observation(2.39), vehicle)
+    stable = controller.update(2.41, outer_observation(2.41), vehicle)
+
+    assert first.state is PidLandingState.ACQUIRE_DOCK
+    assert almost_stable.state is PidLandingState.ACQUIRE_DOCK
+    assert stable.state is PidLandingState.PID_ALIGN
+
+
 def test_acquire_central_requires_a_stable_central_observation(
     controller, vehicle,
 ):
@@ -546,13 +570,48 @@ def test_central_loss_within_grace_commands_zero_then_resumes_descent(
 ):
     enter_central_descent(controller, vehicle)
     controller.update(2.4, central_observation(2.4), vehicle)
+    before_dropout = controller.update(
+        2.5, central_observation(2.5), vehicle
+    )
 
-    missing = controller.update(2.5, None, vehicle)
+    missing = controller.update(2.6, None, vehicle)
     recovered = controller.update(2.79, central_observation(2.79), vehicle)
 
     assert missing.state is PidLandingState.DESCEND_CENTRAL
     assert missing.command.velocity_z == 0.0
     assert recovered.state is PidLandingState.DESCEND_CENTRAL
+    assert recovered.command.velocity_z == pytest.approx(
+        before_dropout.command.velocity_z
+    )
+
+
+def test_central_dropout_resets_visual_pid_histories(vehicle):
+    derivative_only = derivative_pid_config()
+    controller = PidLandingController(default_config(
+        x_pid=derivative_only,
+        y_pid=derivative_only,
+        z_pid=derivative_only,
+        yaw_pid=derivative_only,
+    ))
+    enter_central_descent(controller, vehicle)
+    controller.update(2.4, central_observation(2.4), vehicle)
+    controller.update(2.5, central_observation(2.5), vehicle)
+    controller.update(2.6, None, vehicle)
+
+    recovered = controller.update(2.7, dock_observation(
+        2.7,
+        forward_m=0.06,
+        left_m=-0.06,
+        distance_m=0.89,
+        yaw_error_rad=0.06,
+        mode=DockTargetMode.CENTRAL,
+    ), vehicle)
+
+    assert recovered.state is PidLandingState.DESCEND_CENTRAL
+    assert recovered.command.velocity_x == 0.0
+    assert recovered.command.velocity_y == 0.0
+    assert recovered.command.velocity_z == 0.0
+    assert recovered.command.yaw_rate_rad_s == 0.0
 
 
 def test_central_loss_beyond_grace_enters_recovery_stopped(
@@ -573,9 +632,7 @@ def test_central_loss_beyond_grace_enters_recovery_stopped(
 
 
 def test_recovery_uses_local_altitude_and_ignores_camera_distance(vehicle):
-    controller = PidLandingController(default_config(
-        search_position_tolerance_m=0.05,
-    ))
+    controller = PidLandingController(default_config())
     enter_acquire_central(controller, vehicle)
     transition = controller.update(
         4.72, None, vehicle_at(4.0, -2.0, 5.0),
@@ -605,9 +662,7 @@ def test_recovery_uses_local_altitude_and_ignores_camera_distance(vehicle):
 
 
 def test_central_acquisition_timer_is_fresh_after_recovery(vehicle):
-    controller = PidLandingController(default_config(
-        search_position_tolerance_m=0.05,
-    ))
+    controller = PidLandingController(default_config())
     enter_central_descent(controller, vehicle)
     controller.update(2.4, None, vehicle)
     controller.update(2.71, None, vehicle)
@@ -666,7 +721,6 @@ def test_recovery_attempt_limit_fails_after_the_configured_number_of_climbs(
 ):
     controller = PidLandingController(default_config(
         max_recovery_attempts=1,
-        search_position_tolerance_m=0.05,
     ))
     enter_acquire_central(controller, vehicle)
     first_recovery = controller.update(4.72, None, vehicle)
