@@ -475,6 +475,7 @@ class PidLandingController:
             if self._central_loss_started_at is None:
                 self._central_loss_started_at = now
             self._descent_last_updated_at = None
+            self._alignment_stable_started_at = None
             self._reset_pids()
             if now - self._central_loss_started_at >= (
                 self._config.central_loss_grace_s
@@ -542,14 +543,6 @@ class PidLandingController:
     def _update_disarm(
         self, now: float, vehicle: VehicleObservation,
     ) -> PidLandingDecision:
-        if vehicle.armed is False:
-            self._enter_state(PidLandingState.COMPLETE, now)
-            return PidLandingDecision(
-                self._state,
-                _zero_body_command(),
-                outcome=PidLandingOutcome.COMPLETE,
-            )
-
         if not self._fresh_on_ground(now, vehicle):
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
             return PidLandingDecision(
@@ -562,7 +555,17 @@ class PidLandingController:
                 ),
             )
 
+        if vehicle.armed is False:
+            self._enter_state(PidLandingState.COMPLETE, now)
+            return PidLandingDecision(
+                self._state,
+                _zero_body_command(),
+                outcome=PidLandingOutcome.COMPLETE,
+            )
+
         if self._disarm_acknowledged:
+            return PidLandingDecision(self._state, _zero_body_command())
+        if self._disarm_request_in_flight:
             return PidLandingDecision(self._state, _zero_body_command())
         if now < self._disarm_next_retry_at:
             return PidLandingDecision(self._state, _zero_body_command())

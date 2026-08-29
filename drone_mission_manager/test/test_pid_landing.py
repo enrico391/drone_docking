@@ -814,6 +814,29 @@ def test_touchdown_approach_commands_constant_descent_and_ignores_tag_loss(
     )
 
 
+def test_central_dropout_resets_fine_stability_before_touchdown_commit(
+    controller, vehicle,
+):
+    enter_central_descent(controller, vehicle)
+    controller.update(2.4, central_observation(2.4, distance_m=0.25), vehicle)
+
+    dropout = controller.update(2.8, None, vehicle)
+    returned = controller.update(
+        2.9, central_observation(2.9, distance_m=0.25), vehicle
+    )
+    before_stable = controller.update(
+        3.89, central_observation(3.89, distance_m=0.25), vehicle
+    )
+    committed = controller.update(
+        3.91, central_observation(3.91, distance_m=0.25), vehicle
+    )
+
+    assert dropout.state is PidLandingState.DESCEND_CENTRAL
+    assert returned.state is PidLandingState.DESCEND_CENTRAL
+    assert before_stable.state is PidLandingState.DESCEND_CENTRAL
+    assert committed.state is PidLandingState.TOUCHDOWN_APPROACH
+
+
 def test_touchdown_timeout_fails_with_zero_command(vehicle):
     controller = PidLandingController(default_config(touchdown_timeout_s=0.5))
     enter_touchdown_approach(controller, vehicle)
@@ -866,6 +889,37 @@ def test_disarm_rejection_retries_after_deadline_without_duplicate_requests(
     assert retry.command == zero_body_command()
 
 
+def test_disarm_pending_request_is_not_reemitted_after_retry_deadline(
+    controller, vehicle,
+):
+    initial = advance_to_stable_ground(controller, vehicle)
+
+    pending = controller.update(
+        5.1, None, grounded_vehicle(5.1, landed_at=4.2)
+    )
+
+    assert initial.request_disarm is True
+    assert pending.state is PidLandingState.DISARM
+    assert pending.request_disarm is False
+
+
+def test_late_disarm_result_after_bounce_does_not_affect_later_attempt(
+    controller, vehicle,
+):
+    advance_to_stable_ground(controller, vehicle)
+    bounced = controller.update(4.1, None, vehicle_at(4.0, -2.0, 0.1))
+    controller.notify_disarm_result(True, now=4.2)
+    controller.update(4.3, None, grounded_vehicle(4.3))
+
+    later_attempt = controller.update(
+        4.8, None, grounded_vehicle(4.8, landed_at=4.3)
+    )
+
+    assert bounced.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert later_attempt.state is PidLandingState.DISARM
+    assert later_attempt.request_disarm is True
+
+
 def test_disarm_acknowledgement_waits_for_disarmed_heartbeat(controller, vehicle):
     advance_to_stable_ground(controller, vehicle)
     controller.notify_disarm_result(True, now=4.1)
@@ -878,6 +932,25 @@ def test_disarm_acknowledgement_waits_for_disarmed_heartbeat(controller, vehicle
     assert complete.state is PidLandingState.COMPLETE
     assert complete.outcome is PidLandingOutcome.COMPLETE
     assert complete.command == zero_body_command()
+
+
+@pytest.mark.parametrize(
+    "vehicle",
+    [
+        grounded_vehicle(4.1, armed=False, flying=True),
+        grounded_vehicle(4.1, armed=False, landed_at=3.0),
+        grounded_vehicle(4.1, armed=False, landed_at=math.nan),
+    ],
+)
+def test_disarm_requires_fresh_ground_telemetry_before_armed_false_completes(
+    controller, vehicle,
+):
+    advance_to_stable_ground(controller, vehicle)
+
+    decision = controller.update(4.1, None, vehicle)
+
+    assert decision.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert decision.outcome is PidLandingOutcome.RUNNING
 
 
 def test_disarm_flying_again_returns_to_touchdown_approach(controller, vehicle):
