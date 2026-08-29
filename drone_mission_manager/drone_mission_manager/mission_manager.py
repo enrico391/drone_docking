@@ -24,11 +24,81 @@ from .landing_wait import (
     touchdown_wait_action,
 )
 from .mission import CircleMission, load_mission
+from .pid import PIDConfig
+from .pid_landing import (
+    DockObservation,
+    DockTargetMode,
+    PidLandingConfig,
+    PidLandingController,
+    PidLandingOutcome,
+    PidLandingState,
+    VehicleObservation,
+)
 from .pymavlink_vehicle import MavlinkVehicle, VelocityFrame
 
 
 GUIDED_MODE = 4
 LAND_MODE = 9
+
+
+def resolve_landing_mode(
+    canonical: str, legacy: str
+) -> Tuple[str, Optional[str]]:
+    """Resolve canonical and compatibility landing configuration once."""
+    canonical_value = str(canonical).strip().lower()
+    legacy_value = str(legacy).strip().lower()
+    canonical_modes = {"pid", "precise_landing"}
+    legacy_modes = {"ros": "pid", "ardupilot": "precise_landing"}
+
+    if canonical_value and canonical_value not in canonical_modes:
+        raise ValueError(
+            "landing_mode must be either 'pid' or 'precise_landing'"
+        )
+    if legacy_value and legacy_value not in legacy_modes:
+        raise ValueError(
+            "landing_backend must be blank, 'ros', or 'ardupilot'"
+        )
+
+    mapped_legacy = legacy_modes.get(legacy_value)
+    if canonical_value and mapped_legacy and canonical_value != mapped_legacy:
+        raise ValueError(
+            "landing_mode and landing_backend select conflicting landing "
+            "implementations"
+        )
+    if canonical_value:
+        warning = None
+        if legacy_value:
+            warning = (
+                f"landing_backend='{legacy_value}' is deprecated; use only "
+                f"landing_mode='{canonical_value}'"
+            )
+        return canonical_value, warning
+    if mapped_legacy:
+        return (
+            mapped_legacy,
+            f"landing_backend='{legacy_value}' is deprecated; use "
+            f"landing_mode='{mapped_legacy}'",
+        )
+    return "pid", None
+
+
+def selected_update_rate_hz(
+    landing_mode: str, pid_control_rate_hz: float, update_rate_hz: float
+) -> float:
+    """Return and validate the timer rate for the selected landing mode."""
+    rate = (
+        float(pid_control_rate_hz)
+        if landing_mode == "pid"
+        else float(update_rate_hz)
+    )
+    if not math.isfinite(rate) or rate <= 0.0:
+        parameter = (
+            "pid_control_rate_hz"
+            if landing_mode == "pid"
+            else "update_rate_hz"
+        )
+        raise ValueError(f"{parameter} must be greater than zero")
+    return rate
 
 
 @dataclass(frozen=True)
@@ -70,6 +140,7 @@ class MissionState(Enum):
     CIRCLE = auto()
     RETURN_TO_DOCK = auto()
     HOVER_OVER_DOCK = auto()
+    PID_LANDING = auto()
     ACQUIRE_DOCK = auto()
     ALIGN_DOCK = auto()
     DESCEND_OUTER = auto()
@@ -116,7 +187,52 @@ class MissionManager(Node):
         self.declare_parameter("dock_land_switch_distance_m", 0.55)
         self.declare_parameter("dock_land_timeout_s", 30.0)
         self.declare_parameter("dock_disarm_timeout_s", 20.0)
-        self.declare_parameter("landing_backend", "ros")
+        self.declare_parameter("landing_mode", "")
+        self.declare_parameter("landing_backend", "")
+        self.declare_parameter("pid_control_rate_hz", 20.0)
+        self.declare_parameter("pid_initial_acquire_time_s", 2.0)
+        self.declare_parameter("pid_tag_stable_time_s", 0.5)
+        self.declare_parameter("pid_search_radius_m", 1.0)
+        self.declare_parameter("pid_search_speed_m_s", 0.30)
+        self.declare_parameter("pid_search_timeout_s", 30.0)
+        self.declare_parameter("pid_central_transition_distance_m", 1.0)
+        self.declare_parameter("pid_central_acquire_timeout_s", 3.0)
+        self.declare_parameter("pid_central_loss_grace_s", 0.30)
+        self.declare_parameter("pid_recovery_climb_m", 0.30)
+        self.declare_parameter("pid_recovery_altitude_tolerance_m", 0.05)
+        self.declare_parameter("pid_max_recovery_attempts", 3)
+        self.declare_parameter("pid_touchdown_commit_height_m", 0.25)
+        self.declare_parameter("pid_touchdown_speed_m_s", 0.05)
+        self.declare_parameter("pid_touchdown_timeout_s", 15.0)
+        self.declare_parameter("pid_landed_state_timeout_s", 1.0)
+        self.declare_parameter("pid_landed_stable_time_s", 0.50)
+        self.declare_parameter("pid_disarm_retry_period_s", 1.0)
+        self.declare_parameter("pid_alignment_stable_time_s", 1.0)
+        self.declare_parameter("pid_coarse_horizontal_tolerance_m", 0.20)
+        self.declare_parameter("pid_fine_horizontal_tolerance_m", 0.07)
+        self.declare_parameter("pid_coarse_yaw_tolerance_rad", 0.1745329252)
+        self.declare_parameter("pid_fine_yaw_tolerance_rad", 0.0872664626)
+        self.declare_parameter("pid_max_horizontal_speed_m_s", 0.50)
+        self.declare_parameter("pid_outer_descent_speed_m_s", 0.30)
+        self.declare_parameter("pid_central_descent_speed_m_s", 0.12)
+        self.declare_parameter("pid_recovery_speed_m_s", 0.20)
+        self.declare_parameter("pid_max_yaw_rate_rad_s", 0.3490658504)
+        self.declare_parameter("pid_search_position_gain", 0.70)
+        self.declare_parameter("pid_search_position_tolerance_m", 0.35)
+        self.declare_parameter("pid_search_max_vertical_speed_m_s", 0.70)
+        for axis, proportional_gain in (
+            ("x", 0.7),
+            ("y", 0.7),
+            ("z", 0.6),
+            ("yaw", 0.8),
+        ):
+            self.declare_parameter(f"pid_{axis}_kp", proportional_gain)
+            self.declare_parameter(f"pid_{axis}_ki", 0.0)
+            self.declare_parameter(f"pid_{axis}_kd", 0.0)
+            self.declare_parameter(f"pid_{axis}_integral_limit", 0.5)
+            self.declare_parameter(
+                f"pid_{axis}_derivative_filter_time_constant_s", 0.10
+            )
         self.declare_parameter("landing_yaw_correction_enabled", True)
         self.declare_parameter("landing_target_warmup_s", 1.0)
         self.declare_parameter("landing_target_camera_forward_m", 0.0)
@@ -134,10 +250,13 @@ class MissionManager(Node):
 
         mission_path = str(self.get_parameter("mission_file").value)
         self._mission: CircleMission = load_mission(mission_path)
+        self._landing_mode, landing_mode_warning = resolve_landing_mode(
+            str(self.get_parameter("landing_mode").value),
+            str(self.get_parameter("landing_backend").value),
+        )
         self._validate_landing_parameters()
-        self._landing_backend = str(
-            self.get_parameter("landing_backend").value
-        ).lower()
+        if landing_mode_warning is not None:
+            self.get_logger().warning(landing_mode_warning)
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -182,6 +301,7 @@ class MissionManager(Node):
         self._pending = None
         self._pending_name = ""
         self._pending_deadline = 0.0
+        self._pending_pid_disarm_request_id: Optional[int] = None
         self._next_prearm_at = 0.0
         self._circle_progress = 0.0
         self._iteration = 1
@@ -193,6 +313,12 @@ class MissionManager(Node):
         self._disarm_timeout_warned = False
         self._state_started_at = time.monotonic()
         self._last_update_at = time.monotonic()
+        self._pid_landing: Optional[PidLandingController] = (
+            PidLandingController(self._build_pid_landing_config())
+            if self._landing_mode == "pid"
+            else None
+        )
+        self._last_published_pid_substate: Optional[PidLandingState] = None
 
         initial_state = (
             MissionState.WAITING_FOR_AP
@@ -202,15 +328,17 @@ class MissionManager(Node):
         self._state = initial_state
         self._publish_state()
 
-        update_rate = float(self.get_parameter("update_rate_hz").value)
-        if update_rate <= 0.0:
-            raise ValueError("update_rate_hz must be greater than zero")
+        update_rate = selected_update_rate_hz(
+            self._landing_mode,
+            float(self.get_parameter("pid_control_rate_hz").value),
+            float(self.get_parameter("update_rate_hz").value),
+        )
         self._timer = self.create_timer(1.0 / update_rate, self._update)
         self.get_logger().info(
             f"Loaded {self._mission.mission_type.value} mission "
             f"'{self._mission.name}' from {mission_path}; "
             f"repeat_count={self._mission.repeat_count}; "
-            f"landing_backend={self._landing_backend}; "
+            f"landing_mode={self._landing_mode}; "
             f"state={self._state.name}"
         )
 
@@ -256,16 +384,91 @@ class MissionManager(Node):
                 "dock_central_transition_distance_m"
             )
 
-        backend = str(self.get_parameter("landing_backend").value).lower()
-        if backend not in ("ros", "ardupilot"):
-            raise ValueError(
-                "landing_backend must be either 'ros' or 'ardupilot'"
-            )
         heartbeat_timeout = float(
             self.get_parameter("mavlink_heartbeat_timeout_s").value
         )
         if heartbeat_timeout <= 0.0:
-            raise ValueError("mavlink_heartbeat_timeout_s must be greater than zero")
+            raise ValueError(
+                "mavlink_heartbeat_timeout_s must be greater than zero"
+            )
+
+    def _build_pid_landing_config(self) -> PidLandingConfig:
+        """Construct the complete pure-controller configuration from ROS."""
+        def value(name: str) -> float:
+            return float(self.get_parameter(name).value)
+
+        max_horizontal = value("pid_max_horizontal_speed_m_s")
+        max_vertical = max(
+            value("pid_outer_descent_speed_m_s"),
+            value("pid_central_descent_speed_m_s"),
+        )
+        max_yaw = value("pid_max_yaw_rate_rad_s")
+
+        def pid_config(axis: str, output_limit: float) -> PIDConfig:
+            prefix = f"pid_{axis}"
+            return PIDConfig(
+                kp=value(f"{prefix}_kp"),
+                ki=value(f"{prefix}_ki"),
+                kd=value(f"{prefix}_kd"),
+                integral_limit=value(f"{prefix}_integral_limit"),
+                output_limit=output_limit,
+                derivative_filter_time_constant_s=value(
+                    f"{prefix}_derivative_filter_time_constant_s"
+                ),
+            )
+
+        return PidLandingConfig(
+            initial_acquire_time_s=value("pid_initial_acquire_time_s"),
+            tag_stable_time_s=value("pid_tag_stable_time_s"),
+            search_radius_m=value("pid_search_radius_m"),
+            search_speed_m_s=value("pid_search_speed_m_s"),
+            search_timeout_s=value("pid_search_timeout_s"),
+            central_transition_distance_m=value(
+                "pid_central_transition_distance_m"
+            ),
+            central_acquire_timeout_s=value("pid_central_acquire_timeout_s"),
+            central_loss_grace_s=value("pid_central_loss_grace_s"),
+            recovery_climb_m=value("pid_recovery_climb_m"),
+            recovery_altitude_tolerance_m=value(
+                "pid_recovery_altitude_tolerance_m"
+            ),
+            max_recovery_attempts=int(
+                self.get_parameter("pid_max_recovery_attempts").value
+            ),
+            touchdown_commit_height_m=value(
+                "pid_touchdown_commit_height_m"
+            ),
+            touchdown_speed_m_s=value("pid_touchdown_speed_m_s"),
+            touchdown_timeout_s=value("pid_touchdown_timeout_s"),
+            landed_state_timeout_s=value("pid_landed_state_timeout_s"),
+            landed_stable_time_s=value("pid_landed_stable_time_s"),
+            disarm_retry_period_s=value("pid_disarm_retry_period_s"),
+            alignment_stable_time_s=value("pid_alignment_stable_time_s"),
+            coarse_horizontal_tolerance_m=value(
+                "pid_coarse_horizontal_tolerance_m"
+            ),
+            fine_horizontal_tolerance_m=value(
+                "pid_fine_horizontal_tolerance_m"
+            ),
+            coarse_yaw_tolerance_rad=value("pid_coarse_yaw_tolerance_rad"),
+            fine_yaw_tolerance_rad=value("pid_fine_yaw_tolerance_rad"),
+            max_horizontal_speed_m_s=max_horizontal,
+            outer_descent_speed_m_s=value("pid_outer_descent_speed_m_s"),
+            central_descent_speed_m_s=value("pid_central_descent_speed_m_s"),
+            recovery_speed_m_s=value("pid_recovery_speed_m_s"),
+            max_yaw_rate_rad_s=max_yaw,
+            search_position_gain=value("pid_search_position_gain"),
+            search_position_tolerance_m=value(
+                "pid_search_position_tolerance_m"
+            ),
+            search_max_vertical_speed_m_s=value(
+                "pid_search_max_vertical_speed_m_s"
+            ),
+            x_pid=pid_config("x", max_horizontal),
+            y_pid=pid_config("y", max_horizontal),
+            z_pid=pid_config("z", max_vertical),
+            yaw_pid=pid_config("yaw", max_yaw),
+        )
 
     def _sync_vehicle_state(self) -> None:
         """Expose direct telemetry in the shapes used by existing states."""
@@ -313,8 +516,21 @@ class MissionManager(Node):
 
     def _publish_state(self) -> None:
         message = String()
-        message.data = self._state.name
+        if self._state is MissionState.PID_LANDING:
+            substate = (
+                self._last_published_pid_substate
+                or PidLandingState.ACQUIRE_DOCK
+            )
+            message.data = f"PID_{substate.name}"
+        else:
+            message.data = self._state.name
         self._state_publisher.publish(message)
+
+    def _publish_pid_substate(self, state: PidLandingState) -> None:
+        if state is self._last_published_pid_substate:
+            return
+        self._last_published_pid_substate = state
+        self._publish_state()
 
     def _vehicle_ready(self, now: float) -> bool:
         return self._vehicle.ready(
@@ -326,7 +542,10 @@ class MissionManager(Node):
 
     def _pose_is_fresh(self, now: float) -> bool:
         timeout = float(self.get_parameter("pose_timeout_s").value)
-        return self._pose is not None and now - self._pose_received_at <= timeout
+        return (
+            self._pose is not None
+            and now - self._pose_received_at <= timeout
+        )
 
     def _dock_target_is_fresh(self, now: float) -> bool:
         timeout = float(self.get_parameter("dock_pose_timeout_s").value)
@@ -353,6 +572,43 @@ class MissionManager(Node):
 
     def _handle_pending_call(self, now: float) -> bool:
         if self._pending is None:
+            return False
+        if self._pending_name == "pid_disarm":
+            controller = self._pid_landing
+            request_id = self._pending_pid_disarm_request_id
+            if controller is None or request_id is None:
+                self._fail("PID disarm transaction lost its request ID")
+                return True
+            if now > self._pending_deadline:
+                self._pending = None
+                self._pending_name = ""
+                self._pending_pid_disarm_request_id = None
+                controller.notify_disarm_result(request_id, False, now)
+                self.get_logger().warning(
+                    "PID normal-disarm MAVLink operation timed out; "
+                    "controller may retry"
+                )
+                return False
+            if not self._pending.done():
+                return False
+            try:
+                result = self._pending.result()
+                success = bool(result.success)
+                if not success:
+                    self.get_logger().warning(
+                        "ArduPilot rejected PID normal-disarm request; "
+                        "controller may retry"
+                    )
+            except Exception as exception:
+                success = False
+                self.get_logger().warning(
+                    "PID normal-disarm MAVLink operation failed: "
+                    f"{exception}; controller may retry"
+                )
+            self._pending = None
+            self._pending_name = ""
+            self._pending_pid_disarm_request_id = None
+            controller.notify_disarm_result(request_id, success, now)
             return False
         if now > self._pending_deadline:
             self._fail(f"{self._pending_name} MAVLink operation timed out")
@@ -460,7 +716,7 @@ class MissionManager(Node):
                     )
                 next_state = (
                     MissionState.CHECK_LANDING_CONFIG
-                    if self._landing_backend == "ardupilot"
+                    if self._landing_mode == "precise_landing"
                     else MissionState.PREARM
                 )
                 self._set_state(next_state)
@@ -561,6 +817,10 @@ class MissionManager(Node):
         if self._state == MissionState.COMPLETE:
             return
 
+        if self._state == MissionState.PID_LANDING:
+            self._update_pid_landing(now)
+            return
+
         if not self._pose_is_fresh(now):
             self._fail("local pose became stale; stopping mission commands")
             return
@@ -608,10 +868,32 @@ class MissionManager(Node):
             )
             if self._fly_to(target):
                 if self._mission.precision_landing_enabled:
-                    self._set_state(MissionState.ACQUIRE_DOCK)
-                    self.get_logger().info(
-                        "Coarse dock approach complete; acquiring visual target"
-                    )
+                    if self._landing_mode == "pid":
+                        dock_x, dock_y = self._mission_xy(
+                            self._mission.dock_x_m,
+                            self._mission.dock_y_m,
+                        )
+                        assert self._pid_landing is not None
+                        self._pid_landing.start(
+                            now,
+                            dock_x,
+                            dock_y,
+                            self._mission.hover_altitude_m,
+                        )
+                        self._last_published_pid_substate = (
+                            PidLandingState.ACQUIRE_DOCK
+                        )
+                        self._set_state(MissionState.PID_LANDING)
+                        self.get_logger().info(
+                            "Coarse dock approach complete; starting guided "
+                            "PID landing"
+                        )
+                    else:
+                        self._set_state(MissionState.ACQUIRE_DOCK)
+                        self.get_logger().info(
+                            "Coarse dock approach complete; acquiring visual "
+                            "target"
+                        )
                 else:
                     self._set_state(MissionState.HOVER_OVER_DOCK)
                     self.get_logger().info(
@@ -633,11 +915,8 @@ class MissionManager(Node):
         if self._state == MissionState.ACQUIRE_DOCK:
             self._publish_velocity(0.0, 0.0, 0.0, frame_id="base_link")
             if self._dock_target_is_fresh(now):
-                # IF ROS BACKEND START TO ALIGN WITH CMD_VEL
-                if self._landing_backend == "ros":
-                    self._set_state(MissionState.ALIGN_DOCK)
                 # For native precision landing, LAND consumes the dock pose.
-                elif self._native_target_is_ready(now):
+                if self._native_target_is_ready(now):
                     self._set_state(MissionState.SET_LAND)
                     self.get_logger().info(
                         "LANDING_TARGET stream is stable; handing descent "
@@ -647,10 +926,7 @@ class MissionManager(Node):
                 self.get_parameter("dock_acquire_timeout_s").value
             ):
                 reason = "dock target was not acquired before timeout"
-                if (
-                    self._landing_backend == "ardupilot"
-                    and self._dock_target_is_fresh(now)
-                ):
+                if self._dock_target_is_fresh(now):
                     reason = (
                         "LANDING_TARGET stream did not become ready before "
                         "timeout"
@@ -670,6 +946,101 @@ class MissionManager(Node):
         if self._state == MissionState.DESCEND_CENTRAL:
             self._descend_central(now)
             return
+
+    def _pid_dock_observation(self, now: float) -> Optional[DockObservation]:
+        if not self._dock_target_is_fresh(now):
+            return None
+        mode = {
+            "OUTER": DockTargetMode.OUTER,
+            "CENTRAL": DockTargetMode.CENTRAL,
+        }.get(self._dock_mode)
+        if mode is None:
+            return None
+        position = self._dock_pose.pose.position
+        orientation = self._dock_pose.pose.orientation
+        forward_m, right_m, distance_m = camera_target_to_body_frd(
+            camera_x_m=position.x,
+            camera_y_m=position.y,
+            camera_z_m=position.z,
+        )
+        try:
+            yaw_error = camera_dock_orientation_to_body_yaw_error(
+                quaternion_x=orientation.x,
+                quaternion_y=orientation.y,
+                quaternion_z=orientation.z,
+                quaternion_w=orientation.w,
+            )
+        except ValueError as exception:
+            self.get_logger().warning(str(exception))
+            return None
+        return DockObservation(
+            forward_m=forward_m,
+            left_m=-right_m,
+            distance_m=distance_m,
+            yaw_error_rad=yaw_error,
+            mode=mode,
+            source_stamp_s=(
+                float(self._dock_pose.header.stamp.sec)
+                + float(self._dock_pose.header.stamp.nanosec) * 1.0e-9
+            ),
+            received_at=self._dock_pose_received_at,
+        )
+
+    def _update_pid_landing(self, now: float) -> None:
+        controller = self._pid_landing
+        if controller is None:
+            self._fail("PID landing controller is not configured")
+            return
+        state = self._vehicle.state
+        if not self._vehicle_ready(now):
+            self._fail("MAVLink heartbeat became stale during PID landing")
+            return
+        if not self._pose_is_fresh(now):
+            self._fail("local pose became stale; stopping mission commands")
+            return
+        if state.mode != GUIDED_MODE:
+            self._fail("vehicle left GUIDED during PID landing")
+            return
+        if state.position_enu_m is None or state.velocity_enu_m_s is None:
+            self._fail("local vehicle state is unavailable during PID landing")
+            return
+
+        decision = controller.update(
+            now,
+            self._pid_dock_observation(now),
+            VehicleObservation(
+                position_enu_m=state.position_enu_m,
+                velocity_enu_m_s=state.velocity_enu_m_s,
+                armed=state.armed,
+                flying=state.flying,
+                mode=state.mode,
+                landed_at=state.landed_at,
+            ),
+        )
+        self._publish_pid_substate(decision.state)
+        command = decision.command
+        self._vehicle.send_velocity(
+            command.frame,
+            command.velocity_x,
+            command.velocity_y,
+            command.velocity_z,
+            yaw_rate_rad_s=command.yaw_rate_rad_s,
+            now=now,
+        )
+        if decision.request_disarm:
+            request_id = decision.disarm_request_id
+            if request_id is None:
+                self._fail("PID disarm request did not include a request ID")
+                return
+            if self._pending is None:
+                self._begin_call(
+                    "pid_disarm", self._vehicle.arm_async(False, now)
+                )
+                self._pending_pid_disarm_request_id = request_id
+        if decision.outcome is PidLandingOutcome.COMPLETE:
+            self._complete_landing()
+        elif decision.outcome is PidLandingOutcome.FAILED:
+            self._fail(decision.reason or "PID landing failed")
 
     def _dock_horizontal_error(self) -> float:
         position = self._dock_pose.pose.position
@@ -715,7 +1086,7 @@ class MissionManager(Node):
         )
 
     def _stream_native_landing_target(self, now: float) -> None:
-        if self._landing_backend != "ardupilot":
+        if self._landing_mode != "precise_landing":
             return
         active_states = (
             MissionState.ACQUIRE_DOCK,
@@ -773,7 +1144,7 @@ class MissionManager(Node):
 
     def _send_native_landing_yaw(self, now: float) -> None:
         if (
-            self._landing_backend != "ardupilot"
+            self._landing_mode != "precise_landing"
             or not bool(
                 self.get_parameter("landing_yaw_correction_enabled").value
             )
