@@ -88,9 +88,17 @@ class PID:
         else:
             # A discontinuous clock or stale sample must not create a D spike.
             self._filtered_derivative = 0.0
+            if dt is None:
+                # Retain the initial sample as the baseline for the next update.
+                self._previous_time = now
+                self._previous_error = error
+            else:
+                self._previous_time = None
+                self._previous_error = None
 
-        self._previous_time = now
-        self._previous_error = error
+        if valid_dt:
+            self._previous_time = now
+            self._previous_error = error
         output = (
             self.config.kp * error
             + self.config.ki * self._integral

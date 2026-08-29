@@ -66,7 +66,15 @@ def test_repeated_timestamp_resets_derivative_without_spike():
     controller.update(0.0, now=1.0)
     controller.update(1.0, now=1.1)
     assert controller.update(2.0, now=1.1) == 0.0
-    assert controller.update(2.0, now=1.2) == 0.0
+    assert controller.update(3.0, now=1.2) == 0.0
+
+
+def test_backwards_timestamp_resets_derivative_without_spike():
+    controller = PID(config(kp=0.0, kd=1.0))
+    controller.update(0.0, now=1.0)
+    controller.update(1.0, now=1.1)
+    assert controller.update(2.0, now=1.0) == 0.0
+    assert controller.update(3.0, now=1.2) == 0.0
 
 
 def test_time_jump_resets_derivative_without_spike():
@@ -74,6 +82,7 @@ def test_time_jump_resets_derivative_without_spike():
     controller.update(0.0, now=1.0)
     controller.update(1.0, now=1.1)
     assert controller.update(2.0, now=2.0) == 0.0
+    assert controller.update(3.0, now=2.1) == 0.0
 
 
 @pytest.mark.parametrize("error, now", [(math.nan, 1.0), (math.inf, 1.0),
