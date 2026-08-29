@@ -79,6 +79,7 @@ class PidLandingDecision:
     command: VelocityCommand
     outcome: PidLandingOutcome = PidLandingOutcome.RUNNING
     request_disarm: bool = False
+    disarm_request_id: Optional[int] = None
     reason: str = ""
 
 
@@ -221,6 +222,8 @@ class PidLandingController:
         self._disarm_request_in_flight = False
         self._disarm_acknowledged = False
         self._disarm_next_retry_at = 0.0
+        self._next_disarm_request_id = 0
+        self._active_disarm_request_id: Optional[int] = None
         self._failure_reason = ""
 
     def start(
@@ -251,6 +254,7 @@ class PidLandingController:
         self._disarm_request_in_flight = False
         self._disarm_acknowledged = False
         self._disarm_next_retry_at = now
+        self._active_disarm_request_id = None
         self._failure_reason = ""
         self._reset_pids()
 
@@ -296,7 +300,15 @@ class PidLandingController:
             )
         raise RuntimeError(f"state {self._state.name} is not implemented")
 
-    def notify_disarm_result(self, success: bool, now: float) -> None:
+    def notify_disarm_result(
+        self, request_id: int, success: bool, now: float,
+    ) -> None:
+        if (
+            not isinstance(request_id, int)
+            or isinstance(request_id, bool)
+            or request_id < 1
+        ):
+            raise ValueError("request_id must be a positive int")
         if not isinstance(success, bool):
             raise ValueError("success must be a bool")
         if not math.isfinite(now):
@@ -304,9 +316,11 @@ class PidLandingController:
         if (
             self._state is not PidLandingState.DISARM
             or not self._disarm_request_in_flight
+            or request_id != self._active_disarm_request_id
         ):
             return
         self._disarm_request_in_flight = False
+        self._active_disarm_request_id = None
         if success:
             self._disarm_acknowledged = True
             return
@@ -571,11 +585,14 @@ class PidLandingController:
             return PidLandingDecision(self._state, _zero_body_command())
 
         self._disarm_request_in_flight = True
+        self._next_disarm_request_id += 1
+        self._active_disarm_request_id = self._next_disarm_request_id
         self._disarm_next_retry_at = now + self._config.disarm_retry_period_s
         return PidLandingDecision(
             self._state,
             _zero_body_command(),
             request_disarm=True,
+            disarm_request_id=self._active_disarm_request_id,
         )
 
     def _update_recovery_climb(
@@ -728,6 +745,7 @@ class PidLandingController:
         self._disarm_request_in_flight = False
         self._disarm_acknowledged = False
         self._disarm_next_retry_at = now
+        self._active_disarm_request_id = None
         self._reset_pids()
 
     def _fresh_on_ground(

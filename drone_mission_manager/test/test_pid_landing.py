@@ -876,7 +876,8 @@ def test_disarm_rejection_retries_after_deadline_without_duplicate_requests(
     controller, vehicle,
 ):
     initial = advance_to_stable_ground(controller, vehicle)
-    controller.notify_disarm_result(False, now=4.1)
+    assert initial.disarm_request_id is not None
+    controller.notify_disarm_result(initial.disarm_request_id, False, now=4.1)
 
     before_retry = controller.update(5.09, None, grounded_vehicle(5.09, landed_at=4.2))
     retry = controller.update(5.1, None, grounded_vehicle(5.1, landed_at=4.2))
@@ -906,9 +907,10 @@ def test_disarm_pending_request_is_not_reemitted_after_retry_deadline(
 def test_late_disarm_result_after_bounce_does_not_affect_later_attempt(
     controller, vehicle,
 ):
-    advance_to_stable_ground(controller, vehicle)
+    initial = advance_to_stable_ground(controller, vehicle)
+    assert initial.disarm_request_id is not None
     bounced = controller.update(4.1, None, vehicle_at(4.0, -2.0, 0.1))
-    controller.notify_disarm_result(True, now=4.2)
+    controller.notify_disarm_result(initial.disarm_request_id, True, now=4.2)
     controller.update(4.3, None, grounded_vehicle(4.3))
 
     later_attempt = controller.update(
@@ -921,8 +923,9 @@ def test_late_disarm_result_after_bounce_does_not_affect_later_attempt(
 
 
 def test_disarm_acknowledgement_waits_for_disarmed_heartbeat(controller, vehicle):
-    advance_to_stable_ground(controller, vehicle)
-    controller.notify_disarm_result(True, now=4.1)
+    initial = advance_to_stable_ground(controller, vehicle)
+    assert initial.disarm_request_id is not None
+    controller.notify_disarm_result(initial.disarm_request_id, True, now=4.1)
 
     waiting = controller.update(4.2, None, grounded_vehicle(4.2, armed=True))
     complete = controller.update(4.3, None, grounded_vehicle(4.3, armed=False))
@@ -932,6 +935,40 @@ def test_disarm_acknowledgement_waits_for_disarmed_heartbeat(controller, vehicle
     assert complete.state is PidLandingState.COMPLETE
     assert complete.outcome is PidLandingOutcome.COMPLETE
     assert complete.command == zero_body_command()
+
+
+def test_disarm_ignores_delayed_result_for_an_earlier_retry_request(
+    controller, vehicle,
+):
+    request_a = advance_to_stable_ground(controller, vehicle)
+    assert request_a.disarm_request_id is not None
+    controller.notify_disarm_result(
+        request_a.disarm_request_id, False, now=4.1
+    )
+    request_b = controller.update(
+        5.1, None, grounded_vehicle(5.1, landed_at=4.2)
+    )
+    assert request_b.disarm_request_id is not None
+
+    controller.notify_disarm_result(request_a.disarm_request_id, True, now=5.2)
+    still_pending_b = controller.update(
+        5.3, None, grounded_vehicle(5.3, landed_at=4.4)
+    )
+    controller.notify_disarm_result(
+        request_b.disarm_request_id, False, now=5.4
+    )
+    before_b_retry = controller.update(
+        6.39, None, grounded_vehicle(6.39, landed_at=5.4)
+    )
+    after_b_retry = controller.update(
+        6.4, None, grounded_vehicle(6.4, landed_at=5.4)
+    )
+
+    assert request_b.disarm_request_id > request_a.disarm_request_id
+    assert still_pending_b.request_disarm is False
+    assert before_b_retry.request_disarm is False
+    assert after_b_retry.request_disarm is True
+    assert after_b_retry.disarm_request_id > request_b.disarm_request_id
 
 
 @pytest.mark.parametrize(
