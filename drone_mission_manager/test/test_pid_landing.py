@@ -27,6 +27,17 @@ def pid_config(output_limit=1.0):
     )
 
 
+def derivative_pid_config():
+    return PIDConfig(
+        kp=0.0,
+        ki=0.0,
+        kd=1.0,
+        integral_limit=0.5,
+        output_limit=10.0,
+        derivative_filter_time_constant_s=0.0,
+    )
+
+
 def default_config(**overrides):
     values = dict(
         initial_acquire_time_s=2.0,
@@ -95,6 +106,21 @@ def outer_observation(received_at):
         distance_m=2.0,
         yaw_error_rad=0.05,
         mode=DockTargetMode.OUTER,
+        source_stamp_s=received_at,
+        received_at=received_at,
+    )
+
+
+def dock_observation(
+    received_at, *, forward_m=0.1, left_m=-0.1, distance_m=2.0,
+    yaw_error_rad=0.05, mode=DockTargetMode.OUTER,
+):
+    return DockObservation(
+        forward_m=forward_m,
+        left_m=left_m,
+        distance_m=distance_m,
+        yaw_error_rad=yaw_error_rad,
+        mode=mode,
         source_stamp_s=received_at,
         received_at=received_at,
     )
@@ -276,3 +302,380 @@ def test_failed_search_continues_to_return_its_zero_command(controller, vehicle)
     assert decision.command.velocity_x == 0.0
     assert decision.command.velocity_y == 0.0
     assert decision.command.velocity_z == 0.0
+
+
+def enter_align(controller, vehicle, observation=None):
+    controller.start(now=0.0, dock_x_m=4.0, dock_y_m=-2.0,
+                     hover_altitude_m=4.0)
+    observation = observation or outer_observation(received_at=0.1)
+    controller.update(0.1, observation, vehicle)
+    return controller.update(
+        0.6,
+        replace(observation, received_at=0.6, source_stamp_s=0.6),
+        vehicle,
+    )
+
+
+def test_align_commands_body_flu_toward_dock_with_limited_speed_and_zero_z(
+    vehicle,
+):
+    controller = PidLandingController(default_config(
+        max_horizontal_speed_m_s=0.5,
+        max_yaw_rate_rad_s=0.3,
+        x_pid=pid_config(output_limit=2.0),
+        y_pid=pid_config(output_limit=2.0),
+        yaw_pid=pid_config(output_limit=2.0),
+    ))
+    enter_align(controller, vehicle)
+
+    decision = controller.update(0.7, dock_observation(
+        0.7, forward_m=0.6, left_m=-0.8, yaw_error_rad=0.4,
+    ), vehicle)
+
+    assert decision.state is PidLandingState.PID_ALIGN
+    assert decision.command.frame is VelocityFrame.BODY_FLU
+    assert decision.command.velocity_x == pytest.approx(0.3)
+    assert decision.command.velocity_y == pytest.approx(-0.4)
+    assert decision.command.velocity_z == 0.0
+    assert decision.command.yaw_rate_rad_s == pytest.approx(0.3)
+
+
+def test_align_wraps_yaw_error_to_the_shortest_turn_direction(vehicle):
+    controller = PidLandingController(default_config(
+        max_yaw_rate_rad_s=4.0,
+        yaw_pid=pid_config(output_limit=4.0),
+    ))
+    enter_align(controller, vehicle)
+
+    decision = controller.update(0.7, dock_observation(
+        0.7, yaw_error_rad=math.pi + 0.1,
+    ), vehicle)
+
+    assert decision.command.yaw_rate_rad_s == pytest.approx(-math.pi + 0.1)
+
+
+@pytest.mark.parametrize(
+    "misaligned",
+    [
+        {"forward_m": 0.25},
+        {"left_m": 0.25},
+        {"yaw_error_rad": 0.25},
+    ],
+)
+def test_alignment_stability_restarts_for_each_controlled_error(
+    controller, vehicle, misaligned,
+):
+    enter_align(controller, vehicle)
+    aligned = dock_observation(0.7)
+    controller.update(0.7, aligned, vehicle)
+    controller.update(1.2, dock_observation(1.2, **misaligned), vehicle)
+    controller.update(1.3, aligned, vehicle)
+
+    before_stable = controller.update(2.2, dock_observation(2.2), vehicle)
+    stable = controller.update(2.31, dock_observation(2.31), vehicle)
+
+    assert before_stable.state is PidLandingState.PID_ALIGN
+    assert stable.state is PidLandingState.DESCEND_OUTER
+
+
+def test_missing_visual_observation_stops_alignment_and_returns_to_acquisition(
+    controller, vehicle,
+):
+    enter_align(controller, vehicle)
+
+    decision = controller.update(0.7, None, vehicle)
+
+    assert decision.state is PidLandingState.ACQUIRE_DOCK
+    assert decision.command.frame is VelocityFrame.BODY_FLU
+    assert decision.command.velocity_x == 0.0
+    assert decision.command.velocity_y == 0.0
+    assert decision.command.velocity_z == 0.0
+
+
+def enter_outer_descent(controller, vehicle):
+    enter_align(controller, vehicle)
+    controller.update(0.7, dock_observation(0.7), vehicle)
+    return controller.update(1.7, dock_observation(1.7), vehicle)
+
+
+@pytest.mark.parametrize(
+    "misaligned",
+    [
+        {"forward_m": 0.3},
+        {"left_m": 0.3},
+        {"yaw_error_rad": 0.3},
+    ],
+)
+def test_outer_descent_setpoint_ramps_only_while_aligned(
+    controller, vehicle, misaligned,
+):
+    enter_outer_descent(controller, vehicle)
+
+    initial = controller.update(
+        1.8, dock_observation(1.8, distance_m=2.0), vehicle
+    )
+    descending = controller.update(
+        2.8, dock_observation(2.8, distance_m=2.0), vehicle
+    )
+    held = controller.update(
+        3.8,
+        dock_observation(3.8, distance_m=2.0, **misaligned),
+        vehicle,
+    )
+    resumed = controller.update(
+        4.8, dock_observation(4.8, distance_m=2.0), vehicle
+    )
+
+    assert initial.command.velocity_z == pytest.approx(0.0)
+    assert descending.command.velocity_z == pytest.approx(-0.3)
+    assert held.command.velocity_z == pytest.approx(-0.3)
+    assert resumed.command.velocity_z == pytest.approx(-0.6)
+
+
+@pytest.mark.parametrize(
+    "mode, expected_state",
+    [
+        (DockTargetMode.OUTER, PidLandingState.ACQUIRE_CENTRAL),
+        (DockTargetMode.CENTRAL, PidLandingState.DESCEND_CENTRAL),
+    ],
+)
+def test_outer_descent_transitions_by_central_target_stability(
+    vehicle, mode, expected_state,
+):
+    controller = PidLandingController(default_config(tag_stable_time_s=0.5))
+    enter_outer_descent(controller, vehicle)
+    if mode is DockTargetMode.CENTRAL:
+        controller.update(1.8, dock_observation(
+            1.8, distance_m=1.2, mode=DockTargetMode.CENTRAL,
+        ), vehicle)
+        controller.update(2.3, dock_observation(
+            2.3, distance_m=1.1, mode=DockTargetMode.CENTRAL,
+        ), vehicle)
+
+    decision = controller.update(2.8, dock_observation(
+        2.8, distance_m=1.0, mode=mode,
+    ), vehicle)
+
+    assert decision.state is expected_state
+    assert decision.command.velocity_z == 0.0
+
+
+def central_observation(received_at, *, distance_m=0.9):
+    return dock_observation(
+        received_at,
+        forward_m=0.05,
+        left_m=-0.05,
+        distance_m=distance_m,
+        yaw_error_rad=0.05,
+        mode=DockTargetMode.CENTRAL,
+    )
+
+
+def enter_acquire_central(controller, vehicle):
+    low_outer = dock_observation(
+        0.1,
+        forward_m=0.05,
+        left_m=-0.05,
+        distance_m=1.0,
+        yaw_error_rad=0.05,
+    )
+    enter_align(controller, vehicle, low_outer)
+    controller.update(0.7, replace(
+        low_outer, received_at=0.7, source_stamp_s=0.7,
+    ), vehicle)
+    return controller.update(1.71, replace(
+        low_outer, received_at=1.71, source_stamp_s=1.71,
+    ), vehicle)
+
+
+def enter_central_descent(controller, vehicle):
+    enter_acquire_central(controller, vehicle)
+    controller.update(1.8, central_observation(1.8), vehicle)
+    return controller.update(2.31, central_observation(2.31), vehicle)
+
+
+def test_align_uses_fine_tolerance_at_central_transition_distance(vehicle):
+    controller = PidLandingController(default_config())
+    observation = dock_observation(
+        0.1, forward_m=0.1, left_m=0.0, distance_m=1.0,
+        yaw_error_rad=0.0,
+    )
+    enter_align(controller, vehicle, observation)
+
+    decision = controller.update(1.7, replace(
+        observation, received_at=1.7, source_stamp_s=1.7,
+    ), vehicle)
+
+    assert decision.state is PidLandingState.PID_ALIGN
+    assert decision.command.velocity_z == 0.0
+
+
+def test_missing_visual_observation_stops_outer_descent_before_transition(
+    controller, vehicle,
+):
+    enter_outer_descent(controller, vehicle)
+    controller.update(1.8, dock_observation(1.8), vehicle)
+
+    decision = controller.update(1.9, None, vehicle)
+
+    assert decision.state is PidLandingState.ACQUIRE_DOCK
+    assert decision.command.frame is VelocityFrame.BODY_FLU
+    assert decision.command.velocity_x == 0.0
+    assert decision.command.velocity_y == 0.0
+    assert decision.command.velocity_z == 0.0
+    assert decision.command.yaw_rate_rad_s == 0.0
+
+
+def test_acquire_central_requires_a_stable_central_observation(
+    controller, vehicle,
+):
+    transition = enter_acquire_central(controller, vehicle)
+    first = controller.update(1.8, central_observation(1.8), vehicle)
+    almost_stable = controller.update(2.29, central_observation(2.29), vehicle)
+    stable = controller.update(2.31, central_observation(2.31), vehicle)
+
+    assert transition.state is PidLandingState.ACQUIRE_CENTRAL
+    assert first.state is PidLandingState.ACQUIRE_CENTRAL
+    assert almost_stable.state is PidLandingState.ACQUIRE_CENTRAL
+    assert stable.state is PidLandingState.DESCEND_CENTRAL
+    assert stable.command.velocity_z == 0.0
+
+
+def test_central_loss_within_grace_commands_zero_then_resumes_descent(
+    controller, vehicle,
+):
+    enter_central_descent(controller, vehicle)
+    controller.update(2.4, central_observation(2.4), vehicle)
+
+    missing = controller.update(2.5, None, vehicle)
+    recovered = controller.update(2.79, central_observation(2.79), vehicle)
+
+    assert missing.state is PidLandingState.DESCEND_CENTRAL
+    assert missing.command.velocity_z == 0.0
+    assert recovered.state is PidLandingState.DESCEND_CENTRAL
+
+
+def test_central_loss_beyond_grace_enters_recovery_stopped(
+    controller, vehicle,
+):
+    enter_central_descent(controller, vehicle)
+    controller.update(2.4, central_observation(2.4), vehicle)
+    first_missing = controller.update(2.5, None, vehicle)
+
+    recovery = controller.update(2.81, None, vehicle)
+
+    assert first_missing.command.velocity_z == 0.0
+    assert recovery.state is PidLandingState.RECOVERY_CLIMB
+    assert recovery.command.velocity_x == 0.0
+    assert recovery.command.velocity_y == 0.0
+    assert recovery.command.velocity_z == 0.0
+    assert recovery.command.yaw_rate_rad_s == 0.0
+
+
+def test_recovery_uses_local_altitude_and_ignores_camera_distance(vehicle):
+    controller = PidLandingController(default_config(
+        search_position_tolerance_m=0.05,
+    ))
+    enter_acquire_central(controller, vehicle)
+    transition = controller.update(
+        4.72, None, vehicle_at(4.0, -2.0, 5.0),
+    )
+
+    camera_says_near_ground = controller.update(
+        4.8,
+        central_observation(4.8, distance_m=0.01),
+        vehicle_at(4.0, -2.0, 5.24),
+    )
+    complete = controller.update(
+        4.9, None, vehicle_at(4.0, -2.0, 5.25),
+    )
+
+    assert transition.state is PidLandingState.RECOVERY_CLIMB
+    assert transition.command.velocity_z == 0.0
+    assert (
+        camera_says_near_ground.state is PidLandingState.RECOVERY_CLIMB
+    )
+    assert camera_says_near_ground.command.frame is VelocityFrame.BODY_FLU
+    assert camera_says_near_ground.command.velocity_x == 0.0
+    assert camera_says_near_ground.command.velocity_y == 0.0
+    assert camera_says_near_ground.command.velocity_z == pytest.approx(0.2)
+    assert camera_says_near_ground.command.yaw_rate_rad_s == 0.0
+    assert complete.state is PidLandingState.ACQUIRE_CENTRAL
+    assert complete.command.velocity_z == 0.0
+
+
+def test_central_acquisition_timer_is_fresh_after_recovery(vehicle):
+    controller = PidLandingController(default_config(
+        search_position_tolerance_m=0.05,
+    ))
+    enter_central_descent(controller, vehicle)
+    controller.update(2.4, None, vehicle)
+    controller.update(2.71, None, vehicle)
+    controller.update(3.0, None, vehicle_at(4.0, -2.0, 4.25))
+
+    first = controller.update(3.1, central_observation(3.1), vehicle)
+    stable = controller.update(3.61, central_observation(3.61), vehicle)
+
+    assert first.state is PidLandingState.ACQUIRE_CENTRAL
+    assert stable.state is PidLandingState.DESCEND_CENTRAL
+
+
+def test_state_entries_reset_all_pid_histories(vehicle):
+    derivative_only = derivative_pid_config()
+    controller = PidLandingController(default_config(
+        tag_stable_time_s=0.1,
+        alignment_stable_time_s=0.4,
+        x_pid=derivative_only,
+        y_pid=derivative_only,
+        z_pid=derivative_only,
+        yaw_pid=derivative_only,
+    ))
+    enter_align(controller, vehicle)
+    controller.update(0.7, dock_observation(0.7), vehicle)
+    controller.update(1.11, dock_observation(1.11), vehicle)
+
+    first_outer = controller.update(1.2, dock_observation(
+        1.2, forward_m=0.15, left_m=-0.15, yaw_error_rad=0.1,
+    ), vehicle)
+    controller.update(1.3, dock_observation(
+        1.3, forward_m=0.15, left_m=-0.15, yaw_error_rad=0.1,
+    ), vehicle)
+    controller.update(1.4, dock_observation(
+        1.4, forward_m=0.05, left_m=-0.05, distance_m=1.0,
+        yaw_error_rad=0.05,
+    ), vehicle)
+    controller.update(1.5, central_observation(1.5), vehicle)
+    controller.update(1.61, central_observation(1.61), vehicle)
+
+    first_central = controller.update(1.7, central_observation(1.7), vehicle)
+
+    assert first_outer.state is PidLandingState.DESCEND_OUTER
+    assert first_outer.command.velocity_x == 0.0
+    assert first_outer.command.velocity_y == 0.0
+    assert first_outer.command.velocity_z == 0.0
+    assert first_outer.command.yaw_rate_rad_s == 0.0
+    assert first_central.state is PidLandingState.DESCEND_CENTRAL
+    assert first_central.command.velocity_x == 0.0
+    assert first_central.command.velocity_y == 0.0
+    assert first_central.command.velocity_z == 0.0
+    assert first_central.command.yaw_rate_rad_s == 0.0
+
+
+def test_recovery_attempt_limit_fails_after_the_configured_number_of_climbs(
+    vehicle,
+):
+    controller = PidLandingController(default_config(
+        max_recovery_attempts=1,
+        search_position_tolerance_m=0.05,
+    ))
+    enter_acquire_central(controller, vehicle)
+    first_recovery = controller.update(4.72, None, vehicle)
+    controller.update(5.0, None, vehicle_at(4.0, -2.0, 4.25))
+
+    failed = controller.update(8.01, None, vehicle_at(4.0, -2.0, 4.25))
+
+    assert first_recovery.state is PidLandingState.RECOVERY_CLIMB
+    assert failed.state is PidLandingState.FAILED
+    assert failed.outcome is PidLandingOutcome.FAILED
+    assert failed.reason == "central tag recovery attempts exhausted"
+    assert failed.command.velocity_z == 0.0
