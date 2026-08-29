@@ -224,6 +224,32 @@ def test_stable_tag_during_search_enters_align_with_zero_body_command(
     assert stable.command.velocity_z == 0.0
 
 
+def test_search_timeout_precedes_tag_stability_at_deadline(controller, vehicle):
+    enter_search(controller, vehicle)
+    controller.update(6.6, outer_observation(received_at=6.6), vehicle)
+
+    decision = controller.update(7.1, outer_observation(received_at=7.1), vehicle)
+
+    assert decision.state is PidLandingState.FAILED
+    assert decision.outcome is PidLandingOutcome.FAILED
+    assert decision.reason == "dock tag was not acquired during search"
+    assert decision.command.frame is VelocityFrame.BODY_FLU
+
+
+def test_search_does_not_orbit_until_east_perimeter_altitude_is_reached(
+    controller,
+):
+    enter_search(controller, vehicle_at(5.0, -2.0, 3.0))
+
+    decision = controller.update(2.2, None, vehicle_at(5.0, -2.0, 3.0))
+
+    assert decision.state is PidLandingState.SEARCH_CIRCLE
+    assert decision.command.frame is VelocityFrame.MAP_ENU
+    assert decision.command.velocity_x == pytest.approx(0.0)
+    assert decision.command.velocity_y == pytest.approx(0.0)
+    assert decision.command.velocity_z == pytest.approx(0.7)
+
+
 def test_search_timeout_fails_with_zero_body_command(controller, vehicle):
     enter_search(controller, vehicle)
 

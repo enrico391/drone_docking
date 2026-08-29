@@ -277,16 +277,6 @@ class PidLandingController:
         self, now: float, dock: Optional[DockObservation],
         vehicle: VehicleObservation,
     ) -> PidLandingDecision:
-        if self._usable_dock(dock):
-            if self._tag_stable_started_at is None:
-                self._tag_stable_started_at = now
-            if now - self._tag_stable_started_at >= self._config.tag_stable_time_s:
-                self._state = PidLandingState.PID_ALIGN
-                self._state_started_at = now
-                return PidLandingDecision(self._state, _zero_body_command())
-        else:
-            self._tag_stable_started_at = None
-
         if now - self._state_started_at >= self._config.search_timeout_s:
             self._state = PidLandingState.FAILED
             self._failure_reason = "dock tag was not acquired during search"
@@ -297,11 +287,23 @@ class PidLandingController:
                 reason=self._failure_reason,
             )
 
+        if self._usable_dock(dock):
+            if self._tag_stable_started_at is None:
+                self._tag_stable_started_at = now
+            if now - self._tag_stable_started_at >= self._config.tag_stable_time_s:
+                self._state = PidLandingState.PID_ALIGN
+                self._state_started_at = now
+                return PidLandingDecision(self._state, _zero_body_command())
+        else:
+            self._tag_stable_started_at = None
+
         position_x, position_y, position_z = self._finite_position(vehicle)
         perimeter_x = self._dock_x_m + self._config.search_radius_m
         perimeter_y = self._dock_y_m
         if not self._search_perimeter_reached:
             if math.hypot(perimeter_x - position_x, perimeter_y - position_y) <= (
+                self._config.search_position_tolerance_m
+            ) and abs(self._hover_altitude_m - position_z) <= (
                 self._config.search_position_tolerance_m
             ):
                 self._search_perimeter_reached = True
