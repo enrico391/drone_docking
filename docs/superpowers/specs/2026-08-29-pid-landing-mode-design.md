@@ -249,7 +249,8 @@ match the existing package. The initial additions are:
   `pid_recovery_climb_m`, `pid_max_recovery_attempts`;
 - touchdown: `pid_touchdown_commit_height_m`,
   `pid_touchdown_speed_m_s`, `pid_touchdown_timeout_s`,
-  `pid_landed_stable_time_s`, `pid_disarm_retry_period_s`;
+  `pid_landed_state_timeout_s`, `pid_landed_stable_time_s`,
+  `pid_disarm_retry_period_s`;
 - tolerances and limits: coarse/fine horizontal tolerance, coarse/fine yaw
   tolerance, maximum horizontal velocity, maximum outer/fine vertical
   velocity and maximum yaw rate;
