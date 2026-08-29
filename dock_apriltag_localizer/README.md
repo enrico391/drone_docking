@@ -144,8 +144,8 @@ translation speed multiplied by the sample interval.
 
 ## MAVLink dock-pose bridge
 
-For standalone precision-landing debugging, launch the bridge after the
-localizer and MAVProxy are running:
+For standalone precision-landing debugging, launch the bridge with direct
+access to ArduPilot's MAVLink serial endpoint:
 
 ```bash
 ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py
@@ -154,29 +154,29 @@ ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py
 The bridge subscribes to `/dock/pose`, converts the downward camera optical
 position to MAVLink Body-FRD, and sends a position-valid `LANDING_TARGET` for
 every received pose. The MAVLink measurement timestamp comes from the source
-image rather than the bridge transmission time. It listens on UDP port `14551`
-by default and discovers
-the return address from incoming MAVLink traffic, matching the workspace's
-MAVProxy setup.
+image rather than the bridge transmission time. It uses MAVLink 2 with the
+`ardupilotmega` dialect and connects through `pymavlink` directly; MAVProxy is
+not required. The default endpoint is `/dev/ttyAMA0` at `921600` baud.
 
 The camera origin offset from the vehicle body origin is configurable in
 Body-FRD. For example:
 
 ```bash
 ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py \
-  udp_port:=14551 camera_down_m:=0.206
+  mavlink_connection:=/dev/ttyAMA0 mavlink_baud:=921600 \
+  camera_down_m:=0.206
 ```
 
-Only one process should send landing targets through this UDP endpoint. Do not
-run this bridge at the same time as `drone_mission_manager` with
-`landing_backend:=ardupilot`.
-
-To start mavlink bridge:
+For SITL, select its direct TCP endpoint instead:
 
 ```bash
-source .venvs/mavproxy/bin/activate
-mavproxy.py     --master=/dev/ttyAMA0,921600     --out=udp:127.0.0.1:14551
+ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py \
+  mavlink_connection:=tcp:127.0.0.1:5760
 ```
+
+Exactly one process should own the selected serial or TCP endpoint. Do not run
+this bridge at the same time as `drone_mission_manager`, which maintains its
+own direct pymavlink connection.
 
 ## Pose convention
 

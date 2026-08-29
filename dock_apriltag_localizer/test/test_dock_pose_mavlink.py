@@ -1,12 +1,45 @@
-"""Tests for standalone dock-pose MAVLink message generation."""
+"""Tests for the standalone dock-pose pymavlink transport."""
 
 import pytest
 
 from dock_apriltag_localizer.dock_pose_mavlink import (
+    MavlinkLandingTargetSender,
     camera_target_to_body_frd,
-    encode_landing_target,
     measurement_time_usec,
 )
+
+
+class FakeMav:
+    def __init__(self):
+        self.landing_targets = []
+
+    def landing_target_send(self, *args):
+        self.landing_targets.append(args)
+
+
+class FakeConnection:
+    def __init__(self):
+        self.mav = FakeMav()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class FakeMavlink:
+    MAV_FRAME_BODY_FRD = 12
+
+
+class FakeMavutil:
+    mavlink = FakeMavlink()
+
+    def __init__(self):
+        self.connection = FakeConnection()
+        self.connection_calls = []
+
+    def mavlink_connection(self, endpoint, **kwargs):
+        self.connection_calls.append((endpoint, kwargs))
+        return self.connection
 
 
 def test_camera_target_converts_to_vehicle_body_frd():
@@ -20,26 +53,69 @@ def test_camera_target_converts_to_vehicle_body_frd():
 
     assert forward == pytest.approx(0.3)
     assert right == pytest.approx(0.2)
-    assert down == pytest.approx(2.14)
+    assert down == pytest.approx(2.206)
 
 
-def test_landing_target_matches_known_mavlink2_frame():
-    """Encoding matches a frame independently decoded by pymavlink."""
-    packet = encode_landing_target(
-        sequence=7,
+def test_sender_opens_configured_direct_pymavlink_endpoint():
+    """Break caught: the standalone bridge still depends on MAVProxy UDP."""
+    mavutil = FakeMavutil()
+
+    sender = MavlinkLandingTargetSender(
+        connection="/dev/ttyAMA0",
+        baud=921600,
         source_system=254,
         source_component=191,
+        mavutil_module=mavutil,
+    )
+
+    assert mavutil.connection_calls == [
+        (
+            "/dev/ttyAMA0",
+            {
+                "baud": 921600,
+                "source_system": 254,
+                "source_component": 191,
+                "dialect": "ardupilotmega",
+                "autoreconnect": True,
+                "robust_parsing": True,
+            },
+        )
+    ]
+
+    sender.close()
+    assert mavutil.connection.closed is True
+
+
+def test_sender_uses_generated_pymavlink_landing_target_message():
+    """Break caught: target fields bypass or misuse pymavlink generation."""
+    mavutil = FakeMavutil()
+    sender = MavlinkLandingTargetSender(
+        connection="tcp:127.0.0.1:5760",
+        baud=921600,
+        source_system=254,
+        source_component=191,
+        mavutil_module=mavutil,
+    )
+
+    sent = sender.send(
         time_usec=123456,
         forward_m=1.25,
         right_m=-0.5,
         down_m=3.0,
     )
 
-    assert packet.hex() == (
-        "fd3c000007febf95000040e2010000000000000000000000000078725240"
-        "0000000000000000000c0000a03f000000bf000040400000803f00000000"
-        "0000000000000000020166fc"
-    )
+    assert sent is True
+    call = mavutil.connection.mav.landing_targets[-1]
+    assert call[0] == 123456
+    assert call[1] == 0
+    assert call[2] == 12
+    assert call[3:5] == (0.0, 0.0)
+    assert call[5] == pytest.approx(3.288236609)
+    assert call[6:8] == (0.0, 0.0)
+    assert call[8:11] == pytest.approx((1.25, -0.5, 3.0))
+    assert call[11] == (1.0, 0.0, 0.0, 0.0)
+    assert call[12] == 2
+    assert call[13] == 1
 
 
 def test_measurement_timestamp_prefers_ros_acquisition_time():

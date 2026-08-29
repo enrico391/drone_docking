@@ -13,8 +13,14 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "dock_pose_topic", default_value="/dock/pose"
             ),
-            DeclareLaunchArgument("bind_address", default_value="0.0.0.0"),
-            DeclareLaunchArgument("udp_port", default_value="14551"),
+            DeclareLaunchArgument(
+                "mavlink_connection",
+                default_value="/dev/ttyAMA0",
+                description=(
+                    "Direct ArduPilot serial or TCP pymavlink endpoint."
+                ),
+            ),
+            DeclareLaunchArgument("mavlink_baud", default_value="921600"),
             DeclareLaunchArgument("source_system", default_value="254"),
             DeclareLaunchArgument("source_component", default_value="191"),
             DeclareLaunchArgument("camera_forward_m", default_value="0.0"),
@@ -30,9 +36,11 @@ def generate_launch_description() -> LaunchDescription:
                         "dock_pose_topic": LaunchConfiguration(
                             "dock_pose_topic"
                         ),
-                        "bind_address": LaunchConfiguration("bind_address"),
-                        "udp_port": ParameterValue(
-                            LaunchConfiguration("udp_port"), value_type=int
+                        "mavlink_connection": LaunchConfiguration(
+                            "mavlink_connection"
+                        ),
+                        "mavlink_baud": ParameterValue(
+                            LaunchConfiguration("mavlink_baud"), value_type=int
                         ),
                         "source_system": ParameterValue(
                             LaunchConfiguration("source_system"),

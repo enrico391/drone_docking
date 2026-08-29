@@ -14,7 +14,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'pymavlink>=2.4.49,<3'],
     zip_safe=True,
     maintainer='Enrico',
     description='Multi-AprilTag two-stage docking localizer for ROS 2.',
