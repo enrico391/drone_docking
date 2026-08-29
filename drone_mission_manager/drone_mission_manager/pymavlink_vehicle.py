@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 
 _POSITION_TARGET_TYPEMASK_VELOCITY_ONLY = 3527
+_POSITION_TARGET_TYPEMASK_VELOCITY_YAW_RATE = 1479
 _LANDING_TARGET_TYPE_FIDUCIAL = 2
 _COMMAND_RETRY_S = 0.5
 _COMMAND_TIMEOUT_S = 3.0
@@ -258,10 +259,17 @@ class MavlinkVehicle:
         velocity_z: float,
         *,
         now: float,
+        yaw_rate_rad_s: Optional[float] = None,
     ) -> bool:
-        """Send one velocity-only SET_POSITION_TARGET_LOCAL_NED."""
+        """Send one SET_POSITION_TARGET_LOCAL_NED velocity setpoint."""
         if self._closed:
             return False
+        if not all(
+            math.isfinite(value) for value in (velocity_x, velocity_y, velocity_z)
+        ):
+            raise ValueError("velocity values must be finite")
+        if yaw_rate_rad_s is not None and not math.isfinite(yaw_rate_rad_s):
+            raise ValueError("yaw_rate_rad_s must be finite")
         if frame is VelocityFrame.MAP_ENU:
             mavlink_frame = self._mavutil.mavlink.MAV_FRAME_LOCAL_NED
             north, east, down = velocity_y, velocity_x, -velocity_z
@@ -275,7 +283,11 @@ class MavlinkVehicle:
             self._target_system,
             self._target_component,
             mavlink_frame,
-            _POSITION_TARGET_TYPEMASK_VELOCITY_ONLY,
+            (
+                _POSITION_TARGET_TYPEMASK_VELOCITY_ONLY
+                if yaw_rate_rad_s is None
+                else _POSITION_TARGET_TYPEMASK_VELOCITY_YAW_RATE
+            ),
             0.0,
             0.0,
             0.0,
@@ -286,7 +298,7 @@ class MavlinkVehicle:
             0.0,
             0.0,
             0.0,
-            0.0,
+            0.0 if yaw_rate_rad_s is None else -float(yaw_rate_rad_s),
         )
         self._last_velocity_frame = frame
         return True

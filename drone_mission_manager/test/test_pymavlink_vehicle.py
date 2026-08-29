@@ -255,6 +255,44 @@ def test_velocity_uses_expected_mavlink_frame_and_axis_conversion(
     assert call[4] == 3527
 
 
+def test_body_velocity_with_yaw_rate_uses_flu_to_ned_conversion(vehicle, connection):
+    vehicle.send_velocity(
+        VelocityFrame.BODY_FLU,
+        1.0,
+        -2.0,
+        0.25,
+        yaw_rate_rad_s=0.4,
+        now=30.0,
+    )
+
+    call = connection.mav.calls_for("set_position_target_local_ned_send")[-1]
+    assert call[3] == MAVLINK.MAV_FRAME_BODY_NED
+    assert call[4] == 1479
+    assert call[8:11] == pytest.approx((1.0, 2.0, -0.25))
+    assert call[15] == pytest.approx(-0.4)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        (float("nan"), 0.0, 0.0, 0.0),
+        (0.0, float("inf"), 0.0, 0.0),
+        (0.0, 0.0, float("-inf"), 0.0),
+        (0.0, 0.0, 0.0, float("nan")),
+    ],
+)
+def test_velocity_rejects_non_finite_velocity_and_yaw_rate(vehicle, values):
+    with pytest.raises(ValueError, match="finite"):
+        vehicle.send_velocity(
+            VelocityFrame.MAP_ENU,
+            values[0],
+            values[1],
+            values[2],
+            yaw_rate_rad_s=values[3],
+            now=30.0,
+        )
+
+
 def test_landing_target_uses_generated_pymavlink_message(vehicle, connection):
     """Break caught: precision target bypasses the shared pymavlink link."""
     sent = vehicle.send_landing_target(
