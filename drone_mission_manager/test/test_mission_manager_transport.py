@@ -1,6 +1,7 @@
 """Integration boundary tests for MissionManager's direct vehicle transport."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import rclpy
@@ -25,6 +26,7 @@ from drone_mission_manager.pid_landing import (
     VelocityCommand,
 )
 from drone_mission_manager.pymavlink_vehicle import (
+    MavlinkVehicle,
     VehicleCommandResult,
     VehicleState,
     VelocityFrame,
@@ -69,7 +71,10 @@ class FakeVehicle:
     def arm_async(self, arm, now):
         self.arm_calls.append((arm, now))
         if self.arm_futures:
-            return self.arm_futures.pop(0)
+            future = self.arm_futures.pop(0)
+            if isinstance(future, BaseException):
+                raise future
+            return future
         return FakeFuture(VehicleCommandResult(True))
 
     def set_mode_async(self, mode, now):
@@ -129,12 +134,66 @@ class StubPidLanding:
         self.disarm_results.append((request_id, success, now))
 
 
+class EchoDockYawPidLanding(StubPidLanding):
+    def __init__(self):
+        super().__init__([])
+
+    def update(self, now, dock, vehicle):
+        self.updates.append((now, dock, vehicle))
+        return running_decision(
+            command=VelocityCommand(
+                VelocityFrame.BODY_FLU,
+                0.0,
+                0.0,
+                0.0,
+                dock.yaw_error_rad,
+            )
+        )
+
+
 class RecordingPublisher:
     def __init__(self):
         self.messages = []
 
     def publish(self, message):
         self.messages.append(message.data)
+
+
+class RecordingMav:
+    def __init__(self):
+        self.position_target_calls = []
+
+    def set_position_target_local_ned_send(self, *values):
+        self.position_target_calls.append(values)
+
+
+def mavlink_yaw_rate_for(command_call):
+    """Pass one fake-manager command through the real MAVLink adapter."""
+    mav = RecordingMav()
+    adapter = object.__new__(MavlinkVehicle)
+    adapter._closed = False
+    adapter._mavutil = SimpleNamespace(
+        mavlink=SimpleNamespace(
+            MAV_FRAME_LOCAL_NED=1,
+            MAV_FRAME_BODY_NED=8,
+        )
+    )
+    adapter._connection = SimpleNamespace(mav=mav)
+    adapter._target_system = 1
+    adapter._target_component = 1
+    adapter._last_velocity_frame = VelocityFrame.MAP_ENU
+    frame, velocity_x, velocity_y, velocity_z, yaw_rate, now = command_call
+
+    adapter.send_velocity(
+        frame,
+        velocity_x,
+        velocity_y,
+        velocity_z,
+        yaw_rate_rad_s=yaw_rate,
+        now=now,
+    )
+
+    return mav.position_target_calls[-1][15]
 
 
 @pytest.fixture
@@ -355,7 +414,7 @@ def test_pid_update_converts_dock_observation_once_and_routes_command(
     now = 120.25
     monkeypatch.setattr(mission_manager_module.time, "monotonic", lambda: now)
     node, vehicle = manager_factory("pid")
-    controller = StubPidLanding([running_decision()])
+    controller = EchoDockYawPidLanding()
     node._pid_landing = controller
     node._state = MissionState.PID_LANDING
     node._state_publisher = RecordingPublisher()
@@ -371,12 +430,22 @@ def test_pid_update_converts_dock_observation_once_and_routes_command(
     assert observation.forward_m == pytest.approx(0.3)
     assert observation.left_m == pytest.approx(-0.2)
     assert observation.distance_m == pytest.approx(2.0)
-    assert observation.yaw_error_rad == pytest.approx(1.5707963267948966)
+    # The orientation helper reports this right/clockwise error as positive
+    # Body-FRD. The PID boundary is Body-FLU, where it must be negative; the
+    # MAVLink adapter then negates it once into a positive FRD yaw rate.
+    assert observation.yaw_error_rad == pytest.approx(-1.5707963267948966)
     assert observation.mode is DockTargetMode.OUTER
     assert observation.source_stamp_s == pytest.approx(120.25)
     assert observation.received_at == pytest.approx(120.25)
     assert vehicle.velocity_calls[-1][:5] == (
-        VelocityFrame.BODY_FLU, 0.4, -0.2, -0.1, 0.3
+        VelocityFrame.BODY_FLU,
+        0.0,
+        0.0,
+        0.0,
+        pytest.approx(-1.5707963267948966),
+    )
+    assert mavlink_yaw_rate_for(vehicle.velocity_calls[-1]) == pytest.approx(
+        1.5707963267948966
     )
     assert node._state_publisher.messages == ["PID_PID_ALIGN"]
 
@@ -509,14 +578,22 @@ def test_pid_disarm_result_is_correlated_without_failing_mission(
 def test_pid_disarm_timeout_notifies_rejection_and_continues(
     manager_factory, monkeypatch
 ):
-    """Break caught: a transport timeout immediately fails PID landing."""
+    """Break caught: manager timeout drops a still-live transport future."""
     now = [220.0]
     monkeypatch.setattr(
         mission_manager_module.time, "monotonic", lambda: now[0]
     )
     node, vehicle = manager_factory("pid", mavlink_operation_timeout_s=0.05)
-    vehicle.arm_futures.append(FakeFuture(done=False))
-    controller = StubPidLanding([disarm_decision(31), running_decision()])
+    pending = FakeFuture(VehicleCommandResult(True), done=False)
+    vehicle.arm_futures.append(pending)
+    controller = StubPidLanding(
+        [
+            disarm_decision(31),
+            running_decision(),
+            running_decision(),
+            running_decision(),
+        ]
+    )
     node._pid_landing = controller
     node._state = MissionState.PID_LANDING
     vehicle.state = fresh_vehicle_state(now[0], flying=False)
@@ -527,7 +604,104 @@ def test_pid_disarm_timeout_notifies_rejection_and_continues(
     node._update()
 
     assert controller.disarm_results == [(31, False, 220.1)]
-    assert len(controller.updates) == 2
+    assert node._pending is pending
+    assert node._pending_name == "pid_disarm"
+    assert node._pending_pid_disarm_request_id == 31
+
+    now[0] = 220.2
+    vehicle.state = fresh_vehicle_state(now[0], flying=False)
+    node._update()
+    assert controller.disarm_results == [(31, False, 220.1)]
+    assert node._pending is pending
+
+    pending._done = True
+    now[0] = 220.3
+    vehicle.state = fresh_vehicle_state(now[0], flying=False)
+    node._update()
+
+    assert controller.disarm_results == [(31, False, 220.1)]
+    assert node._pending is None
+    assert node._pending_pid_disarm_request_id is None
+    assert len(controller.updates) == 4
+    assert node._state is MissionState.PID_LANDING
+
+
+def test_pid_disarm_bounce_rejects_new_id_until_old_future_completes(
+    manager_factory, monkeypatch
+):
+    """Break caught: bounce silently drops a new correlated disarm request."""
+    now = [230.0]
+    monkeypatch.setattr(
+        mission_manager_module.time, "monotonic", lambda: now[0]
+    )
+    node, vehicle = manager_factory("pid")
+    request_a_future = FakeFuture(VehicleCommandResult(True), done=False)
+    request_c_future = FakeFuture(done=False)
+    vehicle.arm_futures.extend([request_a_future, request_c_future])
+    controller = StubPidLanding(
+        [
+            disarm_decision(41),
+            running_decision(state=PidLandingState.TOUCHDOWN_APPROACH),
+            disarm_decision(42),
+            running_decision(state=PidLandingState.DISARM),
+            disarm_decision(43),
+        ]
+    )
+    node._pid_landing = controller
+    node._state = MissionState.PID_LANDING
+    vehicle.state = fresh_vehicle_state(now[0], flying=False)
+
+    node._update()
+    now[0] = 230.1
+    vehicle.state = fresh_vehicle_state(now[0], flying=True)
+    node._update()
+    now[0] = 230.7
+    vehicle.state = fresh_vehicle_state(now[0], flying=False)
+    node._update()
+
+    assert controller.disarm_results == [(42, False, 230.7)]
+    assert node._pending is request_a_future
+    assert node._pending_pid_disarm_request_id == 41
+    assert vehicle.arm_calls == [(False, 230.0)]
+
+    request_a_future._done = True
+    now[0] = 230.8
+    vehicle.state = fresh_vehicle_state(now[0], flying=False)
+    node._update()
+
+    assert controller.disarm_results == [
+        (42, False, 230.7),
+        (41, True, 230.8),
+    ]
+    assert node._pending is None
+
+    now[0] = 231.8
+    vehicle.state = fresh_vehicle_state(now[0], flying=False)
+    node._update()
+
+    assert vehicle.arm_calls == [(False, 230.0), (False, 231.8)]
+    assert node._pending is request_c_future
+    assert node._pending_pid_disarm_request_id == 43
+
+
+def test_pid_disarm_synchronous_start_failure_notifies_exact_request(
+    manager_factory, monkeypatch
+):
+    """Break caught: synchronous arm start failure escapes the update loop."""
+    now = 250.0
+    monkeypatch.setattr(mission_manager_module.time, "monotonic", lambda: now)
+    node, vehicle = manager_factory("pid")
+    vehicle.arm_futures.append(RuntimeError("transport busy"))
+    controller = StubPidLanding([disarm_decision(51)])
+    node._pid_landing = controller
+    node._state = MissionState.PID_LANDING
+    vehicle.state = fresh_vehicle_state(now, flying=False)
+
+    node._update()
+
+    assert controller.disarm_results == [(51, False, 250.0)]
+    assert node._pending is None
+    assert node._pending_pid_disarm_request_id is None
     assert node._state is MissionState.PID_LANDING
 
 

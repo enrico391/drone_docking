@@ -302,6 +302,7 @@ class MissionManager(Node):
         self._pending_name = ""
         self._pending_deadline = 0.0
         self._pending_pid_disarm_request_id: Optional[int] = None
+        self._pending_pid_disarm_timeout_notified = False
         self._next_prearm_at = 0.0
         self._circle_progress = 0.0
         self._iteration = 1
@@ -579,22 +580,24 @@ class MissionManager(Node):
             if controller is None or request_id is None:
                 self._fail("PID disarm transaction lost its request ID")
                 return True
-            if now > self._pending_deadline:
-                self._pending = None
-                self._pending_name = ""
-                self._pending_pid_disarm_request_id = None
+            if (
+                now > self._pending_deadline
+                and not self._pending_pid_disarm_timeout_notified
+            ):
                 controller.notify_disarm_result(request_id, False, now)
+                self._pending_pid_disarm_timeout_notified = True
                 self.get_logger().warning(
                     "PID normal-disarm MAVLink operation timed out; "
-                    "controller may retry"
+                    "controller may retry while transport completion remains "
+                    "pending"
                 )
-                return False
             if not self._pending.done():
                 return False
+            timeout_notified = self._pending_pid_disarm_timeout_notified
             try:
                 result = self._pending.result()
                 success = bool(result.success)
-                if not success:
+                if not success and not timeout_notified:
                     self.get_logger().warning(
                         "ArduPilot rejected PID normal-disarm request; "
                         "controller may retry"
@@ -608,7 +611,9 @@ class MissionManager(Node):
             self._pending = None
             self._pending_name = ""
             self._pending_pid_disarm_request_id = None
-            controller.notify_disarm_result(request_id, success, now)
+            self._pending_pid_disarm_timeout_notified = False
+            if not timeout_notified:
+                controller.notify_disarm_result(request_id, success, now)
             return False
         if now > self._pending_deadline:
             self._fail(f"{self._pending_name} MAVLink operation timed out")
@@ -964,7 +969,7 @@ class MissionManager(Node):
             camera_z_m=position.z,
         )
         try:
-            yaw_error = camera_dock_orientation_to_body_yaw_error(
+            yaw_error = -camera_dock_orientation_to_body_yaw_error(
                 quaternion_x=orientation.x,
                 quaternion_y=orientation.y,
                 quaternion_z=orientation.z,
@@ -1033,10 +1038,26 @@ class MissionManager(Node):
                 self._fail("PID disarm request did not include a request ID")
                 return
             if self._pending is None:
-                self._begin_call(
-                    "pid_disarm", self._vehicle.arm_async(False, now)
-                )
+                try:
+                    future = self._vehicle.arm_async(False, now)
+                except Exception as exception:
+                    controller.notify_disarm_result(request_id, False, now)
+                    self.get_logger().warning(
+                        "Could not start PID normal-disarm MAVLink operation: "
+                        f"{exception}; controller may retry"
+                    )
+                    return
+                self._begin_call("pid_disarm", future)
                 self._pending_pid_disarm_request_id = request_id
+                self._pending_pid_disarm_timeout_notified = False
+            elif request_id != self._pending_pid_disarm_request_id:
+                controller.notify_disarm_result(request_id, False, now)
+                self.get_logger().warning(
+                    "Deferred PID normal-disarm request "
+                    f"{request_id}; request "
+                    f"{self._pending_pid_disarm_request_id} still owns the "
+                    "MAVLink transport"
+                )
         if decision.outcome is PidLandingOutcome.COMPLETE:
             self._complete_landing()
         elif decision.outcome is PidLandingOutcome.FAILED:
