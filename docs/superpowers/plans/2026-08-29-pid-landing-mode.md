@@ -355,8 +355,9 @@ git commit -m "feat: add PID descent and tag-loss recovery"
 
 - [ ] **Step 1: Add failing touchdown-commit tests**
 
-Cover commit only after fine X/Y/yaw stability at/below commit height. Verify
-that the transition command is zero, subsequent commands are exactly
+Track fine X/Y/yaw stability throughout central descent and consume it when
+tag distance reaches the commit threshold. Verify that the transition command
+is zero, subsequent commands are exactly
 `(0, 0, -touchdown_speed, 0)` in body FLU, and missing tags after commit do not
 change state or trigger recovery.
 
