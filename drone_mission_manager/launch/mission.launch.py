@@ -37,6 +37,7 @@ def create_mission_manager(context: LaunchContext, package_share: Path):
                 {
                     "mission_file": mission_file,
                     "auto_start": LaunchConfiguration("auto_start"),
+                    "landing_mode": LaunchConfiguration("landing_mode"),
                     "landing_backend": LaunchConfiguration("landing_backend"),
                     "mavlink_connection": LaunchConfiguration(
                         "mavlink_connection"
@@ -120,12 +121,21 @@ def generate_launch_description() -> LaunchDescription:
                 description="Baud rate used when mavlink_connection is serial.",
             ),
             DeclareLaunchArgument(
-                "landing_backend",
-                default_value="ros",
-                choices=["ros", "ardupilot"],
+                "landing_mode",
+                default_value="",
+                choices=["", "pid", "precise_landing"],
                 description=(
-                    "Use ROS velocity alignment/descent or ArduPilot native "
-                    "LANDING_TARGET precision landing."
+                    "Use direct GUIDED PID control or ArduPilot native "
+                    "precision landing; blank permits a legacy backend alias."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "landing_backend",
+                default_value="",
+                choices=["", "ros", "ardupilot"],
+                description=(
+                    "Deprecated compatibility alias: ros maps to pid and "
+                    "ardupilot maps to precise_landing."
                 ),
             ),
             DeclareLaunchArgument(

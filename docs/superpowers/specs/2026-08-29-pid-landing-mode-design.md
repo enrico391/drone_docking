@@ -60,7 +60,9 @@ The accepted canonical values will be `precise_landing` and `pid`. During one
 compatibility period, `ardupilot` will map to `precise_landing` and `ros` will
 map to `pid`, each with a deprecation warning. Supplying both
 `landing_backend` and `landing_mode` with conflicting values will be a startup
-error. Launch files and checked-in examples will use only the canonical names.
+error. The launch-level `landing_mode` uses blank only as a compatibility
+sentinel so a legacy-only backend can still be selected; blank/blank resolves
+to `pid`. Launch examples use only the nonblank canonical names.
 
 The `precise_landing` behavior is preserved: validate the ArduPilot precision
 landing parameters, stream fresh `LANDING_TARGET` observations, enter `LAND`,
@@ -83,7 +85,8 @@ state. It returns a plain decision containing:
 
 - the current PID landing state;
 - an optional velocity/yaw-rate setpoint and its coordinate frame;
-- an optional normal-disarm request;
+- an optional normal-disarm request with a monotonically increasing request
+  ID;
 - an outcome of running, complete or failed, with a diagnostic reason.
 
 This keeps state transitions and control calculations unit-testable without a
@@ -206,7 +209,8 @@ The PID histories are reset. The controller captures the fresh MAVLink local
 altitude on state entry and climbs a configured distance from that value rather
 than using camera range, because the visual target may be absent. The
 horizontal command is zero during the climb. The initial recovery climb is
-0.30 m, and the default maximum is three recovery attempts.
+0.30 m, completion uses a 0.05 m altitude tolerance, and the default maximum is
+three recovery attempts.
 
 At recovery height the controller returns to `ACQUIRE_CENTRAL`. Exhausting the
 retry count fails PID landing and holds zero velocity.
@@ -232,6 +236,12 @@ velocity. A rejected or timed-out request is retried every 1.0 s while the
 vehicle continues to report `ON_GROUND`. Loss of landed state returns to
 `TOUCHDOWN_APPROACH`; it never changes the command into a forced disarm.
 
+Each new request receives a monotonically increasing positive request ID. The
+controller accepts only `notify_disarm_result(request_id, success, now)` for its
+active ID, so a delayed result cannot acknowledge a later retry. The mission
+manager retains the ID alongside the pending pymavlink operation and echoes the
+same ID on acknowledgement, rejection, synchronous start failure, or timeout.
+
 The landing completes only when heartbeat telemetry reports `armed=false`.
 Existing repeat-mission behavior then applies.
 
@@ -246,7 +256,8 @@ match the existing package. The initial additions are:
   `pid_search_timeout_s`;
 - transition and recovery: `pid_central_transition_distance_m`,
   `pid_central_acquire_timeout_s`, `pid_central_loss_grace_s`,
-  `pid_recovery_climb_m`, `pid_max_recovery_attempts`;
+  `pid_recovery_climb_m`, `pid_recovery_altitude_tolerance_m`,
+  `pid_max_recovery_attempts`;
 - touchdown: `pid_touchdown_commit_height_m`,
   `pid_touchdown_speed_m_s`, `pid_touchdown_timeout_s`,
   `pid_landed_state_timeout_s`, `pid_landed_stable_time_s`,
@@ -260,7 +271,8 @@ match the existing package. The initial additions are:
 Startup validation rejects non-finite values, negative timeouts or limits,
 invalid transition ordering, a commit height greater than or equal to the
 central-transition distance, a recovery climb that is not positive, and retry
-counts below one.
+counts below one. `pid_recovery_altitude_tolerance_m` must be positive and
+smaller than `pid_recovery_climb_m`; its checked-in default is 0.05 m.
 
 Mission geometry remains in mission-profile YAML. Controller tuning and search
 behavior remain in `mission_manager.yaml`.

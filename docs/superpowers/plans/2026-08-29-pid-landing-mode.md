@@ -188,21 +188,22 @@ git commit -m "feat: send guided velocity with yaw rate"
   - `DockObservation(forward_m, left_m, distance_m, yaw_error_rad, mode, source_stamp_s, received_at)`.
   - `VehicleObservation(position_enu_m, velocity_enu_m_s, armed, flying, mode, landed_at)`.
   - `VelocityCommand(frame, velocity_x, velocity_y, velocity_z, yaw_rate_rad_s)`.
-  - `PidLandingDecision(state, command, outcome=RUNNING, request_disarm=False, reason="")`.
+  - `PidLandingDecision(state, command, outcome=RUNNING, request_disarm=False, disarm_request_id=None, reason="")`.
   - `PidLandingConfig` containing all timing, geometry, tolerances, limits and four `PIDConfig` instances.
 - Produces controller methods:
   - `PidLandingController(config)`.
   - `start(now, dock_x_m, dock_y_m, hover_altitude_m) -> None`.
   - `update(now, dock: Optional[DockObservation], vehicle: VehicleObservation) -> PidLandingDecision`.
-  - `notify_disarm_result(success, now) -> None`.
+  - `notify_disarm_result(request_id, success, now) -> None`.
 
 - [ ] **Step 1: Write failing construction and validation tests**
 
 Create a `default_config()` fixture with explicit conservative values. Test that
 commit height must be below central transition, recovery climb and search radius
 must be positive, timeouts must be positive, retry count must be at least one,
-fine tolerances must be smaller than coarse tolerances, and all values must be
-finite.
+fine tolerances must be smaller than coarse tolerances, recovery altitude
+tolerance must be positive and smaller than recovery climb, and all values must
+be finite.
 
 - [ ] **Step 2: Write failing acquisition-state tests using explicit time**
 
@@ -346,10 +347,11 @@ git commit -m "feat: add PID descent and tag-loss recovery"
 
 **Interfaces:**
 - Extends states: `TOUCHDOWN_APPROACH`, `DISARM`, `COMPLETE`, `FAILED`.
-- Produces: `request_disarm=True` only in `DISARM`, only with fresh stable
+- Produces: `request_disarm=True` with a monotonically increasing
+  `disarm_request_id` only in `DISARM`, only with fresh stable
   `flying is False`, and only when its retry deadline permits.
-- Consumes: `notify_disarm_result(success, now)` from the mission-manager
-  asynchronous command boundary.
+- Consumes: `notify_disarm_result(request_id, success, now)` from the
+  mission-manager asynchronous command boundary.
 
 - [ ] **Step 1: Add failing touchdown-commit tests**
 
@@ -372,11 +374,15 @@ def test_stable_on_ground_requests_only_normal_disarm(...):
     decision = advance_to_stable_ground(controller)
     assert decision.state is PidLandingState.DISARM
     assert decision.request_disarm is True
+    assert decision.disarm_request_id is not None
     assert decision.command == zero_body_command()
 
 
 def test_disarm_completes_only_after_armed_false(...):
-    controller.notify_disarm_result(True, now=8.0)
+    initial = advance_to_stable_ground(controller)
+    controller.notify_disarm_result(
+        initial.disarm_request_id, True, now=8.0
+    )
     waiting = controller.update(8.1, None, grounded_vehicle(armed=True))
     complete = controller.update(8.2, None, grounded_vehicle(armed=False))
     assert waiting.outcome is PidLandingOutcome.RUNNING
@@ -392,7 +398,8 @@ Track request-in-flight and next-retry time in the controller. The decision does
 not encode MAVLink parameters; `MissionManager` always translates it to
 `arm_async(False)`, whose existing implementation uses `param2=0`. A successful
 command acknowledgement does not complete landing until heartbeat telemetry
-reports `armed=False`.
+reports `armed=False`. Allocate a new monotonically increasing positive ID for
+each request and ignore a result whose ID does not match the active request.
 
 - [ ] **Step 5: Run all pure controller tests**
 
@@ -421,6 +428,8 @@ git commit -m "feat: add guided touchdown and normal disarm"
 - Adds: `resolve_landing_mode(canonical: str, legacy: str) -> tuple[str, Optional[str]]`, where the second value is a deprecation warning.
 - Adds: `MissionState.PID_LANDING` as the only main-state representation of the pure controller.
 - Adds: `_pid_landing: Optional[PidLandingController]` and last-published PID substate tracking.
+- Adds: retention of the active PID disarm request ID alongside the pending
+  pymavlink operation.
 - Uses: `camera_dock_orientation_to_body_yaw_error` plus the existing camera axis conversion to construct `DockObservation`.
 - Uses: `MavlinkVehicle.send_velocity(..., yaw_rate_rad_s=...)` and `arm_async(False)`.
 
@@ -469,16 +478,20 @@ selections through a pure helper so executor timing is not asserted by sleeps.
 - [ ] **Step 6: Add failing asynchronous disarm and terminal-outcome tests**
 
 Verify `request_disarm` creates a pending operation named `pid_disarm`, success
-and rejection call `notify_disarm_result`, no second request is created while a
-future is pending, controller completion calls `_complete_landing`, and
-controller failure enters the existing zero-velocity `FAILED` behavior.
+and rejection call `notify_disarm_result` with the decision's request ID, no
+second request is created while a future is pending, controller completion
+calls `_complete_landing`, and controller failure enters the existing
+zero-velocity `FAILED` behavior.
 
 - [ ] **Step 7: Implement disarm/result integration and global safety ordering**
 
 Handle PID landing before the general “unexpected disarm while active” failure
 guard so `armed=False` can complete landing. Verify the vehicle remains in
 `GUIDED_MODE`; an unexpected mode change fails PID landing. Publish PID substate
-changes without changing the existing transient-local state topic.
+changes without changing the existing transient-local state topic. Retain the
+request ID while the async disarm operation is pending and echo it unchanged to
+`notify_disarm_result(request_id, success, now)` on success, rejection, timeout,
+or synchronous start failure.
 
 - [ ] **Step 8: Run mission-manager and existing landing tests**
 
@@ -509,7 +522,8 @@ git commit -m "feat: integrate PID landing mode"
 
 **Interfaces:**
 - Launch exposes canonical `landing_mode` choices `pid` and
-  `precise_landing`.
+  `precise_landing`, plus blank as the compatibility-only default sentinel;
+  blank/blank resolves to `pid`.
 - Launch retains optional legacy `landing_backend` choices blank, `ros`, and
   `ardupilot` for one compatibility period.
 - Configuration supplies every field required by `PidLandingConfig` with no
@@ -518,9 +532,10 @@ git commit -m "feat: integrate PID landing mode"
 - [ ] **Step 1: Add failing launch/configuration tests**
 
 Load `mission_manager.yaml` and assert canonical `landing_mode: pid`, 20 Hz PID
-rate, positive search/recovery/touchdown values, commit height below central
-transition and all four gain groups. Inspect the generated launch description
-and assert both canonical and legacy arguments are declared.
+rate, positive search/recovery/touchdown values, recovery altitude tolerance
+positive and below the recovery climb, commit height below central transition,
+and all four gain groups. Inspect the generated launch description and assert
+both canonical and legacy arguments are declared.
 
 - [ ] **Step 2: Add the conservative checked-in parameter set**
 
@@ -538,6 +553,7 @@ pid_central_transition_distance_m: 1.0
 pid_central_acquire_timeout_s: 3.0
 pid_central_loss_grace_s: 0.30
 pid_recovery_climb_m: 0.30
+pid_recovery_altitude_tolerance_m: 0.05
 pid_max_recovery_attempts: 3
 pid_touchdown_commit_height_m: 0.25
 pid_touchdown_speed_m_s: 0.05
@@ -610,15 +626,15 @@ Run: `python3 -m pytest drone_mission_manager/test -q`
 
 Expected: all tests pass with zero failures.
 
-- [ ] **Step 2: Run ROS package lint and build**
+- [ ] **Step 2: Build and run ROS package tests**
 
 Run:
 
 ```bash
 source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select drone_mission_manager
 colcon test --packages-select drone_mission_manager --event-handlers console_direct+
 colcon test-result --verbose
-colcon build --symlink-install --packages-select drone_mission_manager
 ```
 
 Expected: zero test failures and a successful package build.

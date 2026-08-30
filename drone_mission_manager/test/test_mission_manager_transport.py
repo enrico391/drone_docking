@@ -1,11 +1,15 @@
 """Integration boundary tests for MissionManager's direct vehicle transport."""
 
+import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import rclpy
+import yaml
 from geometry_msgs.msg import PoseStamped
+from launch import LaunchContext, LaunchDescription, LaunchService
+from launch.actions import DeclareLaunchArgument
 from rclpy.context import Context
 from rclpy.parameter import Parameter
 from std_msgs.msg import String
@@ -36,6 +40,72 @@ from drone_mission_manager.pymavlink_vehicle import (
 MISSION_FILE = (
     Path(__file__).parents[1] / "config" / "missions" / "simple_circle.yaml"
 )
+PACKAGE_ROOT = Path(__file__).parents[1]
+MISSION_MANAGER_CONFIG = PACKAGE_ROOT / "config" / "mission_manager.yaml"
+MISSION_LAUNCH = PACKAGE_ROOT / "launch" / "mission.launch.py"
+
+PID_PARAMETER_DEFAULTS = {
+    "pid_control_rate_hz": 20.0,
+    "pid_initial_acquire_time_s": 2.0,
+    "pid_tag_stable_time_s": 0.5,
+    "pid_search_radius_m": 1.0,
+    "pid_search_speed_m_s": 0.30,
+    "pid_search_timeout_s": 30.0,
+    "pid_central_transition_distance_m": 1.0,
+    "pid_central_acquire_timeout_s": 3.0,
+    "pid_central_loss_grace_s": 0.30,
+    "pid_recovery_climb_m": 0.30,
+    "pid_recovery_altitude_tolerance_m": 0.05,
+    "pid_max_recovery_attempts": 3,
+    "pid_touchdown_commit_height_m": 0.25,
+    "pid_touchdown_speed_m_s": 0.05,
+    "pid_touchdown_timeout_s": 15.0,
+    "pid_landed_state_timeout_s": 1.0,
+    "pid_landed_stable_time_s": 0.50,
+    "pid_disarm_retry_period_s": 1.0,
+    "pid_alignment_stable_time_s": 1.0,
+    "pid_coarse_horizontal_tolerance_m": 0.20,
+    "pid_fine_horizontal_tolerance_m": 0.07,
+    "pid_coarse_yaw_tolerance_rad": 0.1745329252,
+    "pid_fine_yaw_tolerance_rad": 0.0872664626,
+    "pid_max_horizontal_speed_m_s": 0.50,
+    "pid_outer_descent_speed_m_s": 0.30,
+    "pid_central_descent_speed_m_s": 0.12,
+    "pid_recovery_speed_m_s": 0.20,
+    "pid_max_yaw_rate_rad_s": 0.3490658504,
+    "pid_search_position_gain": 0.70,
+    "pid_search_position_tolerance_m": 0.35,
+    "pid_search_max_vertical_speed_m_s": 0.70,
+    "pid_x_kp": 0.7,
+    "pid_x_ki": 0.0,
+    "pid_x_kd": 0.0,
+    "pid_x_integral_limit": 0.5,
+    "pid_x_derivative_filter_time_constant_s": 0.10,
+    "pid_y_kp": 0.7,
+    "pid_y_ki": 0.0,
+    "pid_y_kd": 0.0,
+    "pid_y_integral_limit": 0.5,
+    "pid_y_derivative_filter_time_constant_s": 0.10,
+    "pid_z_kp": 0.6,
+    "pid_z_ki": 0.0,
+    "pid_z_kd": 0.0,
+    "pid_z_integral_limit": 0.5,
+    "pid_z_derivative_filter_time_constant_s": 0.10,
+    "pid_yaw_kp": 0.8,
+    "pid_yaw_ki": 0.0,
+    "pid_yaw_kd": 0.0,
+    "pid_yaw_integral_limit": 0.5,
+    "pid_yaw_derivative_filter_time_constant_s": 0.10,
+}
+
+
+def load_mission_launch_module():
+    spec = importlib.util.spec_from_file_location(
+        "mission_launch_under_test", MISSION_LAUNCH
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class FakeVehicle:
@@ -287,6 +357,158 @@ def terminal_decision(outcome, reason=""):
         outcome=outcome,
         reason=reason,
     )
+
+
+def test_checked_in_config_defines_complete_conservative_pid_defaults():
+    """Break caught: deployment silently falls back to a code-only tuning."""
+    parameters = yaml.safe_load(MISSION_MANAGER_CONFIG.read_text())[
+        "mission_manager"
+    ]["ros__parameters"]
+
+    assert parameters["landing_mode"] == "pid"
+    assert parameters["landing_backend"] == ""
+    assert {
+        name: value
+        for name, value in parameters.items()
+        if name.startswith("pid_")
+    } == PID_PARAMETER_DEFAULTS
+    assert (
+        parameters["pid_touchdown_commit_height_m"]
+        < parameters["pid_central_transition_distance_m"]
+    )
+    assert (
+        0.0
+        < parameters["pid_recovery_altitude_tolerance_m"]
+        < parameters["pid_recovery_climb_m"]
+    )
+    assert not any(name.endswith("_output_limit") for name in parameters)
+
+
+def test_checked_in_config_names_match_declared_manager_parameters(
+    manager_factory,
+):
+    """Break caught: a YAML key is ignored or a knob is not checked in."""
+    parameters = yaml.safe_load(MISSION_MANAGER_CONFIG.read_text())[
+        "mission_manager"
+    ]["ros__parameters"]
+    node, _vehicle = manager_factory("pid")
+
+    declared = set(node.get_parameters_by_prefix(""))
+
+    assert declared - {"use_sim_time"} == set(parameters) | {"mission_file"}
+
+
+def test_launch_declares_canonical_and_legacy_landing_choices(monkeypatch):
+    """Break caught: launch cannot select a canonical or compatibility mode."""
+    module = load_mission_launch_module()
+    monkeypatch.setattr(
+        module,
+        "get_package_share_directory",
+        lambda name: str(PACKAGE_ROOT),
+    )
+
+    arguments = {
+        entity.name: entity
+        for entity in module.generate_launch_description().entities
+        if isinstance(entity, DeclareLaunchArgument)
+    }
+
+    assert arguments["landing_mode"].choices == [
+        "",
+        "pid",
+        "precise_landing",
+    ]
+    assert arguments["landing_backend"].choices == ["", "ros", "ardupilot"]
+
+
+@pytest.mark.parametrize(
+    ("legacy", "expected"),
+    [("ros", "pid"), ("ardupilot", "precise_landing")],
+)
+def test_launch_legacy_only_selection_resolves_compatibly(
+    monkeypatch, legacy, expected
+):
+    """Break caught: a canonical default conflicts with a legacy override."""
+    module = load_mission_launch_module()
+    monkeypatch.setattr(
+        module,
+        "get_package_share_directory",
+        lambda name: str(PACKAGE_ROOT),
+    )
+    arguments = [
+        entity
+        for entity in module.generate_launch_description().entities
+        if isinstance(entity, DeclareLaunchArgument)
+    ]
+    service = LaunchService()
+    service.context.launch_configurations["landing_backend"] = legacy
+    service.include_launch_description(LaunchDescription(arguments))
+
+    assert service.run() == 0
+    mode, warning = resolve_landing_mode(
+        service.context.launch_configurations["landing_mode"],
+        service.context.launch_configurations["landing_backend"],
+    )
+    assert mode == expected
+    assert warning is not None
+
+
+def test_launch_preserves_explicit_landing_selection_conflicts(monkeypatch):
+    """Break caught: launch silently lets a legacy value override canonical."""
+    module = load_mission_launch_module()
+    monkeypatch.setattr(
+        module,
+        "get_package_share_directory",
+        lambda name: str(PACKAGE_ROOT),
+    )
+    arguments = [
+        entity
+        for entity in module.generate_launch_description().entities
+        if isinstance(entity, DeclareLaunchArgument)
+    ]
+    service = LaunchService()
+    service.context.launch_configurations.update(
+        {"landing_mode": "pid", "landing_backend": "ardupilot"}
+    )
+    service.include_launch_description(LaunchDescription(arguments))
+
+    assert service.run() == 0
+    with pytest.raises(ValueError, match="conflicting"):
+        resolve_landing_mode(
+            service.context.launch_configurations["landing_mode"],
+            service.context.launch_configurations["landing_backend"],
+        )
+
+
+def test_launch_passes_canonical_and_legacy_landing_parameters(monkeypatch):
+    """Break caught: a declared launch selection never reaches the manager."""
+    module = load_mission_launch_module()
+    captured = {}
+
+    def record_node(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(module, "Node", record_node)
+    context = LaunchContext()
+    context.launch_configurations.update(
+        {
+            "mission": "simple_circle",
+            "mission_file": str(MISSION_FILE),
+            "auto_start": "false",
+            "landing_mode": "pid",
+            "landing_backend": "",
+            "mavlink_connection": "tcp:127.0.0.1:5760",
+            "mavlink_baud": "921600",
+            "landing_yaw_correction_enabled": "true",
+        }
+    )
+
+    module.create_mission_manager(context, PACKAGE_ROOT)
+
+    overrides = captured["parameters"][1]
+    assert overrides["landing_mode"].perform(context) == "pid"
+    assert overrides["landing_backend"].perform(context) == ""
 
 
 @pytest.mark.parametrize(

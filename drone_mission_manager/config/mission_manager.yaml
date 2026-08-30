@@ -29,10 +29,66 @@ mission_manager:
     dock_land_timeout_s: 30.0
     dock_disarm_timeout_s: 20.0
 
-    # Landing implementation selected by the launch argument: "ros" keeps
-    # alignment/descent in this node; "ardupilot" sends MAVLink
-    # LANDING_TARGET and switches to LAND after the stream is stable.
-    landing_backend: ros
+    # Canonical landing mode. The blank legacy backend remains available for
+    # one compatibility period through the launch file.
+    landing_mode: pid
+    landing_backend: ""
+
+    # Direct pymavlink GUIDED PID landing, bounded search and recovery.
+    pid_control_rate_hz: 20.0
+    pid_initial_acquire_time_s: 2.0
+    pid_tag_stable_time_s: 0.5
+    pid_search_radius_m: 1.0
+    pid_search_speed_m_s: 0.30
+    pid_search_timeout_s: 30.0
+    pid_central_transition_distance_m: 1.0
+    pid_central_acquire_timeout_s: 3.0
+    pid_central_loss_grace_s: 0.30
+    pid_recovery_climb_m: 0.30
+    pid_recovery_altitude_tolerance_m: 0.05
+    pid_max_recovery_attempts: 3
+    pid_touchdown_commit_height_m: 0.25
+    pid_touchdown_speed_m_s: 0.05
+    pid_touchdown_timeout_s: 15.0
+    pid_landed_state_timeout_s: 1.0
+    pid_landed_stable_time_s: 0.50
+    pid_disarm_retry_period_s: 1.0
+    pid_alignment_stable_time_s: 1.0
+    pid_coarse_horizontal_tolerance_m: 0.20
+    pid_fine_horizontal_tolerance_m: 0.07
+    pid_coarse_yaw_tolerance_rad: 0.1745329252
+    pid_fine_yaw_tolerance_rad: 0.0872664626
+    pid_max_horizontal_speed_m_s: 0.50
+    pid_outer_descent_speed_m_s: 0.30
+    pid_central_descent_speed_m_s: 0.12
+    pid_recovery_speed_m_s: 0.20
+    pid_max_yaw_rate_rad_s: 0.3490658504
+    pid_search_position_gain: 0.70
+    pid_search_position_tolerance_m: 0.35
+    pid_search_max_vertical_speed_m_s: 0.70
+
+    # PID output limits are derived from the speed and yaw limits above.
+    pid_x_kp: 0.7
+    pid_x_ki: 0.0
+    pid_x_kd: 0.0
+    pid_x_integral_limit: 0.5
+    pid_x_derivative_filter_time_constant_s: 0.10
+    pid_y_kp: 0.7
+    pid_y_ki: 0.0
+    pid_y_kd: 0.0
+    pid_y_integral_limit: 0.5
+    pid_y_derivative_filter_time_constant_s: 0.10
+    pid_z_kp: 0.6
+    pid_z_ki: 0.0
+    pid_z_kd: 0.0
+    pid_z_integral_limit: 0.5
+    pid_z_derivative_filter_time_constant_s: 0.10
+    pid_yaw_kp: 0.8
+    pid_yaw_ki: 0.0
+    pid_yaw_kd: 0.0
+    pid_yaw_integral_limit: 0.5
+    pid_yaw_derivative_filter_time_constant_s: 0.10
+
     landing_yaw_correction_enabled: true
     landing_target_warmup_s: 1.0
     # One direct pymavlink connection carries all flight-controller telemetry
