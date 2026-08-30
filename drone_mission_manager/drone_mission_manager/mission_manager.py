@@ -201,7 +201,7 @@ class MissionManager(Node):
         self.declare_parameter("pid_recovery_climb_m", 0.30)
         self.declare_parameter("pid_recovery_altitude_tolerance_m", 0.05)
         self.declare_parameter("pid_max_recovery_attempts", 3)
-        self.declare_parameter("pid_touchdown_commit_height_m", 0.25)
+        self.declare_parameter("pid_touchdown_commit_height_m", 0.20)
         self.declare_parameter("pid_touchdown_speed_m_s", 0.05)
         self.declare_parameter("pid_touchdown_timeout_s", 15.0)
         self.declare_parameter("pid_landed_state_timeout_s", 1.0)

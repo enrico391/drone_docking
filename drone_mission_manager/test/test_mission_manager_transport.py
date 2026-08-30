@@ -59,7 +59,7 @@ PID_PARAMETER_DEFAULTS = {
     "pid_recovery_climb_m": 0.30,
     "pid_recovery_altitude_tolerance_m": 0.05,
     "pid_max_recovery_attempts": 3,
-    "pid_touchdown_commit_height_m": 0.25,
+    "pid_touchdown_commit_height_m": 0.20,
     "pid_touchdown_speed_m_s": 0.05,
     "pid_touchdown_timeout_s": 15.0,
     "pid_landed_state_timeout_s": 1.0,
@@ -467,6 +467,15 @@ def test_checked_in_config_names_match_declared_manager_parameters(
     declared = set(node.get_parameters_by_prefix(""))
 
     assert declared - {"use_sim_time"} == set(parameters) | {"mission_file"}
+
+
+def test_manager_default_commits_at_twenty_cm_tag_distance(manager_factory):
+    """Break caught: code-only startup uses a different commit distance."""
+    node, _vehicle = manager_factory("pid")
+
+    assert node.get_parameter(
+        "pid_touchdown_commit_height_m"
+    ).value == pytest.approx(0.20)
 
 
 def test_launch_declares_canonical_and_legacy_landing_choices(monkeypatch):

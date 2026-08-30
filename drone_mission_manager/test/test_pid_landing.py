@@ -52,7 +52,7 @@ def default_config(**overrides):
         recovery_climb_m=0.3,
         recovery_altitude_tolerance_m=0.05,
         max_recovery_attempts=3,
-        touchdown_commit_height_m=0.25,
+        touchdown_commit_height_m=0.20,
         touchdown_speed_m_s=0.05,
         touchdown_timeout_s=15.0,
         landed_state_timeout_s=1.0,
@@ -892,9 +892,9 @@ def grounded_vehicle(now, *, armed=True, flying=False, landed_at=None):
 
 def enter_touchdown_approach(controller, vehicle):
     enter_central_descent(controller, vehicle)
-    controller.update(2.4, central_observation(2.4, distance_m=0.25), vehicle)
+    controller.update(2.4, central_observation(2.4, distance_m=0.20), vehicle)
     return controller.update(
-        3.4, central_observation(3.4, distance_m=0.25), vehicle
+        3.4, central_observation(3.4, distance_m=0.20), vehicle
     )
 
 
@@ -910,7 +910,7 @@ def test_central_descent_commits_only_after_fine_stability_at_commit_height(
     enter_central_descent(controller, vehicle)
 
     above_height = controller.update(
-        2.4, central_observation(2.4, distance_m=0.26), vehicle
+        2.4, central_observation(2.4, distance_m=0.21), vehicle
     )
     unstable = controller.update(
         3.4,
@@ -918,22 +918,43 @@ def test_central_descent_commits_only_after_fine_stability_at_commit_height(
             3.4,
             forward_m=0.08,
             left_m=-0.05,
-            distance_m=0.25,
+            distance_m=0.20,
             yaw_error_rad=0.05,
             mode=DockTargetMode.CENTRAL,
         ),
         vehicle,
     )
     stable_start = controller.update(
-        3.5, central_observation(3.5, distance_m=0.25), vehicle
+        3.5, central_observation(3.5, distance_m=0.20), vehicle
     )
     committed = controller.update(
-        4.5, central_observation(4.5, distance_m=0.25), vehicle
+        4.5, central_observation(4.5, distance_m=0.20), vehicle
     )
 
     assert above_height.state is PidLandingState.DESCEND_CENTRAL
     assert unstable.state is PidLandingState.DESCEND_CENTRAL
     assert stable_start.state is PidLandingState.DESCEND_CENTRAL
+    assert committed.state is PidLandingState.TOUCHDOWN_APPROACH
+    assert committed.command == zero_body_command()
+
+
+def test_central_descent_commits_at_twenty_cm_using_prior_fine_alignment(
+    controller, vehicle,
+):
+    """Break caught: final alignment history starts only below 20 cm."""
+    enter_central_descent(controller, vehicle)
+
+    controller.update(
+        2.4, central_observation(2.4, distance_m=0.30), vehicle
+    )
+    aligned_above_commit = controller.update(
+        3.4, central_observation(3.4, distance_m=0.21), vehicle
+    )
+    committed = controller.update(
+        3.41, central_observation(3.41, distance_m=0.20), vehicle
+    )
+
+    assert aligned_above_commit.state is PidLandingState.DESCEND_CENTRAL
     assert committed.state is PidLandingState.TOUCHDOWN_APPROACH
     assert committed.command == zero_body_command()
 
@@ -957,17 +978,17 @@ def test_central_dropout_resets_fine_stability_before_touchdown_commit(
     controller, vehicle,
 ):
     enter_central_descent(controller, vehicle)
-    controller.update(2.4, central_observation(2.4, distance_m=0.25), vehicle)
+    controller.update(2.4, central_observation(2.4, distance_m=0.20), vehicle)
 
     dropout = controller.update(2.8, None, vehicle)
     returned = controller.update(
-        2.9, central_observation(2.9, distance_m=0.25), vehicle
+        2.9, central_observation(2.9, distance_m=0.20), vehicle
     )
     before_stable = controller.update(
-        3.89, central_observation(3.89, distance_m=0.25), vehicle
+        3.89, central_observation(3.89, distance_m=0.20), vehicle
     )
     committed = controller.update(
-        3.91, central_observation(3.91, distance_m=0.25), vehicle
+        3.91, central_observation(3.91, distance_m=0.20), vehicle
     )
 
     assert dropout.state is PidLandingState.DESCEND_CENTRAL

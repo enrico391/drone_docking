@@ -68,9 +68,11 @@ velocity and yaw-rate commands directly through pymavlink. If no configured tag
 is visible after initial acquisition, it searches a bounded circle around the
 expected dock position. It aligns on an outer or central tag, requires the
 central tag for final descent, and climbs to reacquire it if it is lost above
-the touchdown commit height. After commit, tag loss is ignored and the vehicle
-continues a slow vertical touchdown approach. A normal disarm is requested only
-after fresh, stable `ON_GROUND` telemetry; mission completion still requires an
+the touchdown commit height. Fine alignment stability is tracked throughout
+central descent; when the aligned central-tag distance reaches the default
+20 cm commit threshold, tag loss is ignored and the vehicle continues a slow
+vertical touchdown approach. A normal disarm is requested only after fresh,
+stable `ON_GROUND` telemetry; mission completion still requires an
 `armed=false` heartbeat.
 
 `landing_mode:=precise_landing` preserves the native ArduPilot path in

@@ -199,9 +199,10 @@ All four PIDs use fine tolerances and reduced output limits. If the central tag
 is stale or absent for longer than `pid_central_loss_grace_s`, the controller
 first commands zero descent and then enters `RECOVERY_CLIMB`.
 
-When the vehicle is stably aligned at or below
-`pid_touchdown_commit_height_m`, it enters `TOUCHDOWN_APPROACH`. The initial
-commit height is 0.25 m.
+Fine alignment stability is tracked continuously during central descent. When
+the aligned central-tag distance reaches
+`pid_touchdown_commit_height_m`, it enters `TOUCHDOWN_APPROACH` immediately.
+The initial commit distance is 0.20 m.
 
 ### `RECOVERY_CLIMB`
 

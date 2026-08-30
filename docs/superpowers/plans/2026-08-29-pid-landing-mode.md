@@ -555,7 +555,7 @@ pid_central_loss_grace_s: 0.30
 pid_recovery_climb_m: 0.30
 pid_recovery_altitude_tolerance_m: 0.05
 pid_max_recovery_attempts: 3
-pid_touchdown_commit_height_m: 0.25
+pid_touchdown_commit_height_m: 0.20
 pid_touchdown_speed_m_s: 0.05
 pid_touchdown_timeout_s: 15.0
 pid_landed_state_timeout_s: 1.0

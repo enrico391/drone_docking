@@ -521,19 +521,20 @@ class PidLandingController:
             return PidLandingDecision(self._state, _zero_body_command())
 
         self._central_loss_started_at = None
-        if dock.distance_m <= self._config.touchdown_commit_height_m:
-            if self._alignment_is_stable(
-                now,
-                dock,
-                (
-                    self._config.fine_horizontal_tolerance_m,
-                    self._config.fine_yaw_tolerance_rad,
-                ),
-            ):
-                self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
-                return PidLandingDecision(self._state, _zero_body_command())
-        else:
-            self._alignment_stable_started_at = None
+        fine_alignment_stable = self._alignment_is_stable(
+            now,
+            dock,
+            (
+                self._config.fine_horizontal_tolerance_m,
+                self._config.fine_yaw_tolerance_rad,
+            ),
+        )
+        if (
+            dock.distance_m <= self._config.touchdown_commit_height_m
+            and fine_alignment_stable
+        ):
+            self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
+            return PidLandingDecision(self._state, _zero_body_command())
         self._advance_distance_setpoint(
             now, dock, self._config.central_descent_speed_m_s,
             self._config.fine_horizontal_tolerance_m,
