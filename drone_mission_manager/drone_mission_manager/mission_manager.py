@@ -957,6 +957,7 @@ class MissionManager(Node):
             return None
         mode = {
             "OUTER": DockTargetMode.OUTER,
+            "CENTRAL_ACQUIRING": DockTargetMode.CENTRAL_ACQUIRING,
             "CENTRAL": DockTargetMode.CENTRAL,
         }.get(self._dock_mode)
         if mode is None:

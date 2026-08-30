@@ -260,6 +260,23 @@ def test_stable_tag_during_search_enters_align_with_zero_body_command(
     assert stable.command.velocity_z == 0.0
 
 
+def test_search_reacquires_central_acquiring_tag_for_alignment(
+    controller, vehicle
+):
+    enter_search(controller, vehicle)
+
+    first = controller.update(
+        2.2, central_acquiring_observation(2.2, distance_m=1.4), vehicle
+    )
+    stable = controller.update(
+        2.7, central_acquiring_observation(2.7, distance_m=1.4), vehicle
+    )
+
+    assert first.state is PidLandingState.SEARCH_CIRCLE
+    assert stable.state is PidLandingState.PID_ALIGN
+    assert stable.command == zero_body_command()
+
+
 def test_search_timeout_precedes_tag_stability_at_deadline(controller, vehicle):
     enter_search(controller, vehicle)
     controller.update(6.6, outer_observation(received_at=6.6), vehicle)
@@ -417,8 +434,11 @@ def enter_outer_descent(controller, vehicle):
     ],
 )
 def test_outer_descent_setpoint_ramps_only_while_aligned(
-    controller, vehicle, misaligned,
+    vehicle, misaligned,
 ):
+    controller = PidLandingController(default_config(
+        z_pid=replace(pid_config(output_limit=0.7), kp=0.1),
+    ))
     enter_outer_descent(controller, vehicle)
 
     initial = controller.update(
@@ -437,9 +457,23 @@ def test_outer_descent_setpoint_ramps_only_while_aligned(
     )
 
     assert initial.command.velocity_z == pytest.approx(0.0)
-    assert descending.command.velocity_z == pytest.approx(-0.3)
-    assert held.command.velocity_z == pytest.approx(-0.3)
-    assert resumed.command.velocity_z == pytest.approx(-0.6)
+    assert descending.command.velocity_z == pytest.approx(-0.03)
+    assert held.command.velocity_z == pytest.approx(-0.03)
+    assert resumed.command.velocity_z == pytest.approx(-0.06)
+
+
+def test_outer_descent_visual_z_is_limited_to_outer_descent_speed(
+    controller, vehicle,
+):
+    enter_outer_descent(controller, vehicle)
+    controller.update(1.8, dock_observation(1.8, distance_m=2.0), vehicle)
+
+    saturated = controller.update(
+        4.8, dock_observation(4.8, distance_m=2.0), vehicle
+    )
+
+    assert saturated.state is PidLandingState.DESCEND_OUTER
+    assert saturated.command.velocity_z == pytest.approx(-0.3)
 
 
 @pytest.mark.parametrize(
@@ -481,6 +515,17 @@ def central_observation(received_at, *, distance_m=0.9):
     )
 
 
+def central_acquiring_observation(received_at, *, distance_m=0.9):
+    return dock_observation(
+        received_at,
+        forward_m=0.05,
+        left_m=-0.05,
+        distance_m=distance_m,
+        yaw_error_rad=0.05,
+        mode=DockTargetMode.CENTRAL_ACQUIRING,
+    )
+
+
 def enter_acquire_central(controller, vehicle):
     low_outer = dock_observation(
         0.1,
@@ -518,6 +563,63 @@ def test_align_uses_fine_tolerance_at_central_transition_distance(vehicle):
 
     assert decision.state is PidLandingState.PID_ALIGN
     assert decision.command.velocity_z == 0.0
+
+
+def test_central_acquiring_below_transition_waits_for_stable_central(
+    controller, vehicle,
+):
+    acquiring = central_acquiring_observation(0.1, distance_m=0.9)
+    enter_align(controller, vehicle, acquiring)
+    controller.update(
+        0.7,
+        replace(acquiring, received_at=0.7, source_stamp_s=0.7),
+        vehicle,
+    )
+
+    routed = controller.update(
+        1.71,
+        replace(acquiring, received_at=1.71, source_stamp_s=1.71),
+        vehicle,
+    )
+    first_acquiring = controller.update(
+        1.8, central_acquiring_observation(1.8, distance_m=0.9), vehicle
+    )
+    still_acquiring = controller.update(
+        2.31, central_acquiring_observation(2.31, distance_m=0.9), vehicle
+    )
+    first_central = controller.update(
+        2.4, central_observation(2.4, distance_m=0.9), vehicle
+    )
+    stable_central = controller.update(
+        2.91, central_observation(2.91, distance_m=0.9), vehicle
+    )
+
+    assert routed.state is PidLandingState.ACQUIRE_CENTRAL
+    assert first_acquiring.state is PidLandingState.ACQUIRE_CENTRAL
+    assert still_acquiring.state is PidLandingState.ACQUIRE_CENTRAL
+    assert first_central.state is PidLandingState.ACQUIRE_CENTRAL
+    assert stable_central.state is PidLandingState.DESCEND_CENTRAL
+
+
+def test_central_acquiring_above_transition_can_enter_outer_descent(
+    controller, vehicle,
+):
+    acquiring = central_acquiring_observation(0.1, distance_m=1.4)
+    enter_align(controller, vehicle, acquiring)
+    controller.update(
+        0.7,
+        replace(acquiring, received_at=0.7, source_stamp_s=0.7),
+        vehicle,
+    )
+
+    decision = controller.update(
+        1.71,
+        replace(acquiring, received_at=1.71, source_stamp_s=1.71),
+        vehicle,
+    )
+
+    assert decision.state is PidLandingState.DESCEND_OUTER
+    assert decision.command == zero_body_command()
 
 
 def test_missing_visual_observation_stops_outer_descent_before_transition(
@@ -584,6 +686,29 @@ def test_central_loss_within_grace_commands_zero_then_resumes_descent(
     assert recovered.command.velocity_z == pytest.approx(
         before_dropout.command.velocity_z
     )
+
+
+def test_central_acquiring_does_not_continue_central_descent_command(
+    controller, vehicle,
+):
+    enter_central_descent(controller, vehicle)
+    controller.update(2.4, central_observation(2.4), vehicle)
+    before_dropout = controller.update(
+        2.5, central_observation(2.5), vehicle
+    )
+
+    acquiring = controller.update(
+        2.6, central_acquiring_observation(2.6), vehicle
+    )
+    recovery = controller.update(
+        2.91, central_acquiring_observation(2.91), vehicle
+    )
+
+    assert before_dropout.command.velocity_z != 0.0
+    assert acquiring.state is PidLandingState.DESCEND_CENTRAL
+    assert acquiring.command == zero_body_command()
+    assert recovery.state is PidLandingState.RECOVERY_CLIMB
+    assert recovery.command == zero_body_command()
 
 
 def test_central_dropout_resets_visual_pid_histories(vehicle):
@@ -715,6 +840,20 @@ def test_state_entries_reset_all_pid_histories(vehicle):
     assert first_central.command.velocity_y == 0.0
     assert first_central.command.velocity_z == 0.0
     assert first_central.command.yaw_rate_rad_s == 0.0
+
+
+def test_central_descent_visual_z_is_limited_to_central_descent_speed(
+    controller, vehicle,
+):
+    enter_central_descent(controller, vehicle)
+    controller.update(2.4, central_observation(2.4, distance_m=0.9), vehicle)
+
+    saturated = controller.update(
+        7.4, central_observation(7.4, distance_m=0.9), vehicle
+    )
+
+    assert saturated.state is PidLandingState.DESCEND_CENTRAL
+    assert saturated.command.velocity_z == pytest.approx(-0.12)
 
 
 def test_recovery_attempt_limit_fails_after_the_configured_number_of_climbs(
@@ -850,6 +989,36 @@ def test_touchdown_timeout_fails_with_zero_command(vehicle):
     assert failed.command == zero_body_command()
 
 
+def test_unexpected_disarm_before_touchdown_commit_fails_stopped(
+    controller, vehicle,
+):
+    enter_central_descent(controller, vehicle)
+
+    failed = controller.update(
+        2.4,
+        central_observation(2.4, distance_m=0.3),
+        replace(vehicle, armed=False),
+    )
+
+    assert failed.state is PidLandingState.FAILED
+    assert failed.outcome is PidLandingOutcome.FAILED
+    assert failed.reason == "vehicle disarmed while mission was active"
+    assert failed.command == zero_body_command()
+
+
+def test_unexpected_disarm_during_touchdown_approach_fails_stopped(
+    controller, vehicle,
+):
+    enter_touchdown_approach(controller, vehicle)
+
+    failed = controller.update(3.5, None, grounded_vehicle(3.5, armed=False))
+
+    assert failed.state is PidLandingState.FAILED
+    assert failed.outcome is PidLandingOutcome.FAILED
+    assert failed.reason == "vehicle disarmed while mission was active"
+    assert failed.command == zero_body_command()
+
+
 def test_touchdown_requires_fresh_continuous_false_flying_before_disarm(
     controller, vehicle,
 ):
@@ -927,9 +1096,12 @@ def test_disarm_acknowledgement_waits_for_disarmed_heartbeat(controller, vehicle
     assert initial.disarm_request_id is not None
     controller.notify_disarm_result(initial.disarm_request_id, True, now=4.1)
 
-    waiting = controller.update(4.2, None, grounded_vehicle(4.2, armed=True))
-    complete = controller.update(4.3, None, grounded_vehicle(4.3, armed=False))
+    unknown = controller.update(4.2, None, grounded_vehicle(4.2, armed=None))
+    waiting = controller.update(4.3, None, grounded_vehicle(4.3, armed=True))
+    complete = controller.update(4.4, None, grounded_vehicle(4.4, armed=False))
 
+    assert unknown.outcome is PidLandingOutcome.RUNNING
+    assert unknown.request_disarm is False
     assert waiting.outcome is PidLandingOutcome.RUNNING
     assert waiting.request_disarm is False
     assert complete.state is PidLandingState.COMPLETE
@@ -972,7 +1144,7 @@ def test_disarm_ignores_delayed_result_for_an_earlier_retry_request(
 
 
 @pytest.mark.parametrize(
-    "vehicle",
+    "bad_vehicle",
     [
         grounded_vehicle(4.1, armed=False, flying=True),
         grounded_vehicle(4.1, armed=False, landed_at=3.0),
@@ -980,14 +1152,16 @@ def test_disarm_ignores_delayed_result_for_an_earlier_retry_request(
     ],
 )
 def test_disarm_requires_fresh_ground_telemetry_before_armed_false_completes(
-    controller, vehicle,
+    controller, vehicle, bad_vehicle,
 ):
     advance_to_stable_ground(controller, vehicle)
 
-    decision = controller.update(4.1, None, vehicle)
+    decision = controller.update(4.1, None, bad_vehicle)
 
-    assert decision.state is PidLandingState.TOUCHDOWN_APPROACH
-    assert decision.outcome is PidLandingOutcome.RUNNING
+    assert decision.state is PidLandingState.FAILED
+    assert decision.outcome is PidLandingOutcome.FAILED
+    assert decision.reason == "vehicle disarmed without fresh ground telemetry"
+    assert decision.command == zero_body_command()
 
 
 def test_disarm_flying_again_returns_to_touchdown_approach(controller, vehicle):

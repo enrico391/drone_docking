@@ -16,6 +16,7 @@ class DockTargetMode(Enum):
     """AprilTag layout currently observed by the camera."""
 
     OUTER = auto()
+    CENTRAL_ACQUIRING = auto()
     CENTRAL = auto()
 
 
@@ -266,6 +267,22 @@ class PidLandingController:
             raise RuntimeError("start() must be called before update()")
         if not math.isfinite(now):
             raise ValueError("now must be finite")
+        if (
+            vehicle.armed is False
+            and self._state not in (
+                PidLandingState.DISARM,
+                PidLandingState.COMPLETE,
+                PidLandingState.FAILED,
+            )
+        ):
+            self._enter_state(PidLandingState.FAILED, now)
+            self._failure_reason = "vehicle disarmed while mission was active"
+            return PidLandingDecision(
+                self._state,
+                _zero_body_command(),
+                outcome=PidLandingOutcome.FAILED,
+                reason=self._failure_reason,
+            )
 
         if self._state is PidLandingState.ACQUIRE_DOCK:
             return self._update_acquire_dock(now, dock)
@@ -462,7 +479,13 @@ class PidLandingController:
             self._config.coarse_yaw_tolerance_rad,
         )
         return PidLandingDecision(
-            self._state, self._visual_command(now, dock, z_enabled=True)
+            self._state,
+            self._visual_command(
+                now,
+                dock,
+                z_enabled=True,
+                vertical_limit_m_s=self._config.outer_descent_speed_m_s,
+            ),
         )
 
     def _update_acquire_central(
@@ -517,7 +540,13 @@ class PidLandingController:
             self._config.fine_yaw_tolerance_rad,
         )
         return PidLandingDecision(
-            self._state, self._visual_command(now, dock, z_enabled=True)
+            self._state,
+            self._visual_command(
+                now,
+                dock,
+                z_enabled=True,
+                vertical_limit_m_s=self._config.central_descent_speed_m_s,
+            ),
         )
 
     def _update_touchdown_approach(
@@ -558,6 +587,17 @@ class PidLandingController:
         self, now: float, vehicle: VehicleObservation,
     ) -> PidLandingDecision:
         if not self._fresh_on_ground(now, vehicle):
+            if vehicle.armed is False:
+                self._enter_state(PidLandingState.FAILED, now)
+                self._failure_reason = (
+                    "vehicle disarmed without fresh ground telemetry"
+                )
+                return PidLandingDecision(
+                    self._state,
+                    _zero_body_command(),
+                    outcome=PidLandingOutcome.FAILED,
+                    reason=self._failure_reason,
+                )
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
             return PidLandingDecision(
                 self._state,
@@ -636,6 +676,7 @@ class PidLandingController:
 
     def _visual_command(
         self, now: float, dock: DockObservation, *, z_enabled: bool,
+        vertical_limit_m_s: Optional[float] = None,
     ) -> VelocityCommand:
         velocity_x = self._x_pid.update(dock.forward_m, now)
         velocity_y = self._y_pid.update(dock.left_m, now)
@@ -653,6 +694,10 @@ class PidLandingController:
             velocity_z = self._z_pid.update(
                 self._distance_setpoint_m - dock.distance_m, now
             )
+            if vertical_limit_m_s is not None:
+                velocity_z = self._limit_symmetric(
+                    velocity_z, vertical_limit_m_s
+                )
         return VelocityCommand(
             VelocityFrame.BODY_FLU,
             velocity_x,
@@ -788,6 +833,10 @@ class PidLandingController:
     def _limit_vertical(self, velocity_z: float) -> float:
         limit = self._config.search_max_vertical_speed_m_s
         return max(-limit, min(limit, velocity_z))
+
+    @staticmethod
+    def _limit_symmetric(value: float, limit: float) -> float:
+        return max(-limit, min(limit, value))
 
     def _reset_pids(self) -> None:
         self._x_pid.reset()

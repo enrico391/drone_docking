@@ -23,10 +23,12 @@ from drone_mission_manager.mission_manager import (
     selected_update_rate_hz,
 )
 from drone_mission_manager.pid_landing import (
+    DockObservation,
     DockTargetMode,
     PidLandingDecision,
     PidLandingOutcome,
     PidLandingState,
+    VehicleObservation,
     VelocityCommand,
 )
 from drone_mission_manager.pymavlink_vehicle import (
@@ -325,6 +327,75 @@ def dock_pose(now, *, x=0.2, y=-0.3, z=2.0):
     message.pose.position.z = z
     message.pose.orientation.w = 1.0
     return message
+
+
+def controller_vehicle_observation(now, *, armed=True, flying=True):
+    return VehicleObservation(
+        position_enu_m=(0.0, 0.0, 5.0),
+        velocity_enu_m_s=(0.0, 0.0, 0.0),
+        armed=armed,
+        flying=flying,
+        mode=GUIDED_MODE,
+        landed_at=now,
+    )
+
+
+def controller_dock_observation(now, *, distance_m, mode):
+    return DockObservation(
+        forward_m=0.05,
+        left_m=-0.05,
+        distance_m=distance_m,
+        yaw_error_rad=0.05,
+        mode=mode,
+        source_stamp_s=now,
+        received_at=now,
+    )
+
+
+def advance_controller_to_central_descent(controller):
+    vehicle = controller_vehicle_observation(300.0)
+    outer = controller_dock_observation(
+        300.1, distance_m=1.0, mode=DockTargetMode.OUTER
+    )
+    controller.start(
+        now=300.0, dock_x_m=0.0, dock_y_m=0.0, hover_altitude_m=5.0
+    )
+    controller.update(300.1, outer, vehicle)
+    controller.update(
+        300.6,
+        controller_dock_observation(
+            300.6, distance_m=1.0, mode=DockTargetMode.OUTER
+        ),
+        vehicle,
+    )
+    controller.update(
+        300.7,
+        controller_dock_observation(
+            300.7, distance_m=1.0, mode=DockTargetMode.OUTER
+        ),
+        vehicle,
+    )
+    controller.update(
+        301.71,
+        controller_dock_observation(
+            301.71, distance_m=1.0, mode=DockTargetMode.OUTER
+        ),
+        vehicle,
+    )
+    controller.update(
+        301.8,
+        controller_dock_observation(
+            301.8, distance_m=0.9, mode=DockTargetMode.CENTRAL
+        ),
+        vehicle,
+    )
+    return controller.update(
+        302.31,
+        controller_dock_observation(
+            302.31, distance_m=0.9, mode=DockTargetMode.CENTRAL
+        ),
+        vehicle,
+    )
 
 
 def running_decision(
@@ -672,6 +743,27 @@ def test_pid_update_converts_dock_observation_once_and_routes_command(
     assert node._state_publisher.messages == ["PID_PID_ALIGN"]
 
 
+def test_pid_update_maps_central_acquiring_dock_mode(
+    manager_factory, monkeypatch
+):
+    """Break caught: central-acquiring pose is discarded at the PID boundary."""
+    now = 130.0
+    monkeypatch.setattr(mission_manager_module.time, "monotonic", lambda: now)
+    node, vehicle = manager_factory("pid")
+    controller = StubPidLanding([running_decision()])
+    node._pid_landing = controller
+    node._state = MissionState.PID_LANDING
+    vehicle.state = fresh_vehicle_state(now)
+    node._dock_pose_callback(dock_pose(now))
+    node._dock_mode_callback(String(data="CENTRAL_ACQUIRING"))
+
+    node._update()
+
+    observation = controller.updates[0][1]
+    assert observation is not None
+    assert observation.mode is DockTargetMode.CENTRAL_ACQUIRING
+
+
 def test_stale_pose_or_mode_is_not_passed_to_pid(
     manager_factory, monkeypatch
 ):
@@ -978,4 +1070,29 @@ def test_pid_landing_fails_if_vehicle_leaves_guided(
 
     assert node._state is MissionState.FAILED
     assert controller.updates == []
+    assert vehicle.velocity_calls[-1][1:4] == (0.0, 0.0, 0.0)
+
+
+def test_pid_landing_controller_unexpected_disarm_fails_stopped(
+    manager_factory, monkeypatch
+):
+    """Break caught: PID mode bypasses active-mission disarm safety."""
+    now = 320.0
+    monkeypatch.setattr(mission_manager_module.time, "monotonic", lambda: now)
+    node, vehicle = manager_factory("pid")
+    controller = node._pid_landing
+    assert controller is not None
+    assert (
+        advance_controller_to_central_descent(controller).state
+        is PidLandingState.DESCEND_CENTRAL
+    )
+    node._state = MissionState.PID_LANDING
+    node._has_seen_armed = True
+    vehicle.state = fresh_vehicle_state(now, armed=False)
+    node._dock_pose_callback(dock_pose(now, x=0.05, y=0.05, z=0.9))
+    node._dock_mode_callback(String(data="CENTRAL"))
+
+    node._update()
+
+    assert node._state is MissionState.FAILED
     assert vehicle.velocity_calls[-1][1:4] == (0.0, 0.0, 0.0)
