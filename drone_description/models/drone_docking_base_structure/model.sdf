@@ -103,7 +103,7 @@
 
       <!-- Outer tags on the large top surface: ID0 NE, ID1 NW, ID2 SW, ID3 SE. -->
       <visual name="apriltag_0_NE">
-        <pose>0.520 0.520 1.001 0 0 0</pose>
+        <pose>0.550 0.550 1.001 0 0 0</pose> 
         <cast_shadows>false</cast_shadows>
         <geometry>
           <mesh>
@@ -124,7 +124,7 @@
       </visual>
 
       <visual name="apriltag_1_NW">
-        <pose>-0.520 0.520 1.001 0 0 0</pose>
+        <pose>-0.550 0.550 1.001 0 0 0</pose>
         <cast_shadows>false</cast_shadows>
         <geometry>
           <mesh>
@@ -145,7 +145,7 @@
       </visual>
 
       <visual name="apriltag_2_SW">
-        <pose>-0.520 -0.520 1.001 0 0 0</pose>
+        <pose>-0.550 -0.550 1.001 0 0 0</pose>
         <cast_shadows>false</cast_shadows>
         <geometry>
           <mesh>
@@ -166,7 +166,7 @@
       </visual>
 
       <visual name="apriltag_3_SE">
-        <pose>0.520 -0.520 1.001 0 0 0</pose>
+        <pose>0.550 -0.550 1.001 0 0 0</pose>
         <cast_shadows>false</cast_shadows>
         <geometry>
           <mesh>

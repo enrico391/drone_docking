@@ -311,8 +311,8 @@ class DockLocalizer(Node):
         outer = [c for c in candidates if c['role'] != 'central']
         central = [c for c in candidates if c['role'] == 'central']
 
-        switch_dist = float(self.logic.get('central_switch_distance_m', 1.5))
-        stable_frames = int(self.logic.get('central_stable_frames', 8))
+        switch_dist = float(self.logic.get('central_switch_distance_m', 1.8))
+        stable_frames = int(self.logic.get('central_stable_frames', 4))
         dropout_frames = int(self.logic.get('central_dropout_frames', 5))
 
         valid_central = [c for c in central if c['distance'] <= switch_dist]
