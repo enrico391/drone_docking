@@ -181,8 +181,11 @@ Package, executable, and node names are all `flight_cycle_manager`.
 
 `~/start_cycle` uses `std_srvs/srv/Trigger`.
 
-- Accepted only while disarmed and in a startable state.
-- Re-downloads and validates the mission before any arming action.
+- Accepted only while disarmed and in a startable state. The synchronous
+  service response means that the request was queued, not that takeoff has
+  begun.
+- Starts a non-blocking mission download and validation transaction before any
+  arming action. Its result is published through `~/state` and `~/reason`.
 - Requires fresh heartbeat, position, landed state, and successful pre-arm
   checks.
 - Rejects requests while an airborne pilot-override latch is active.
@@ -190,8 +193,9 @@ Package, executable, and node names are all `flight_cycle_manager`.
 `~/request_dock` uses `std_srvs/srv/Trigger`.
 
 - Accepted during stored AUTO mission execution.
-- Sends `MAV_CMD_DO_LAND_START` and verifies its acknowledgement and resulting
-  AUTO/AUTO_RTL mission progression.
+- Queues `MAV_CMD_DO_LAND_START`; acknowledgement and resulting AUTO/AUTO_RTL
+  mission progression are verified asynchronously and published through
+  `~/state` and `~/reason`.
 - Returns success without duplicating commands if docking has already begun.
 - Rejects requests during takeoff, after manual takeover, and after landing is
   already complete.
