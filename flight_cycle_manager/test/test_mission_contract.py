@@ -169,6 +169,24 @@ def test_rejects_unsupported_coordinate_frame():
         validate_docking_mission(mission, config())
 
 
+def test_rejects_fractional_e7_coordinates():
+    mission = contract_mission()
+    mission[3] = item(3, NAV_LOITER_TIME, p1=10.0, x=450000000.5)
+    mission[4] = item(4, NAV_LAND, x=450000000.5)
+
+    with pytest.raises(MissionContractError, match="integer"):
+        validate_docking_mission(mission, config())
+
+
+def test_rejects_boolean_e7_coordinates():
+    mission = contract_mission()
+    mission[3] = item(3, NAV_LOITER_TIME, p1=10.0, x=True)
+    mission[4] = item(4, NAV_LAND, x=True)
+
+    with pytest.raises(MissionContractError, match="integer"):
+        validate_docking_mission(mission, config())
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -202,5 +220,5 @@ def test_rejects_non_finite_mission_fields(field, value):
         values["x"], values["y"], values["z"],
     )
 
-    with pytest.raises(MissionContractError, match="finite"):
+    with pytest.raises(MissionContractError, match="finite|integer"):
         validate_docking_mission(mission, config())

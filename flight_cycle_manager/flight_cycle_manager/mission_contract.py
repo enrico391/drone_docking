@@ -156,6 +156,10 @@ def _validate_item_fields(value: MissionItem) -> None:
         raise MissionContractError("mission coordinate frame is invalid")
     if not isinstance(value.command, Integral) or isinstance(value.command, bool):
         raise MissionContractError("mission command is invalid")
+    if not isinstance(value.x, Integral) or isinstance(value.x, bool):
+        raise MissionContractError("mission x coordinate must be an integer E7 value")
+    if not isinstance(value.y, Integral) or isinstance(value.y, bool):
+        raise MissionContractError("mission y coordinate must be an integer E7 value")
     for field in ("param1", "param2", "param3", "param4", "x", "y", "z"):
         if not _is_finite_number(getattr(value, field)):
             raise MissionContractError("mission fields must be finite")
