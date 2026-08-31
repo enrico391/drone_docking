@@ -3,7 +3,15 @@
 import pytest
 from pymavlink import mavutil
 
+from flight_cycle_manager.landing_backend import (
+    DockObservation,
+    DockTargetMode,
+    VehicleObservation,
+)
 from flight_cycle_manager.mission_contract import MissionItem
+from flight_cycle_manager.pid import PIDConfig
+from flight_cycle_manager.pid_landing import PidLandingConfig
+from flight_cycle_manager.pid_landing_backend import PidLandingBackend
 from flight_cycle_manager.pymavlink_vehicle import (
     MavlinkVehicle,
     VehicleState,
@@ -107,6 +115,74 @@ def push_ack(connection, command, result=MAVLINK.MAV_RESULT_ACCEPTED):
             target_system=254,
             target_component=191,
         )
+    )
+
+
+def controller_pid_config(output_limit=1.0):
+    return PIDConfig(
+        kp=1.0,
+        ki=0.0,
+        kd=0.0,
+        integral_limit=0.5,
+        output_limit=output_limit,
+        derivative_filter_time_constant_s=0.1,
+    )
+
+
+def pid_config(**overrides):
+    values = dict(
+        tag_stable_time_s=0.5,
+        central_transition_distance_m=1.0,
+        central_acquire_timeout_s=3.0,
+        central_loss_grace_s=0.3,
+        recovery_climb_m=0.3,
+        recovery_altitude_tolerance_m=0.05,
+        max_recovery_attempts=3,
+        touchdown_commit_height_m=0.20,
+        touchdown_speed_m_s=0.05,
+        touchdown_timeout_s=15.0,
+        landed_state_timeout_s=1.0,
+        landed_stable_time_s=0.5,
+        disarm_retry_period_s=1.0,
+        alignment_stable_time_s=1.0,
+        coarse_horizontal_tolerance_m=0.2,
+        fine_horizontal_tolerance_m=0.07,
+        coarse_yaw_tolerance_rad=0.2,
+        fine_yaw_tolerance_rad=0.1,
+        max_horizontal_speed_m_s=0.5,
+        outer_descent_speed_m_s=0.3,
+        central_descent_speed_m_s=0.12,
+        recovery_speed_m_s=0.2,
+        max_yaw_rate_rad_s=0.35,
+        x_pid=controller_pid_config(output_limit=0.5),
+        y_pid=controller_pid_config(output_limit=0.5),
+        z_pid=controller_pid_config(output_limit=0.7),
+        yaw_pid=controller_pid_config(output_limit=0.35),
+    )
+    values.update(overrides)
+    return PidLandingConfig(**values)
+
+
+def dock_observation(received_at=1.0):
+    return DockObservation(
+        forward_m=0.1,
+        left_m=-0.1,
+        distance_m=2.0,
+        yaw_error_rad=0.05,
+        mode=DockTargetMode.OUTER,
+        source_stamp_s=received_at,
+        received_at=received_at,
+    )
+
+
+def vehicle_observation(*, altitude_m=4.0, armed=True, flying=True, landed_at=0.0):
+    return VehicleObservation(
+        position_enu_m=(4.0, -2.0, altitude_m),
+        velocity_enu_m_s=(0.0, 0.0, 0.0),
+        armed=armed,
+        flying=flying,
+        mode=4,
+        landed_at=landed_at,
     )
 
 
@@ -400,6 +476,34 @@ def test_parameter_future_collects_requested_values_out_of_order(
         b"PLND_ENABLED",
         b"PLND_TYPE",
     ]
+
+
+def test_pid_backend_velocity_frame_routes_through_send_velocity(vehicle, connection):
+    """Break caught: PID backend frames are rejected by the MAVLink transport."""
+    backend = PidLandingBackend(pid_config())
+    backend.start(
+        now=1.0,
+        dock=dock_observation(1.0),
+        vehicle=vehicle_observation(),
+    )
+    decision = backend.update(
+        now=1.1,
+        dock=dock_observation(1.1),
+        vehicle=vehicle_observation(),
+    )
+
+    assert decision.velocity is not None
+    assert vehicle.send_velocity(
+        decision.velocity.frame,
+        decision.velocity.velocity_x,
+        decision.velocity.velocity_y,
+        decision.velocity.velocity_z,
+        yaw_rate_rad_s=decision.velocity.yaw_rate_rad_s,
+        now=30.0,
+    ) is True
+
+    call = connection.mav.calls_for("set_position_target_local_ned_send")[-1]
+    assert call[3] == MAVLINK.MAV_FRAME_BODY_NED
 
 
 @pytest.mark.parametrize(

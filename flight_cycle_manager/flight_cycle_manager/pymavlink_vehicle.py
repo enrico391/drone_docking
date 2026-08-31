@@ -3,9 +3,9 @@
 import math
 import os
 from dataclasses import dataclass, field, replace
-from enum import Enum, auto
 from typing import Any, Callable, Dict, Generic, Optional, Sequence, Tuple, TypeVar
 
+from flight_cycle_manager.landing_backend import VelocityFrame
 from flight_cycle_manager.mission_contract import MissionItem
 
 
@@ -56,13 +56,6 @@ def _valid_mission_download_count(value: object) -> bool:
         and not isinstance(value, bool)
         and 0 <= value <= _MAVLINK_UINT16_MAX
     )
-
-
-class VelocityFrame(Enum):
-    """Coordinate frame used by a mission-manager velocity command."""
-
-    MAP_ENU = auto()
-    BODY_FLU = auto()
 
 
 @dataclass(frozen=True)

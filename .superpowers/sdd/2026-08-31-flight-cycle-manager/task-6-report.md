@@ -89,3 +89,51 @@ No new production behavior had to be added during this recovery pass, so I used 
 
 - No blocking concerns from the audit.
 - The task was completed from a staged recovery point, so the report explicitly documents mutation evidence instead of claiming a new RED->GREEN implementation chronology that did not happen in this pass.
+
+## Fix Round 1
+
+### Finding addressed
+
+- `landing_backend.py` and `pymavlink_vehicle.py` defined separate `VelocityFrame` enums.
+- `PidLandingBackend` emitted `landing_backend.VelocityFrame`.
+- `MavlinkVehicle.send_velocity()` checked identity against the local `pymavlink_vehicle.VelocityFrame`.
+- Result: direct routing of a PID velocity decision into the MAVLink transport raised `ValueError("unsupported velocity frame: VelocityFrame.BODY_FLU")`.
+
+### Covering regression
+
+- Test: `test_pid_backend_velocity_frame_routes_through_send_velocity`
+- File: `flight_cycle_manager/test/test_pymavlink_vehicle.py`
+- Real behavior covered:
+  - constructs a real `PidLandingBackend`
+  - starts it after shared acquisition
+  - obtains a real PID decision carrying `decision.velocity.frame`
+  - routes that frame through the real `MavlinkVehicle.send_velocity()` boundary using the in-memory fake connection
+  - verifies the transport accepts the command and emits `MAV_FRAME_BODY_NED`
+
+### RED
+
+- Command:
+  - `PYTHONPATH=flight_cycle_manager /usr/bin/python3 -m pytest flight_cycle_manager/test/test_pymavlink_vehicle.py -q -k pid_backend_velocity_frame_routes_through_send_velocity`
+- Output:
+  - `FAILED flight_cycle_manager/test/test_pymavlink_vehicle.py::test_pid_backend_velocity_frame_routes_through_send_velocity`
+  - `ValueError: unsupported velocity frame: VelocityFrame.BODY_FLU`
+
+### GREEN
+
+- Production change:
+  - removed the duplicate `VelocityFrame` enum from `flight_cycle_manager/flight_cycle_manager/pymavlink_vehicle.py`
+  - imported the shared `VelocityFrame` from `flight_cycle_manager.landing_backend`
+  - preserved compatibility for existing callers importing `VelocityFrame` from `flight_cycle_manager.pymavlink_vehicle` because the module now re-exports the shared type by import
+
+- Regression re-run:
+  - `PYTHONPATH=flight_cycle_manager /usr/bin/python3 -m pytest flight_cycle_manager/test/test_pymavlink_vehicle.py -q -k pid_backend_velocity_frame_routes_through_send_velocity`
+  - `1 passed, 47 deselected in 0.14s`
+
+### Post-fix verification
+
+- `PYTHONPATH=flight_cycle_manager /usr/bin/python3 -m pytest flight_cycle_manager/test/test_pid.py flight_cycle_manager/test/test_control.py flight_cycle_manager/test/test_landing_wait.py flight_cycle_manager/test/test_pid_landing_backend.py -q`
+  - `35 passed in 0.03s`
+- `PYTHONPATH=flight_cycle_manager /usr/bin/python3 -m pytest flight_cycle_manager/test/test_pymavlink_vehicle.py -q`
+  - `48 passed in 0.17s`
+- `PYTHONPATH=flight_cycle_manager /usr/bin/python3 -m pytest flight_cycle_manager/test -q`
+  - `136 passed in 0.27s`
