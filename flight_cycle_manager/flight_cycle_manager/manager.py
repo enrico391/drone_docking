@@ -804,8 +804,9 @@ class FlightCycleManager(Node):
             )
 
     def _advance_wait_for_handoff(self, now: float) -> None:
-        if self._handoff_sequence_reached():
-            self._begin_guided_takeover(now)
+        unexpected_mode_reason = self._unexpected_approach_mode_reason(now)
+        if unexpected_mode_reason is not None:
+            self._transition(CycleState.PILOT_OVERRIDE, unexpected_mode_reason)
             return
         if self._dock_request_queued and not self._dock_request_acknowledged:
             self._begin_operation(
@@ -813,6 +814,10 @@ class FlightCycleManager(Node):
                 self._vehicle.request_dock_async(now),
                 now,
             )
+            return
+        if self._handoff_sequence_reached():
+            self._begin_guided_takeover(now)
+            return
 
     def _begin_guided_takeover(self, now: float) -> None:
         self._dock_request_queued = True
@@ -1475,6 +1480,27 @@ class FlightCycleManager(Node):
             and state.velocity_enu_m_s is not None
             and self._fresh_position(now, state)
         )
+
+    def _unexpected_approach_mode_reason(self, now: float) -> Optional[str]:
+        state = self._vehicle.state
+        if not self._fresh_airborne_telemetry(now):
+            return None
+        if state.mode in {AUTO_MODE, AUTO_RTL_MODE}:
+            return None
+        return (
+            "unexpected approach mode "
+            f"{self._flight_mode_name(state.mode)}; pilot now owns approach authority"
+        )
+
+    def _flight_mode_name(self, mode: Optional[int]) -> str:
+        return {
+            AUTO_MODE: "AUTO",
+            AUTO_RTL_MODE: "AUTO_RTL",
+            GUIDED_MODE: "GUIDED",
+            LAND_MODE: "LAND",
+            5: "LOITER",
+            None: "UNKNOWN",
+        }.get(mode, str(mode))
 
     def _fresh_position(self, now: float, state: VehicleState) -> bool:
         return (

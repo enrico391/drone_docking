@@ -294,6 +294,41 @@ def test_request_dock_is_idempotent_and_queues_do_land_start():
         manager.close()
 
 
+def test_request_dock_acknowledges_before_request_driven_handoff_takeover():
+    """Break caught: handoff seq can bypass the queued DO_LAND_START request."""
+    manager, vehicle = backend_manager()
+    try:
+        baseline_set_mode_calls = list(vehicle.set_mode_calls)
+
+        response = manager._request_dock_callback(
+            Trigger.Request(),
+            Trigger.Response(),
+        )
+        vehicle.state = auto_active_state(7.0, seq=manager.contract.handoff_seq)
+        manager.tick(now=7.0)
+
+        assert response.success is True
+        assert manager.state is CycleState.WAIT_FOR_HANDOFF
+        assert vehicle.request_dock_calls == 1
+        assert vehicle.set_mode_calls == baseline_set_mode_calls
+
+        vehicle.finish_command()
+        manager.tick(now=7.1)
+
+        assert manager.state is CycleState.WAIT_FOR_HANDOFF
+        assert vehicle.request_dock_calls == 1
+        assert vehicle.set_mode_calls == baseline_set_mode_calls
+
+        vehicle.state = auto_active_state(7.2, seq=manager.contract.handoff_seq)
+        manager.tick(now=7.2)
+
+        assert manager.state is CycleState.GUIDED_TAKEOVER
+        assert vehicle.request_dock_calls == 1
+        assert vehicle.set_mode_calls == [*baseline_set_mode_calls, GUIDED_MODE]
+    finally:
+        manager.close()
+
+
 def test_request_dock_ack_failure_commands_direct_land_once():
     """Break caught: a rejected DO_LAND_START leaves the aircraft in AUTO."""
     manager, vehicle = backend_manager()
@@ -319,11 +354,66 @@ def test_wait_for_handoff_accepts_auto_rtl_approach_progress():
             mode=AUTO_RTL_MODE,
         )
         manager.tick(now=8.0)
+        baseline_set_mode_calls = list(vehicle.set_mode_calls)
+        vehicle.state = replace(
+            auto_active_state(8.5, seq=manager.contract.handoff_seq),
+            mode=AUTO_RTL_MODE,
+        )
         manager.tick(now=8.5)
 
-        assert manager.state is CycleState.WAIT_FOR_HANDOFF
+        assert manager.state is CycleState.GUIDED_TAKEOVER
+        assert vehicle.request_dock_calls == 0
         assert vehicle.land_calls == 0
-        assert vehicle.set_mode_calls == [GUIDED_MODE]
+        assert vehicle.set_mode_calls == [*baseline_set_mode_calls, GUIDED_MODE]
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize(
+    ("unexpected_mode", "mode_name"),
+    ((GUIDED_MODE, "GUIDED"), (5, "LOITER")),
+)
+def test_wait_for_handoff_unexpected_mode_yields_passive_pilot_override(
+    unexpected_mode: int,
+    mode_name: str,
+):
+    """Break caught: unrelated approach modes can linger without manager authority."""
+    manager, vehicle = backend_manager()
+    try:
+        vehicle.state = auto_active_state(9.0, seq=manager.contract.land_start_seq)
+        manager.tick(now=9.0)
+        assert manager.state is CycleState.WAIT_FOR_HANDOFF
+
+        command_snapshot = {
+            "set_mode_calls": list(vehicle.set_mode_calls),
+            "request_dock_calls": vehicle.request_dock_calls,
+            "land_calls": vehicle.land_calls,
+            "start_mission_calls": vehicle.start_mission_calls,
+            "set_mission_current_calls": list(vehicle.set_mission_current_calls),
+            "velocity_calls": list(vehicle.velocity_calls),
+            "landing_target_calls": list(vehicle.landing_target_calls),
+            "condition_yaw_calls": list(vehicle.condition_yaw_calls),
+        }
+
+        vehicle.state = replace(
+            auto_active_state(9.1, seq=manager.contract.land_start_seq),
+            mode=unexpected_mode,
+        )
+        manager.tick(now=9.1)
+
+        assert manager.state is CycleState.PILOT_OVERRIDE
+        assert "unexpected approach mode" in manager.reason
+        assert mode_name in manager.reason
+        assert command_snapshot == {
+            "set_mode_calls": list(vehicle.set_mode_calls),
+            "request_dock_calls": vehicle.request_dock_calls,
+            "land_calls": vehicle.land_calls,
+            "start_mission_calls": vehicle.start_mission_calls,
+            "set_mission_current_calls": list(vehicle.set_mission_current_calls),
+            "velocity_calls": list(vehicle.velocity_calls),
+            "landing_target_calls": list(vehicle.landing_target_calls),
+            "condition_yaw_calls": list(vehicle.condition_yaw_calls),
+        }
     finally:
         manager.close()
 
