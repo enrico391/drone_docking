@@ -3,6 +3,7 @@
 import pytest
 from pymavlink import mavutil
 
+from flight_cycle_manager.mission_contract import MissionItem
 from flight_cycle_manager.pymavlink_vehicle import (
     MavlinkVehicle,
     VehicleState,
@@ -816,3 +817,57 @@ def test_mission_download_and_command_share_the_single_pending_operation(
 
     assert mission.done() is False
     assert connection.mav.calls_for("command_long_send") == []
+
+
+@pytest.mark.parametrize("count", (32769, 65535))
+def test_download_mission_accepts_full_uint16_mission_counts(
+    vehicle, connection, count
+):
+    """Break caught: a valid large uint16 count is discarded before item zero."""
+    future = vehicle.download_mission_async(now=60.0)
+    connection.incoming.append(FakeMessage("MISSION_COUNT", count=count, mission_type=0))
+
+    vehicle.poll(60.1)
+
+    assert future.done() is False
+    assert connection.mav.calls_for("mission_request_int_send") == [(1, 1, 0, 0)]
+
+
+def test_download_mission_ignores_count_outside_uint16_range(vehicle, connection):
+    """Break caught: an invalid count is accepted and produces an unsafe request."""
+    future = vehicle.download_mission_async(now=61.0)
+    connection.incoming.append(FakeMessage("MISSION_COUNT", count=65536, mission_type=0))
+
+    vehicle.poll(61.1)
+
+    assert future.done() is False
+    assert connection.mav.calls_for("mission_request_int_send") == []
+
+
+def test_download_mission_accepts_high_uint16_item_sequence_after_prior_items(
+    vehicle, connection
+):
+    """Break caught: a high valid item is rejected using the set-current limit."""
+    count = 32769
+    future = vehicle.download_mission_async(now=62.0)
+    connection.incoming.append(FakeMessage("MISSION_COUNT", count=count, mission_type=0))
+    vehicle.poll(62.1)
+
+    # This controlled pending state represents the already received lower
+    # items without creating tens of thousands of fake MAVLink messages.
+    pending = vehicle._pending
+    assert pending is not None
+    pending.mission_items = {
+        sequence: MissionItem(
+            sequence, MAVLINK.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 16,
+            0.0, 0.0, 0.0, 0.0, 450000000, 90000000, 4.0,
+        )
+        for sequence in range(32768)
+    }
+    connection.incoming.append(mission_item_message(seq=32768, command=21))
+
+    vehicle.poll(62.2)
+
+    assert future.done() is True
+    assert future.result().items[-1].seq == 32768
+    assert connection.mav.calls_for("mission_ack_send")[-1][2] == MAVLINK.MAV_MISSION_ACCEPTED

@@ -15,6 +15,8 @@ _LANDING_TARGET_TYPE_FIDUCIAL = 2
 _COMMAND_RETRY_S = 0.5
 _COMMAND_TIMEOUT_S = 3.0
 _MISSION_TYPE_MISSION = 0
+_SET_MISSION_CURRENT_MAX_SEQUENCE = 32767
+_MAVLINK_UINT16_MAX = 65535
 _MESSAGE_INTERVALS_US = (
     (32, 50_000),  # LOCAL_POSITION_NED at 20 Hz
     (30, 50_000),  # ATTITUDE at 20 Hz
@@ -40,19 +42,19 @@ def _message_mission_type(message: Any) -> Optional[int]:
     return _optional_int(value)
 
 
-def _valid_mission_sequence(value: object) -> bool:
+def _valid_mission_download_sequence(value: object) -> bool:
     return (
         isinstance(value, int)
         and not isinstance(value, bool)
-        and 0 <= value <= 32767
+        and 0 <= value <= _MAVLINK_UINT16_MAX
     )
 
 
-def _valid_mission_sequence_count(value: object) -> bool:
+def _valid_mission_download_count(value: object) -> bool:
     return (
         isinstance(value, int)
         and not isinstance(value, bool)
-        and 0 <= value <= 32768
+        and 0 <= value <= _MAVLINK_UINT16_MAX
     )
 
 
@@ -296,7 +298,7 @@ class MavlinkVehicle:
         if (
             not isinstance(sequence, int)
             or isinstance(sequence, bool)
-            or not 0 <= sequence <= 32767
+            or not 0 <= sequence <= _SET_MISSION_CURRENT_MAX_SEQUENCE
         ):
             raise ValueError("mission sequence must be an integer in [0, 32767]")
         return self._begin_command(
@@ -826,7 +828,7 @@ class MavlinkVehicle:
         ):
             return
         count = getattr(message, "count", None)
-        if not _valid_mission_sequence_count(count):
+        if not _valid_mission_download_count(count):
             return
         pending.mission_count = int(count)
         opaque_id = _optional_nonzero_int(getattr(message, "opaque_id", None))
@@ -845,7 +847,7 @@ class MavlinkVehicle:
             return
         sequence = getattr(message, "seq", None)
         if (
-            not _valid_mission_sequence(sequence)
+            not _valid_mission_download_sequence(sequence)
             or sequence >= pending.mission_count
             or sequence in pending.mission_items
         ):
