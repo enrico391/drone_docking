@@ -150,6 +150,8 @@ class FlightCycleManager(Node):
         self._start_requested = False
         self._stable_takeoff_since: Optional[float] = None
         self._mission_confirmation_deadline: Optional[float] = None
+        self._auto_heartbeat_baseline: Optional[float] = None
+        self._mission_current_baseline: Optional[float] = None
         self._closed = False
 
         # Startup validation is deliberately read-only. A later cycle request
@@ -234,9 +236,10 @@ class FlightCycleManager(Node):
             return
         if self._state is CycleState.PREARM:
             if not self._fresh_ground_telemetry(now):
-                self._fail_disarmed(
+                self._route_failure(
                     "fresh heartbeat, position, and landed state telemetry "
-                    "are required before arming"
+                    "are required before arming",
+                    grounded_state=CycleState.FAILED_DISARMED,
                 )
                 return
             self._begin_operation("prearm", self._vehicle.prearm_async(now), now)
@@ -250,9 +253,10 @@ class FlightCycleManager(Node):
             return
         if self._state is CycleState.ARM:
             if not self._fresh_ground_telemetry(now):
-                self._fail_disarmed(
+                self._route_failure(
                     "fresh heartbeat, position, and landed state telemetry "
-                    "are required before arming"
+                    "are required before arming",
+                    grounded_state=CycleState.FAILED_DISARMED,
                 )
                 return
             self._begin_operation("arm", self._vehicle.arm_async(True, now), now)
@@ -308,6 +312,8 @@ class FlightCycleManager(Node):
         self._contract = None
         self._stable_takeoff_since = None
         self._mission_confirmation_deadline = None
+        self._auto_heartbeat_baseline = None
+        self._mission_current_baseline = None
         self._transition(
             CycleState.VALIDATING_MISSION,
             "downloading onboard mission for validation",
@@ -386,6 +392,9 @@ class FlightCycleManager(Node):
                 "onboard mission reset to sequence zero",
             )
         elif name == "start_mission":
+            state = self._vehicle.state
+            self._auto_heartbeat_baseline = state.heartbeat_at
+            self._mission_current_baseline = state.mission_current_at
             self._mission_confirmation_deadline = now + self._positive_parameter(
                 "mission_start_confirmation_timeout_s"
             )
@@ -409,10 +418,7 @@ class FlightCycleManager(Node):
         if name == "direct_land":
             self._transition(CycleState.FC_FALLBACK_LAND, reason, force=True)
             return
-        if self._vehicle_is_airborne_or_armed():
-            self._command_direct_land(reason)
-            return
-        self._fail_disarmed(reason)
+        self._route_failure(reason, grounded_state=CycleState.FAILED_DISARMED)
 
     def _validate_download(self, result: Any, now: float) -> None:
         try:
@@ -521,9 +527,17 @@ class FlightCycleManager(Node):
 
     def _auto_mission_confirmed(self, now: float) -> bool:
         state = self._vehicle.state
+        heartbeat_baseline = self._auto_heartbeat_baseline
+        mission_current_baseline = self._mission_current_baseline
+        if heartbeat_baseline is None or mission_current_baseline is None:
+            return False
         mission_mode_matches = (
             state.mission_mode is None
             or state.mission_mode == MISSION_TYPE_MISSION
+        )
+        mission_state_matches = (
+            state.mission_state is None
+            or state.mission_state == MISSION_STATE_ACTIVE
         )
         return (
             self._vehicle.ready(
@@ -533,8 +547,10 @@ class FlightCycleManager(Node):
                 ),
             )
             and state.mode == AUTO_MODE
-            and state.mission_seq is not None
-            and state.mission_state == MISSION_STATE_ACTIVE
+            and state.heartbeat_at > heartbeat_baseline
+            and state.mission_seq == 0
+            and state.mission_current_at > mission_current_baseline
+            and mission_state_matches
             and mission_mode_matches
             and 0.0 <= now - state.mission_current_at
             <= self._positive_parameter("mavlink_heartbeat_timeout_s")
@@ -585,9 +601,9 @@ class FlightCycleManager(Node):
             <= self._positive_parameter("landed_state_timeout_s")
         )
 
-    def _vehicle_is_airborne_or_armed(self) -> bool:
+    def _vehicle_is_confirmed_disarmed_on_ground(self) -> bool:
         state = self._vehicle.state
-        return state.armed is True or state.flying is True
+        return state.armed is False and state.flying is False
 
     def _command_direct_land(self, reason: str) -> None:
         self._transition(CycleState.FC_FALLBACK_LAND, reason)
@@ -603,8 +619,21 @@ class FlightCycleManager(Node):
 
     def _invalid_mission(self, reason: str) -> None:
         self._contract = None
+        self._route_failure(
+            reason,
+            grounded_state=CycleState.INVALID_ONBOARD_MISSION,
+        )
+
+    def _route_failure(self, reason: str, *, grounded_state: CycleState) -> None:
+        """Land unless live telemetry confirms a disarmed vehicle on ground."""
         self._start_requested = False
-        self._transition(CycleState.INVALID_ONBOARD_MISSION, reason)
+        if self._vehicle_is_confirmed_disarmed_on_ground():
+            if grounded_state is CycleState.FAILED_DISARMED:
+                self._fail_disarmed(reason)
+            else:
+                self._transition(grounded_state, reason)
+            return
+        self._command_direct_land(reason)
 
     def _fail_disarmed(self, reason: str) -> None:
         self._start_requested = False

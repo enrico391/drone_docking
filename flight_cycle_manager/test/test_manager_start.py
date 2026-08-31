@@ -236,6 +236,18 @@ def drive_to_reset_mission(
     assert vehicle.set_mission_current_calls == [(0, True)]
 
 
+def drive_to_start_mission_pending(
+    manager: FlightCycleManager, vehicle: FakeVehicle
+) -> None:
+    """Advance reset acknowledgement to one pending MISSION_START command."""
+    drive_to_reset_mission(manager, vehicle)
+    vehicle.finish_command()
+    manager.tick(now=6.2)
+    assert manager.state is CycleState.START_AUTO
+    manager.tick(now=6.3)
+    assert vehicle.start_mission_calls == 1
+
+
 def test_startup_downloads_and_validates_before_becoming_ready():
     """Break caught: startup can mark a mission ready without a fresh download."""
     vehicle = FakeVehicle(ground_state(0.0))
@@ -375,6 +387,64 @@ def test_stale_heartbeat_or_pose_aborts_before_prearm_or_arm():
         manager.close()
 
 
+def test_armed_telemetry_race_before_prearm_commands_direct_land_once():
+    """Break caught: a post-acceptance arm race is mislabeled FAILED_DISARMED."""
+    vehicle = FakeVehicle(ground_state(0.0))
+    manager = make_manager(vehicle)
+    try:
+        finish_startup_validation(manager, vehicle)
+        request_valid_start(manager, vehicle)
+        vehicle.state = airborne_state(1.0)
+        manager.tick(now=1.0)
+        manager.tick(now=1.1)
+
+        assert manager.state is CycleState.FC_FALLBACK_LAND
+        assert vehicle.land_calls == 1
+        assert vehicle.arm_calls == []
+    finally:
+        manager.close()
+
+
+def test_armed_invalid_mission_race_commands_direct_land_once():
+    """Break caught: failed validation ignores that the accepted cycle is airborne."""
+    vehicle = FakeVehicle(ground_state(0.0))
+    manager = make_manager(vehicle)
+    try:
+        finish_startup_validation(manager, vehicle)
+        response = manager._start_cycle_callback(Trigger.Request(), Trigger.Response())
+        assert response.success
+        vehicle.state = airborne_state(1.0)
+        vehicle.finish_download(items_without_land_contract())
+        manager.tick(now=1.0)
+        manager.tick(now=1.1)
+
+        assert manager.state is CycleState.FC_FALLBACK_LAND
+        assert vehicle.land_calls == 1
+    finally:
+        manager.close()
+
+
+def test_armed_native_parameter_validation_race_commands_direct_land_once():
+    """Break caught: a bad PLND gate ignores a vehicle that armed during validation."""
+    vehicle = FakeVehicle(ground_state(0.0))
+    manager = make_manager(vehicle, landing_backend="precise_landing")
+    try:
+        finish_startup_validation(manager, vehicle)
+        response = manager._start_cycle_callback(Trigger.Request(), Trigger.Response())
+        assert response.success
+        vehicle.finish_download(valid_contract_items())
+        manager.tick(now=1.0)
+        vehicle.state = airborne_state(1.1)
+        vehicle.finish_parameters({"PLND_ENABLED": 0.0, "PLND_TYPE": 0.0})
+        manager.tick(now=1.1)
+        manager.tick(now=1.2)
+
+        assert manager.state is CycleState.FC_FALLBACK_LAND
+        assert vehicle.land_calls == 1
+    finally:
+        manager.close()
+
+
 def test_fresh_telemetry_runs_prearm_before_any_arm_command():
     """Break caught: a valid start bypasses fresh pre-arm health confirmation."""
     vehicle = FakeVehicle(ground_state(0.0))
@@ -509,6 +579,46 @@ def test_auto_mission_requires_auto_heartbeat_and_active_mission_current():
 
         vehicle.state = auto_active_state(6.5, seq=0)
         manager.tick(now=6.5)
+        assert manager.state is CycleState.AUTO_MISSION
+    finally:
+        manager.close()
+
+
+def test_auto_confirmation_requires_observations_newer_than_start_ack():
+    """Break caught: pre-ACK AUTO telemetry can complete a later mission start."""
+    vehicle = FakeVehicle(ground_state(0.0))
+    manager = make_manager(vehicle)
+    try:
+        finish_startup_validation(manager, vehicle)
+        request_valid_start(manager, vehicle)
+        drive_to_start_mission_pending(manager, vehicle)
+        vehicle.state = auto_active_state(6.3, seq=0)
+        vehicle.finish_command()
+        manager.tick(now=6.4)
+        manager.tick(now=6.5)
+
+        assert manager.state is CycleState.START_AUTO
+
+        vehicle.state = auto_active_state(6.6, seq=0)
+        manager.tick(now=6.6)
+        assert manager.state is CycleState.AUTO_MISSION
+    finally:
+        manager.close()
+
+
+def test_auto_confirmation_accepts_absent_mission_state_after_start_ack():
+    """Break caught: a MAVLink v1 MISSION_CURRENT can never confirm AUTO."""
+    vehicle = FakeVehicle(ground_state(0.0))
+    manager = make_manager(vehicle)
+    try:
+        finish_startup_validation(manager, vehicle)
+        request_valid_start(manager, vehicle)
+        drive_to_start_mission_pending(manager, vehicle)
+        vehicle.finish_command()
+        manager.tick(now=6.4)
+        vehicle.state = replace(auto_active_state(6.5, seq=0), mission_state=None)
+        manager.tick(now=6.5)
+
         assert manager.state is CycleState.AUTO_MISSION
     finally:
         manager.close()

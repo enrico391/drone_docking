@@ -18,11 +18,20 @@ from flight_cycle_manager.pymavlink_vehicle import (
 def install_ros_fakes() -> None:
     """Install the narrow ROS API boundary manager unit tests need.
 
-    The workspace image intentionally has ROS interface metadata but no Python
-    ``rclpy`` wheel.  These fakes replace only ROS transport/lifecycle plumbing;
+    Prefer the sourced ROS runtime whenever all manager imports are available.
+    The fakes exist only for environments where that import boundary is absent;
     the manager state machine and MAVLink boundary remain real test subjects.
     """
-    if "rclpy" in sys.modules:
+    try:
+        import rclpy  # noqa: F401
+        from rclpy.node import Node  # noqa: F401
+        from rclpy.parameter import Parameter  # noqa: F401
+        from rclpy.qos import QoSProfile  # noqa: F401
+        from std_msgs.msg import String  # noqa: F401
+        from std_srvs.srv import Trigger  # noqa: F401
+    except ImportError:
+        pass
+    else:
         return
 
     class Parameter:

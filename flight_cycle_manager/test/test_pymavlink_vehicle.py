@@ -847,6 +847,19 @@ def test_mission_current_updates_persistent_progress_and_absent_extensions(
     assert vehicle.state.mission_current_at == 20.2
 
 
+def test_mission_current_without_extensions_preserves_sequence_zero_progress(
+    vehicle, connection
+):
+    """Break caught: runtime MAVLink v1 progress at sequence zero is discarded."""
+    connection.incoming.append(FakeMessage("MISSION_CURRENT", seq=0, total=3))
+    vehicle.poll(21.0)
+
+    assert vehicle.state.mission_seq == 0
+    assert vehicle.state.mission_total == 3
+    assert vehicle.state.mission_state is None
+    assert vehicle.state.mission_current_at == 21.0
+
+
 @pytest.mark.parametrize(
     ("method", "command", "params"),
     [
