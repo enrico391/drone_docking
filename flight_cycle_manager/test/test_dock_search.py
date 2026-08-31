@@ -103,6 +103,15 @@ def test_horizontal_speed_is_saturated_without_changing_radial_sign():
     assert decision.velocity_enu_m_s[1] > 0.0
 
 
+def test_large_finite_inputs_cannot_emit_non_finite_velocity():
+    controller = started_controller(radius_m=1.0e308, radial_gain=1.0e308)
+    decision = controller.update(observation(1.0, (0.0, 0.0, 4.0)))
+
+    assert all(math.isfinite(component) for component in decision.velocity_enu_m_s)
+    assert math.hypot(*decision.velocity_enu_m_s[:2]) <= 0.50
+    assert abs(decision.velocity_enu_m_s[2]) <= 0.50
+
+
 def test_vertical_speed_is_saturated_in_both_directions():
     controller = started_controller(altitude_gain=10.0)
 
@@ -162,4 +171,3 @@ def test_rejects_non_monotonic_caller_time():
 
     with pytest.raises(ValueError, match="monotonic"):
         controller.update(observation(0.9))
-

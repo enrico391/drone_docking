@@ -193,15 +193,32 @@ def _decision(outcome: SearchOutcome, reason: str) -> SearchDecision:
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
+    if math.isnan(value):
+        return 0.0
+    if value == math.inf:
+        return maximum
+    if value == -math.inf:
+        return minimum
     return min(maximum, max(minimum, value))
 
 
 def _clamp_vector(east: float, north: float, maximum: float) -> tuple[float, float]:
-    magnitude = math.hypot(east, north)
-    if magnitude <= maximum or magnitude == 0.0:
+    # Normalize from the largest component instead of hypot(east, north),
+    # which can overflow for otherwise finite controller intermediates.
+    if not math.isfinite(east):
+        east = math.copysign(1.0, east) if math.isinf(east) else 0.0
+    if not math.isfinite(north):
+        north = math.copysign(1.0, north) if math.isinf(north) else 0.0
+    scale = max(abs(east), abs(north))
+    if scale == 0.0:
         return east, north
-    scale = maximum / magnitude
-    return east * scale, north * scale
+    unit_east = east / scale
+    unit_north = north / scale
+    unit_magnitude = math.hypot(unit_east, unit_north)
+    if scale <= maximum / unit_magnitude:
+        return east, north
+    output_scale = maximum / unit_magnitude
+    return unit_east * output_scale, unit_north * output_scale
 
 
 def _validate_observation(observation: SearchObservation) -> None:
