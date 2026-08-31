@@ -26,6 +26,7 @@ def install_ros_fakes() -> None:
         import rclpy  # noqa: F401
         from rclpy.node import Node  # noqa: F401
         from rclpy.parameter import Parameter  # noqa: F401
+        from geometry_msgs.msg import PoseStamped  # noqa: F401
         from rclpy.qos import QoSProfile  # noqa: F401
         from std_msgs.msg import String  # noqa: F401
         from std_srvs.srv import Trigger  # noqa: F401
@@ -50,6 +51,11 @@ def install_ros_fakes() -> None:
 
         def publish(self, message: object) -> None:
             self.messages.append(message)
+
+    class _Subscription:
+        def __init__(self, topic: str, callback: object) -> None:
+            self.topic = topic
+            self.callback = callback
 
     class _Timer:
         def __init__(self, period: float, callback: object) -> None:
@@ -96,7 +102,26 @@ def install_ros_fakes() -> None:
             return _Publisher(topic)
 
         def create_service(self, service_type: object, topic: str, callback: object) -> object:
-            return type("Service", (), {"topic": topic, "callback": callback, "service_type": service_type})()
+            return type(
+                "Service",
+                (),
+                {
+                    "topic": topic,
+                    "callback": callback,
+                    "service_type": service_type,
+                    "srv_type": service_type,
+                },
+            )()
+
+        def create_subscription(
+            self,
+            message_type: object,
+            topic: str,
+            callback: object,
+            qos: object,
+        ) -> _Subscription:
+            del message_type, qos
+            return _Subscription(topic, callback)
 
         def create_timer(self, period: float, callback: object) -> _Timer:
             return _Timer(period, callback)
@@ -114,14 +139,48 @@ def install_ros_fakes() -> None:
             self.durability = durability
 
     class ReliabilityPolicy:
+        BEST_EFFORT = "best_effort"
         RELIABLE = "reliable"
 
     class DurabilityPolicy:
+        VOLATILE = "volatile"
         TRANSIENT_LOCAL = "transient_local"
 
     class String:
         def __init__(self) -> None:
             self.data = ""
+
+    class _Stamp:
+        def __init__(self) -> None:
+            self.sec = 0
+            self.nanosec = 0
+
+    class _Header:
+        def __init__(self) -> None:
+            self.stamp = _Stamp()
+
+    class _Point:
+        def __init__(self) -> None:
+            self.x = 0.0
+            self.y = 0.0
+            self.z = 0.0
+
+    class _Quaternion:
+        def __init__(self) -> None:
+            self.x = 0.0
+            self.y = 0.0
+            self.z = 0.0
+            self.w = 1.0
+
+    class _Pose:
+        def __init__(self) -> None:
+            self.position = _Point()
+            self.orientation = _Quaternion()
+
+    class PoseStamped:
+        def __init__(self) -> None:
+            self.header = _Header()
+            self.pose = _Pose()
 
     class Trigger:
         class Request:
@@ -144,6 +203,9 @@ def install_ros_fakes() -> None:
     qos_module.DurabilityPolicy = DurabilityPolicy
     qos_module.QoSProfile = QoSProfile
     qos_module.ReliabilityPolicy = ReliabilityPolicy
+    geometry_msgs_module = ModuleType("geometry_msgs")
+    geometry_msgs_msg_module = ModuleType("geometry_msgs.msg")
+    geometry_msgs_msg_module.PoseStamped = PoseStamped
     std_msgs_module = ModuleType("std_msgs")
     std_msgs_msg_module = ModuleType("std_msgs.msg")
     std_msgs_msg_module.String = String
@@ -156,6 +218,8 @@ def install_ros_fakes() -> None:
             "rclpy.node": node_module,
             "rclpy.parameter": parameter_module,
             "rclpy.qos": qos_module,
+            "geometry_msgs": geometry_msgs_module,
+            "geometry_msgs.msg": geometry_msgs_msg_module,
             "std_msgs": std_msgs_module,
             "std_msgs.msg": std_msgs_msg_module,
             "std_srvs": std_srvs_module,
@@ -177,8 +241,12 @@ class FakeVehicle:
         self.takeoff_calls: list[float] = []
         self.set_mission_current_calls: list[tuple[int, bool]] = []
         self.start_mission_calls = 0
+        self.request_dock_calls = 0
         self.land_calls = 0
         self.rtl_calls = 0
+        self.velocity_calls: list[tuple[object, float, float, float, Optional[float], float]] = []
+        self.landing_target_calls: list[dict[str, object]] = []
+        self.condition_yaw_calls: list[dict[str, object]] = []
         self.mission_mutation_calls: list[str] = []
         self.closed = False
         self._active_name = ""
@@ -247,6 +315,13 @@ class FakeVehicle:
         self.start_mission_calls += 1
         return self._begin("start_mission")  # type: ignore[return-value]
 
+    def request_dock_async(
+        self, now: float
+    ) -> MavlinkFuture[VehicleCommandResult]:
+        del now
+        self.request_dock_calls += 1
+        return self._begin("request_dock")  # type: ignore[return-value]
+
     def land_async(self, now: float) -> MavlinkFuture[VehicleCommandResult]:
         del now
         self.land_calls += 1
@@ -256,6 +331,36 @@ class FakeVehicle:
         del now
         self.rtl_calls += 1
         return self._begin("rtl")  # type: ignore[return-value]
+
+    def send_velocity(
+        self,
+        frame: object,
+        velocity_x: float,
+        velocity_y: float,
+        velocity_z: float,
+        *,
+        now: float,
+        yaw_rate_rad_s: Optional[float] = None,
+    ) -> bool:
+        self.velocity_calls.append(
+            (
+                frame,
+                velocity_x,
+                velocity_y,
+                velocity_z,
+                yaw_rate_rad_s,
+                now,
+            )
+        )
+        return True
+
+    def send_landing_target(self, **values: object) -> bool:
+        self.landing_target_calls.append(dict(values))
+        return True
+
+    def send_condition_yaw(self, **values: object) -> bool:
+        self.condition_yaw_calls.append(dict(values))
+        return True
 
     def finish_download(
         self,
@@ -294,6 +399,9 @@ class FakeVehicle:
     ) -> None:
         future = self._take_active()
         future._finish(VehicleCommandResult(success, message, current_mode))
+
+    def reject_pending(self, message: str) -> None:
+        self.finish_command(success=False, message=message)
 
     def close(self) -> None:
         self.closed = True

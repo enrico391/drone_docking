@@ -1,4 +1,4 @@
-"""Non-blocking validated flight-cycle start and AUTO mission handoff."""
+"""Non-blocking validated flight-cycle start, docking handoff, and fallback."""
 
 from __future__ import annotations
 
@@ -9,23 +9,50 @@ from enum import Enum, auto
 from typing import Any, Mapping, Optional
 
 import rclpy
+from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
+from .dock_search import (
+    DockSearchController,
+    SearchConfig,
+    SearchObservation,
+    SearchOutcome,
+)
+from .landing_backend import (
+    DockObservation,
+    DockTargetMode,
+    LandingBackendOutcome,
+    VehicleObservation,
+    VelocityFrame,
+)
+from .landing_target import (
+    camera_dock_orientation_to_body_yaw_error,
+    camera_target_to_body_frd,
+    measurement_time_usec,
+)
 from .mission_contract import (
     MissionContract,
     MissionContractError,
     MissionValidationConfig,
     validate_docking_mission,
 )
+from .pid import PIDConfig
+from .pid_landing import PidLandingConfig
+from .pid_landing_backend import PidLandingBackend
+from .precise_landing_backend import (
+    PreciseLandingBackend,
+    PreciseLandingConfig,
+)
 from .pymavlink_vehicle import MavlinkVehicle, VehicleCommandResult, VehicleState
 
 
-# ArduCopter custom modes used by the start lifecycle.
+# ArduCopter custom modes used by the lifecycle.
 AUTO_MODE = 3
+AUTO_RTL_MODE = 27
 GUIDED_MODE = 4
 LAND_MODE = 9
 MISSION_STATE_ACTIVE = 3
@@ -121,6 +148,23 @@ class FlightCycleManager(Node):
             ),
         )
         update_rate_hz = self._positive_parameter("update_rate_hz")
+        sensor_qos = QoSProfile(
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self._dock_pose_subscription = self.create_subscription(
+            PoseStamped,
+            str(self.get_parameter("dock_pose_topic").value),
+            self._dock_pose_callback,
+            sensor_qos,
+        )
+        self._dock_mode_subscription = self.create_subscription(
+            String,
+            str(self.get_parameter("dock_mode_topic").value),
+            self._dock_mode_callback,
+            sensor_qos,
+        )
         self._state_publisher = self.create_publisher(
             String,
             "~/state",
@@ -142,6 +186,9 @@ class FlightCycleManager(Node):
         self._start_service = self.create_service(
             Trigger, "~/start_cycle", self._start_cycle_callback
         )
+        self._request_dock_service = self.create_service(
+            Trigger, "~/request_dock", self._request_dock_callback
+        )
         self._timer = self.create_timer(1.0 / update_rate_hz, self._timer_callback)
         self._state = CycleState.READY
         self._reason = "initializing"
@@ -150,8 +197,21 @@ class FlightCycleManager(Node):
         self._start_requested = False
         self._stable_takeoff_since: Optional[float] = None
         self._mission_confirmation_deadline: Optional[float] = None
+        self._mission_confirmation_expected_seq: Optional[int] = None
         self._auto_heartbeat_baseline: Optional[float] = None
         self._mission_current_baseline: Optional[float] = None
+        self._dock_request_queued = False
+        self._dock_request_acknowledged = False
+        self._search_controller: Optional[Any] = None
+        self._landing_controller: Optional[Any] = None
+        self._dock_pose: Optional[PoseStamped] = None
+        self._dock_pose_received_at = 0.0
+        self._dock_pose_generation = 0
+        self._last_streamed_dock_pose_generation = -1
+        self._dock_mode = "NO_TARGET"
+        self._dock_mode_received_at = 0.0
+        self._pending_pid_disarm_request_id: Optional[int] = None
+        self._pending_pid_disarm_timeout_notified = False
         self._closed = False
 
         # Startup validation is deliberately read-only. A later cycle request
@@ -174,12 +234,27 @@ class FlightCycleManager(Node):
         return self._reason
 
     @property
+    def contract(self) -> Optional[MissionContract]:
+        """Expose the validated mission indices for deterministic tests."""
+        return self._contract
+
+    @property
     def landing_backend(self) -> str:
         """Configured landing backend selected for this node instance."""
         return self._landing_backend
 
+    @property
+    def search_controller(self) -> Optional[Any]:
+        """Expose the shared search controller while docking is active."""
+        return self._search_controller
+
+    @property
+    def backend(self) -> Optional[Any]:
+        """Expose the active landing backend for deterministic tests."""
+        return self._landing_controller
+
     def _declare_parameters(self) -> None:
-        """Declare only values required by the first lifecycle slice."""
+        """Declare lifecycle, shared-search, and landing backend defaults."""
         defaults = {
             "simulation_mode": False,
             "auto_start": False,
@@ -197,6 +272,68 @@ class FlightCycleManager(Node):
             "mavlink_heartbeat_timeout_s": 2.5,
             "pose_timeout_s": 1.0,
             "landed_state_timeout_s": 1.0,
+            "dock_pose_timeout_s": 0.5,
+            "dock_pose_topic": "/dock/pose",
+            "dock_mode_topic": "/dock/mode",
+            "search_radius_m": 1.0,
+            "search_tangential_speed_m_s": 0.30,
+            "search_radial_gain": 0.70,
+            "search_altitude_gain": 0.70,
+            "search_max_horizontal_speed_m_s": 0.50,
+            "search_max_vertical_speed_m_s": 0.50,
+            "search_target_stable_time_s": 0.50,
+            "search_timeout_s": 30.0,
+            "search_max_displacement_m": 2.0,
+            "landing_yaw_correction_enabled": True,
+            "landing_target_warmup_s": 1.0,
+            "landing_target_camera_forward_m": 0.0,
+            "landing_target_camera_right_m": 0.0,
+            "landing_target_camera_down_m": 0.19,
+            "landing_touchdown_warn_after_s": 30.0,
+            "landing_disarm_warn_after_s": 20.0,
+            "pid_tag_stable_time_s": 0.5,
+            "pid_central_transition_distance_m": 1.0,
+            "pid_central_acquire_timeout_s": 3.0,
+            "pid_central_loss_grace_s": 0.3,
+            "pid_recovery_climb_m": 0.3,
+            "pid_recovery_altitude_tolerance_m": 0.05,
+            "pid_max_recovery_attempts": 3,
+            "pid_touchdown_commit_height_m": 0.20,
+            "pid_touchdown_speed_m_s": 0.05,
+            "pid_touchdown_timeout_s": 15.0,
+            "pid_landed_state_timeout_s": 1.0,
+            "pid_landed_stable_time_s": 0.5,
+            "pid_disarm_retry_period_s": 1.0,
+            "pid_alignment_stable_time_s": 1.0,
+            "pid_coarse_horizontal_tolerance_m": 0.2,
+            "pid_fine_horizontal_tolerance_m": 0.07,
+            "pid_coarse_yaw_tolerance_rad": 0.2,
+            "pid_fine_yaw_tolerance_rad": 0.1,
+            "pid_max_horizontal_speed_m_s": 0.5,
+            "pid_outer_descent_speed_m_s": 0.3,
+            "pid_central_descent_speed_m_s": 0.12,
+            "pid_recovery_speed_m_s": 0.2,
+            "pid_max_yaw_rate_rad_s": 0.35,
+            "pid_x_kp": 1.0,
+            "pid_x_ki": 0.0,
+            "pid_x_kd": 0.0,
+            "pid_x_integral_limit": 0.5,
+            "pid_x_derivative_filter_time_constant_s": 0.1,
+            "pid_y_kp": 1.0,
+            "pid_y_ki": 0.0,
+            "pid_y_kd": 0.0,
+            "pid_y_integral_limit": 0.5,
+            "pid_y_derivative_filter_time_constant_s": 0.1,
+            "pid_z_kp": 1.0,
+            "pid_z_ki": 0.0,
+            "pid_z_kd": 0.0,
+            "pid_z_integral_limit": 0.5,
+            "pid_z_derivative_filter_time_constant_s": 0.1,
+            "pid_yaw_kp": 1.0,
+            "pid_yaw_ki": 0.0,
+            "pid_yaw_kd": 0.0,
+            "pid_yaw_integral_limit": 0.5,
+            "pid_yaw_derivative_filter_time_constant_s": 0.1,
             "mavlink_connection": "tcp:127.0.0.1:5760",
             "mavlink_baud": 921600,
             "mavlink_target_system": 1,
@@ -225,6 +362,43 @@ class FlightCycleManager(Node):
         self._begin_validation(time.monotonic(), start_requested=True)
         response.success = True
         response.message = "cycle request accepted for validation"
+        return response
+
+    def _request_dock_callback(
+        self, request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
+        """Queue one DO_LAND_START request or acknowledge active docking."""
+        del request
+        if self._state is CycleState.AUTO_MISSION:
+            self._dock_request_queued = True
+            self._transition(
+                CycleState.WAIT_FOR_HANDOFF,
+                "dock request accepted; awaiting DO_LAND_START acknowledgement",
+            )
+            response.success = True
+            response.message = "dock request accepted"
+            return response
+        if self._state in {
+            CycleState.WAIT_FOR_HANDOFF,
+            CycleState.GUIDED_TAKEOVER,
+            CycleState.SEARCH_DOCK,
+            CycleState.LANDING_BACKEND,
+            CycleState.RETURN_TO_FC,
+            CycleState.FC_FALLBACK_LAND,
+            CycleState.WAIT_LANDED,
+            CycleState.WAIT_DISARM,
+        }:
+            response.success = True
+            response.message = "dock request already in progress"
+            return response
+        self._transition(
+            self._state,
+            f"dock request rejected: lifecycle is {self._state.name}; "
+            "AUTO_MISSION is required",
+            force=True,
+        )
+        response.success = False
+        response.message = self._reason
         return response
 
     def tick(self, now: float) -> None:
@@ -288,7 +462,7 @@ class FlightCycleManager(Node):
                     "start_mission", self._vehicle.start_mission_async(now), now
                 )
                 return
-            if self._auto_mission_confirmed(now):
+            if self._mission_progress_confirmed(now):
                 self._transition(
                     CycleState.AUTO_MISSION,
                     "AUTO heartbeat and active onboard mission confirmed",
@@ -296,6 +470,29 @@ class FlightCycleManager(Node):
                 return
             if now > self._mission_confirmation_deadline:
                 self._command_direct_land("mission confirmation timed out")
+            return
+        if self._state is CycleState.AUTO_MISSION:
+            self._advance_auto_mission(now)
+            return
+        if self._state is CycleState.WAIT_FOR_HANDOFF:
+            self._advance_wait_for_handoff(now)
+            return
+        if self._state is CycleState.GUIDED_TAKEOVER:
+            self._begin_operation(
+                "handoff_guided",
+                self._vehicle.set_mode_async(GUIDED_MODE, now),
+                now,
+            )
+            return
+        if self._state is CycleState.SEARCH_DOCK:
+            self._advance_search(now)
+            return
+        if self._state is CycleState.LANDING_BACKEND:
+            self._advance_landing_backend(now)
+            return
+        if self._state is CycleState.RETURN_TO_FC:
+            self._advance_return_to_fc(now)
+            return
 
     def close(self) -> None:
         """Cancel timer, release MAVLink once, then destroy the ROS node."""
@@ -314,8 +511,16 @@ class FlightCycleManager(Node):
         self._contract = None
         self._stable_takeoff_since = None
         self._mission_confirmation_deadline = None
+        self._mission_confirmation_expected_seq = None
         self._auto_heartbeat_baseline = None
         self._mission_current_baseline = None
+        self._dock_request_queued = False
+        self._dock_request_acknowledged = False
+        self._search_controller = None
+        self._landing_controller = None
+        self._last_streamed_dock_pose_generation = -1
+        self._pending_pid_disarm_request_id = None
+        self._pending_pid_disarm_timeout_notified = False
         self._transition(
             CycleState.VALIDATING_MISSION,
             "downloading onboard mission for validation",
@@ -349,6 +554,10 @@ class FlightCycleManager(Node):
         pending = self._pending
         if pending is None:
             return False
+        if pending.name == "pid_disarm":
+            return self._advance_pid_disarm(now)
+        if pending.name == "native_land":
+            return self._advance_native_land(now)
         if not pending.future.done():
             if now > pending.deadline:
                 self._pending = None
@@ -400,16 +609,46 @@ class FlightCycleManager(Node):
                 CycleState.START_AUTO,
                 "onboard mission reset to sequence zero",
             )
+        elif name == "request_dock":
+            self._dock_request_acknowledged = True
+            self._transition(
+                CycleState.WAIT_FOR_HANDOFF,
+                "DO_LAND_START acknowledged; waiting for landing handoff",
+                force=True,
+            )
+        elif name == "handoff_guided":
+            self._start_shared_search(now, result)
         elif name == "start_mission":
             state = self._vehicle.state
             self._auto_heartbeat_baseline = state.heartbeat_at
             self._mission_current_baseline = state.mission_current_at
+            self._mission_confirmation_expected_seq = 0
             self._mission_confirmation_deadline = now + self._positive_parameter(
                 "mission_start_confirmation_timeout_s"
             )
             self._transition(
                 CycleState.START_AUTO,
                 "onboard mission start acknowledged; awaiting AUTO confirmation",
+                force=True,
+            )
+        elif name == "fallback_select":
+            self._transition(
+                CycleState.RETURN_TO_FC,
+                "validated NAV_LAND selected; awaiting mission restart",
+                force=True,
+            )
+        elif name == "fallback_start":
+            state = self._vehicle.state
+            self._auto_heartbeat_baseline = state.heartbeat_at
+            self._mission_current_baseline = state.mission_current_at
+            assert self._contract is not None
+            self._mission_confirmation_expected_seq = self._contract.fallback_land_seq
+            self._mission_confirmation_deadline = now + self._positive_parameter(
+                "mission_start_confirmation_timeout_s"
+            )
+            self._transition(
+                CycleState.RETURN_TO_FC,
+                "fallback mission start acknowledged; awaiting AUTO NAV_LAND confirmation",
                 force=True,
             )
         elif name == "direct_land":
@@ -423,6 +662,9 @@ class FlightCycleManager(Node):
         reason = f"{name.replace('_', ' ')} failed: {message or 'rejected'}"
         if name in {"mission_download", "native_landing_parameters"}:
             self._invalid_mission(reason, now)
+            return
+        if name in {"fallback_select", "fallback_start"}:
+            self._command_direct_land(reason)
             return
         if name == "direct_land":
             self._transition(CycleState.FC_FALLBACK_LAND, reason, force=True)
@@ -500,6 +742,15 @@ class FlightCycleManager(Node):
             return
         self._transition(CycleState.READY, "onboard mission contract is valid")
 
+    def _dock_pose_callback(self, message: PoseStamped) -> None:
+        self._dock_pose = message
+        self._dock_pose_received_at = time.monotonic()
+        self._dock_pose_generation += 1
+
+    def _dock_mode_callback(self, message: String) -> None:
+        self._dock_mode = message.data
+        self._dock_mode_received_at = time.monotonic()
+
     def _update_takeoff_stability(self, now: float) -> None:
         state = self._vehicle.state
         if not self._fresh_airborne_telemetry(now):
@@ -542,11 +793,343 @@ class FlightCycleManager(Node):
             now,
         )
 
-    def _auto_mission_confirmed(self, now: float) -> bool:
+    def _advance_auto_mission(self, now: float) -> None:
+        if self._handoff_sequence_reached():
+            self._begin_guided_takeover(now)
+            return
+        if self._landing_route_is_active():
+            self._transition(
+                CycleState.WAIT_FOR_HANDOFF,
+                "landing route active; waiting for validated handoff",
+            )
+
+    def _advance_wait_for_handoff(self, now: float) -> None:
+        if self._handoff_sequence_reached():
+            self._begin_guided_takeover(now)
+            return
+        if self._dock_request_queued and not self._dock_request_acknowledged:
+            self._begin_operation(
+                "request_dock",
+                self._vehicle.request_dock_async(now),
+                now,
+            )
+
+    def _begin_guided_takeover(self, now: float) -> None:
+        self._dock_request_queued = True
+        self._dock_request_acknowledged = True
+        self._transition(
+            CycleState.GUIDED_TAKEOVER,
+            "landing handoff reached; requesting GUIDED takeover",
+        )
+        self._begin_operation(
+            "handoff_guided",
+            self._vehicle.set_mode_async(GUIDED_MODE, now),
+            now,
+        )
+
+    def _start_shared_search(self, now: float, result: Any) -> None:
+        command = self._command_result(result)
+        if not (
+            command.success
+            or command.current_mode == GUIDED_MODE
+            or self._vehicle.state.mode == GUIDED_MODE
+        ):
+            self._operation_failed("handoff_guided", command.message, now)
+            return
+        if not self._fresh_guided_search_telemetry(now):
+            self._route_failure(
+                "fresh heartbeat, position, and landed state telemetry "
+                "are required before shared dock search",
+                grounded_state=CycleState.FAILED_DISARMED,
+                now=now,
+            )
+            return
         state = self._vehicle.state
+        assert state.position_enu_m is not None
+        try:
+            controller = DockSearchController(self._build_search_config())
+            controller.start(now=now, center_enu_m=state.position_enu_m)
+        except Exception as error:
+            self._begin_fc_handback(
+                now,
+                f"shared dock search could not start: {error}",
+            )
+            return
+        self._search_controller = controller
+        self._landing_controller = None
+        self._last_streamed_dock_pose_generation = -1
+        self._transition(
+            CycleState.SEARCH_DOCK,
+            "GUIDED handoff confirmed; starting shared dock search",
+        )
+
+    def _advance_search(self, now: float) -> None:
+        controller = self._search_controller
+        if controller is None:
+            self._begin_fc_handback(now, "shared dock search is unavailable")
+            return
+        if not self._fresh_guided_search_telemetry(now):
+            self._command_direct_land(
+                "search telemetry became stale before dock acquisition"
+            )
+            return
+        state = self._vehicle.state
+        assert state.position_enu_m is not None
+        decision = controller.update(
+            SearchObservation(
+                now=now,
+                position_enu_m=state.position_enu_m,
+                target_visible=self._dock_observation(now) is not None,
+            )
+        )
+        if decision.outcome is SearchOutcome.SEARCHING:
+            self._vehicle.send_velocity(
+                VelocityFrame.MAP_ENU,
+                decision.velocity_enu_m_s[0],
+                decision.velocity_enu_m_s[1],
+                decision.velocity_enu_m_s[2],
+                now=now,
+            )
+            return
+        if decision.outcome is SearchOutcome.ACQUIRED:
+            self._start_selected_backend(now)
+            return
+        self._begin_fc_handback(
+            now,
+            decision.reason or "shared dock search failed",
+        )
+
+    def _start_selected_backend(self, now: float) -> None:
+        if not self._fresh_landing_backend_telemetry(now):
+            self._command_direct_land(
+                "landing telemetry became stale before backend start"
+            )
+            return
+        try:
+            backend = self._build_landing_backend()
+            backend.start(
+                now=now,
+                dock=self._dock_observation(now),
+                vehicle=self._vehicle_observation(),
+            )
+        except Exception as error:
+            self._begin_fc_handback(
+                now,
+                f"landing backend could not start: {error}",
+            )
+            return
+        self._landing_controller = backend
+        self._transition(
+            CycleState.LANDING_BACKEND,
+            f"{self._landing_backend} landing backend started after shared search acquisition",
+        )
+
+    def _advance_landing_backend(self, now: float) -> None:
+        backend = self._landing_controller
+        if backend is None:
+            self._begin_fc_handback(now, "landing backend is unavailable")
+            return
+        if not self._fresh_landing_backend_telemetry(now):
+            self._command_direct_land("landing telemetry became stale during docking")
+            return
+        try:
+            decision = backend.update(
+                now=now,
+                dock=self._dock_observation(now),
+                vehicle=self._vehicle_observation(),
+            )
+        except Exception as error:
+            self._begin_fc_handback(
+                now,
+                f"landing backend update failed: {error}",
+            )
+            return
+        if decision.velocity is not None:
+            command = decision.velocity
+            self._vehicle.send_velocity(
+                command.frame,
+                command.velocity_x,
+                command.velocity_y,
+                command.velocity_z,
+                now=now,
+                yaw_rate_rad_s=command.yaw_rate_rad_s,
+            )
+        if decision.yaw_correction_rad is not None:
+            self._vehicle.send_condition_yaw(
+                yaw_error_rad=decision.yaw_correction_rad
+            )
+        if decision.stream_landing_target:
+            self._stream_latest_landing_target_once(now)
+        if decision.request_land:
+            try:
+                self._begin_operation(
+                    "native_land",
+                    self._vehicle.land_async(now),
+                    now,
+                )
+            except Exception:
+                self._notify_native_land_result(False, now)
+            return
+        if decision.request_disarm:
+            self._begin_pid_disarm(decision.disarm_request_id, now)
+        if decision.outcome is LandingBackendOutcome.FAIL_BEFORE_COMMIT:
+            self._begin_fc_handback(
+                now,
+                decision.reason or "landing backend failed before commitment",
+            )
+            return
+        if decision.outcome is LandingBackendOutcome.FAIL_AFTER_COMMIT:
+            self._command_direct_land(
+                decision.reason or "landing backend failed after commitment"
+            )
+
+    def _advance_return_to_fc(self, now: float) -> None:
+        if self._contract is None:
+            self._command_direct_land("validated fallback mission is unavailable")
+            return
+        if self._mission_confirmation_deadline is None:
+            self._begin_operation(
+                "fallback_start",
+                self._vehicle.start_mission_async(now),
+                now,
+            )
+            return
+        if self._mission_progress_confirmed(now):
+            self._transition(
+                CycleState.FC_FALLBACK_LAND,
+                "AUTO NAV_LAND fallback confirmed; waiting for flight controller landing",
+            )
+            return
+        if now > self._mission_confirmation_deadline:
+            self._command_direct_land("fallback mission confirmation timed out")
+
+    def _advance_pid_disarm(self, now: float) -> bool:
+        pending = self._pending
+        backend = self._landing_controller
+        request_id = self._pending_pid_disarm_request_id
+        if pending is None:
+            return False
+        if backend is None or request_id is None:
+            self._pending = None
+            self._command_direct_land("PID disarm transaction lost its controller")
+            return True
+        notifier = getattr(backend, "notify_disarm_result", None)
+        if (
+            now > pending.deadline
+            and not self._pending_pid_disarm_timeout_notified
+            and callable(notifier)
+        ):
+            notifier(request_id, False, now)
+            self._pending_pid_disarm_timeout_notified = True
+        if not pending.future.done():
+            return False
+        timeout_notified = self._pending_pid_disarm_timeout_notified
+        try:
+            result = pending.future.result()
+            success = bool(getattr(result, "success", False))
+        except Exception:
+            success = False
+        self._pending = None
+        self._pending_pid_disarm_request_id = None
+        self._pending_pid_disarm_timeout_notified = False
+        if not timeout_notified and callable(notifier):
+            notifier(request_id, success, now)
+        return False
+
+    def _begin_pid_disarm(self, request_id: Optional[int], now: float) -> None:
+        backend = self._landing_controller
+        if request_id is None:
+            self._command_direct_land(
+                "PID disarm request did not include a request ID"
+            )
+            return
+        notifier = getattr(backend, "notify_disarm_result", None)
+        if self._pending is None:
+            try:
+                self._begin_operation(
+                    "pid_disarm",
+                    self._vehicle.arm_async(False, now),
+                    now,
+                )
+            except Exception:
+                if callable(notifier):
+                    notifier(request_id, False, now)
+                return
+            self._pending_pid_disarm_request_id = request_id
+            self._pending_pid_disarm_timeout_notified = False
+            return
+        if request_id != self._pending_pid_disarm_request_id and callable(notifier):
+            notifier(request_id, False, now)
+
+    def _advance_native_land(self, now: float) -> bool:
+        pending = self._pending
+        if pending is None:
+            return False
+        if not pending.future.done():
+            if now > pending.deadline:
+                self._pending = None
+                self._notify_native_land_result(False, now)
+                return False
+            return True
+        self._pending = None
+        success = False
+        try:
+            result = self._command_result(pending.future.result())
+            success = (
+                result.success
+                or result.current_mode == LAND_MODE
+                or self._vehicle.state.mode == LAND_MODE
+            )
+        except Exception:
+            success = False
+        self._notify_native_land_result(success, now)
+        return success
+
+    def _notify_native_land_result(self, success: bool, now: float) -> None:
+        backend = self._landing_controller
+        notifier = getattr(backend, "notify_land_result", None)
+        if callable(notifier):
+            notifier(success, now)
+
+    def _begin_fc_handback(self, now: float, reason: str) -> None:
+        contract = self._contract
+        if contract is None:
+            self._command_direct_land(reason)
+            return
+        self._mission_confirmation_deadline = None
+        self._mission_confirmation_expected_seq = None
+        self._auto_heartbeat_baseline = None
+        self._mission_current_baseline = None
+        self._transition(
+            CycleState.RETURN_TO_FC,
+            f"{reason}; returning control to validated NAV_LAND",
+            force=True,
+        )
+        try:
+            self._begin_operation(
+                "fallback_select",
+                self._vehicle.set_mission_current_async(
+                    contract.fallback_land_seq,
+                    reset=True,
+                    now=now,
+                ),
+                now,
+            )
+        except Exception as error:
+            self._command_direct_land(
+                f"{reason}; fallback mission select could not start: {error}"
+            )
+
+    def _mission_progress_confirmed(self, now: float) -> bool:
+        state = self._vehicle.state
+        expected_seq = self._mission_confirmation_expected_seq
         heartbeat_baseline = self._auto_heartbeat_baseline
         mission_current_baseline = self._mission_current_baseline
-        if heartbeat_baseline is None or mission_current_baseline is None:
+        if (
+            expected_seq is None
+            or heartbeat_baseline is None
+            or mission_current_baseline is None
+        ):
             return False
         mission_mode_matches = (
             state.mission_mode is None
@@ -565,12 +1148,301 @@ class FlightCycleManager(Node):
             )
             and state.mode == AUTO_MODE
             and state.heartbeat_at > heartbeat_baseline
-            and state.mission_seq == 0
+            and state.mission_seq == expected_seq
             and state.mission_current_at > mission_current_baseline
             and mission_state_matches
             and mission_mode_matches
             and 0.0 <= now - state.mission_current_at
             <= self._positive_parameter("mavlink_heartbeat_timeout_s")
+        )
+
+    def _landing_route_is_active(self) -> bool:
+        contract = self._contract
+        mission_seq = self._vehicle.state.mission_seq
+        return (
+            contract is not None
+            and mission_seq is not None
+            and contract.land_start_seq <= mission_seq < contract.handoff_seq
+        )
+
+    def _handoff_sequence_reached(self) -> bool:
+        contract = self._contract
+        return (
+            contract is not None
+            and self._vehicle.state.mission_seq == contract.handoff_seq
+        )
+
+    def _dock_observation(self, now: float) -> Optional[DockObservation]:
+        if not self._dock_target_is_fresh(now):
+            return None
+        assert self._dock_pose is not None
+        mode = {
+            "OUTER": DockTargetMode.OUTER,
+            "CENTRAL_ACQUIRING": DockTargetMode.CENTRAL_ACQUIRING,
+            "CENTRAL": DockTargetMode.CENTRAL,
+        }.get(self._dock_mode)
+        if mode is None:
+            return None
+        position = self._dock_pose.pose.position
+        orientation = self._dock_pose.pose.orientation
+        forward_m, right_m, distance_m = camera_target_to_body_frd(
+            camera_x_m=position.x,
+            camera_y_m=position.y,
+            camera_z_m=position.z,
+        )
+        try:
+            yaw_error_rad = -camera_dock_orientation_to_body_yaw_error(
+                quaternion_x=orientation.x,
+                quaternion_y=orientation.y,
+                quaternion_z=orientation.z,
+                quaternion_w=orientation.w,
+            )
+        except ValueError:
+            return None
+        return DockObservation(
+            forward_m=forward_m,
+            left_m=-right_m,
+            distance_m=distance_m,
+            yaw_error_rad=yaw_error_rad,
+            mode=mode,
+            source_stamp_s=(
+                float(self._dock_pose.header.stamp.sec)
+                + float(self._dock_pose.header.stamp.nanosec) * 1.0e-9
+            ),
+            received_at=self._dock_pose_received_at,
+        )
+
+    def _dock_target_is_fresh(self, now: float) -> bool:
+        timeout = self._positive_parameter("dock_pose_timeout_s")
+        return (
+            self._dock_pose is not None
+            and self._dock_mode != "NO_TARGET"
+            and 0.0 <= now - self._dock_pose_received_at <= timeout
+            and 0.0 <= now - self._dock_mode_received_at <= timeout
+        )
+
+    def _stream_latest_landing_target_once(self, now: float) -> None:
+        if not self._dock_target_is_fresh(now):
+            return
+        if self._dock_pose_generation == self._last_streamed_dock_pose_generation:
+            return
+        assert self._dock_pose is not None
+        position = self._dock_pose.pose.position
+        forward_m, right_m, down_m = camera_target_to_body_frd(
+            camera_x_m=position.x,
+            camera_y_m=position.y,
+            camera_z_m=position.z,
+            camera_forward_m=self._positive_parameter(
+                "landing_target_camera_forward_m",
+                allow_zero=True,
+            ),
+            camera_right_m=self._positive_parameter(
+                "landing_target_camera_right_m",
+                allow_zero=True,
+            ),
+            camera_down_m=self._positive_parameter(
+                "landing_target_camera_down_m",
+                allow_zero=True,
+            ),
+        )
+        if self._vehicle.send_landing_target(
+            time_usec=measurement_time_usec(
+                stamp_sec=self._dock_pose.header.stamp.sec,
+                stamp_nanosec=self._dock_pose.header.stamp.nanosec,
+                fallback_usec=int(now * 1_000_000),
+            ),
+            forward_m=forward_m,
+            right_m=right_m,
+            down_m=down_m,
+        ):
+            self._last_streamed_dock_pose_generation = self._dock_pose_generation
+
+    def _fresh_guided_search_telemetry(self, now: float) -> bool:
+        state = self._vehicle.state
+        return (
+            self._vehicle.ready(
+                now,
+                heartbeat_timeout_s=self._positive_parameter(
+                    "mavlink_heartbeat_timeout_s"
+                ),
+            )
+            and state.armed is True
+            and state.flying is True
+            and state.mode == GUIDED_MODE
+            and state.position_enu_m is not None
+            and state.velocity_enu_m_s is not None
+            and self._fresh_position(now, state)
+            and self._fresh_landed_state(now, state)
+        )
+
+    def _fresh_landing_backend_telemetry(self, now: float) -> bool:
+        state = self._vehicle.state
+        return (
+            self._vehicle.ready(
+                now,
+                heartbeat_timeout_s=self._positive_parameter(
+                    "mavlink_heartbeat_timeout_s"
+                ),
+            )
+            and state.armed is not None
+            and state.flying is not None
+            and state.position_enu_m is not None
+            and state.velocity_enu_m_s is not None
+            and self._fresh_position(now, state)
+            and self._fresh_landed_state(now, state)
+        )
+
+    def _vehicle_observation(self) -> VehicleObservation:
+        state = self._vehicle.state
+        if state.position_enu_m is None or state.velocity_enu_m_s is None:
+            raise RuntimeError("vehicle observation is unavailable")
+        return VehicleObservation(
+            position_enu_m=state.position_enu_m,
+            velocity_enu_m_s=state.velocity_enu_m_s,
+            armed=state.armed,
+            flying=state.flying,
+            mode=state.mode,
+            landed_at=state.landed_at,
+        )
+
+    def _build_search_config(self) -> SearchConfig:
+        return SearchConfig(
+            radius_m=self._positive_parameter("search_radius_m"),
+            tangential_speed_m_s=self._positive_parameter(
+                "search_tangential_speed_m_s",
+                allow_zero=True,
+            ),
+            radial_gain=self._positive_parameter(
+                "search_radial_gain",
+                allow_zero=True,
+            ),
+            altitude_gain=self._positive_parameter(
+                "search_altitude_gain",
+                allow_zero=True,
+            ),
+            max_horizontal_speed_m_s=self._positive_parameter(
+                "search_max_horizontal_speed_m_s"
+            ),
+            max_vertical_speed_m_s=self._positive_parameter(
+                "search_max_vertical_speed_m_s"
+            ),
+            target_stable_time_s=self._positive_parameter(
+                "search_target_stable_time_s",
+                allow_zero=True,
+            ),
+            timeout_s=self._positive_parameter("search_timeout_s"),
+            max_displacement_m=self._positive_parameter("search_max_displacement_m"),
+        )
+
+    def _build_landing_backend(self) -> Any:
+        if self._landing_backend == "pid":
+            return PidLandingBackend(self._build_pid_landing_config())
+        return PreciseLandingBackend(self._build_precise_landing_config())
+
+    def _build_pid_landing_config(self) -> PidLandingConfig:
+        max_horizontal = self._positive_parameter("pid_max_horizontal_speed_m_s")
+        max_yaw = self._positive_parameter("pid_max_yaw_rate_rad_s")
+        return PidLandingConfig(
+            tag_stable_time_s=self._positive_parameter("pid_tag_stable_time_s"),
+            central_transition_distance_m=self._positive_parameter(
+                "pid_central_transition_distance_m"
+            ),
+            central_acquire_timeout_s=self._positive_parameter(
+                "pid_central_acquire_timeout_s"
+            ),
+            central_loss_grace_s=self._positive_parameter(
+                "pid_central_loss_grace_s"
+            ),
+            recovery_climb_m=self._positive_parameter("pid_recovery_climb_m"),
+            recovery_altitude_tolerance_m=self._positive_parameter(
+                "pid_recovery_altitude_tolerance_m"
+            ),
+            max_recovery_attempts=int(
+                self.get_parameter("pid_max_recovery_attempts").value
+            ),
+            touchdown_commit_height_m=self._positive_parameter(
+                "pid_touchdown_commit_height_m"
+            ),
+            touchdown_speed_m_s=self._positive_parameter(
+                "pid_touchdown_speed_m_s"
+            ),
+            touchdown_timeout_s=self._positive_parameter("pid_touchdown_timeout_s"),
+            landed_state_timeout_s=self._positive_parameter(
+                "pid_landed_state_timeout_s"
+            ),
+            landed_stable_time_s=self._positive_parameter(
+                "pid_landed_stable_time_s"
+            ),
+            disarm_retry_period_s=self._positive_parameter(
+                "pid_disarm_retry_period_s"
+            ),
+            alignment_stable_time_s=self._positive_parameter(
+                "pid_alignment_stable_time_s"
+            ),
+            coarse_horizontal_tolerance_m=self._positive_parameter(
+                "pid_coarse_horizontal_tolerance_m"
+            ),
+            fine_horizontal_tolerance_m=self._positive_parameter(
+                "pid_fine_horizontal_tolerance_m"
+            ),
+            coarse_yaw_tolerance_rad=self._positive_parameter(
+                "pid_coarse_yaw_tolerance_rad"
+            ),
+            fine_yaw_tolerance_rad=self._positive_parameter(
+                "pid_fine_yaw_tolerance_rad"
+            ),
+            max_horizontal_speed_m_s=max_horizontal,
+            outer_descent_speed_m_s=self._positive_parameter(
+                "pid_outer_descent_speed_m_s"
+            ),
+            central_descent_speed_m_s=self._positive_parameter(
+                "pid_central_descent_speed_m_s"
+            ),
+            recovery_speed_m_s=self._positive_parameter("pid_recovery_speed_m_s"),
+            max_yaw_rate_rad_s=max_yaw,
+            x_pid=self._build_pid_axis_config("pid_x", max_horizontal),
+            y_pid=self._build_pid_axis_config("pid_y", max_horizontal),
+            z_pid=self._build_pid_axis_config(
+                "pid_z",
+                self._positive_parameter("search_max_vertical_speed_m_s"),
+            ),
+            yaw_pid=self._build_pid_axis_config("pid_yaw", max_yaw),
+        )
+
+    def _build_pid_axis_config(self, prefix: str, output_limit: float) -> PIDConfig:
+        return PIDConfig(
+            kp=self._positive_parameter(f"{prefix}_kp", allow_zero=True),
+            ki=self._positive_parameter(f"{prefix}_ki", allow_zero=True),
+            kd=self._positive_parameter(f"{prefix}_kd", allow_zero=True),
+            integral_limit=self._positive_parameter(
+                f"{prefix}_integral_limit",
+                allow_zero=True,
+            ),
+            output_limit=output_limit,
+            derivative_filter_time_constant_s=self._positive_parameter(
+                f"{prefix}_derivative_filter_time_constant_s",
+                allow_zero=True,
+            ),
+        )
+
+    def _build_precise_landing_config(self) -> PreciseLandingConfig:
+        yaw_threshold = (
+            0.0
+            if bool(self.get_parameter("landing_yaw_correction_enabled").value)
+            else None
+        )
+        return PreciseLandingConfig(
+            warmup_s=self._positive_parameter("landing_target_warmup_s"),
+            dock_fresh_timeout_s=self._positive_parameter("dock_pose_timeout_s"),
+            landed_state_timeout_s=self._positive_parameter("landed_state_timeout_s"),
+            touchdown_warn_after_s=self._positive_parameter(
+                "landing_touchdown_warn_after_s"
+            ),
+            disarm_warn_after_s=self._positive_parameter(
+                "landing_disarm_warn_after_s"
+            ),
+            yaw_correction_threshold_rad=yaw_threshold,
+            land_mode=LAND_MODE,
         )
 
     def _fresh_ground_telemetry(self, now: float) -> bool:
