@@ -4,7 +4,9 @@ import math
 import os
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Generic, Optional, Sequence, Tuple, TypeVar
+
+from flight_cycle_manager.mission_contract import MissionItem
 
 
 _POSITION_TARGET_TYPEMASK_VELOCITY_ONLY = 3527
@@ -12,12 +14,46 @@ _POSITION_TARGET_TYPEMASK_VELOCITY_YAW_RATE = 1479
 _LANDING_TARGET_TYPE_FIDUCIAL = 2
 _COMMAND_RETRY_S = 0.5
 _COMMAND_TIMEOUT_S = 3.0
+_MISSION_TYPE_MISSION = 0
 _MESSAGE_INTERVALS_US = (
     (32, 50_000),  # LOCAL_POSITION_NED at 20 Hz
     (30, 50_000),  # ATTITUDE at 20 Hz
     (245, 200_000),  # EXTENDED_SYS_STATE at 5 Hz
+    (42, 200_000),  # MISSION_CURRENT at 5 Hz
     (1, 500_000),  # SYS_STATUS at 2 Hz
 )
+
+
+def _optional_int(value: object) -> Optional[int]:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _optional_nonzero_int(value: object) -> Optional[int]:
+    parsed = _optional_int(value)
+    return parsed if parsed else None
+
+
+def _message_mission_type(message: Any) -> Optional[int]:
+    value = getattr(message, "mission_type", _MISSION_TYPE_MISSION)
+    return _optional_int(value)
+
+
+def _valid_mission_sequence(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 32767
+    )
+
+
+def _valid_mission_sequence_count(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 32768
+    )
 
 
 class VelocityFrame(Enum):
@@ -63,22 +99,35 @@ class VehicleCommandResult:
     parameters: Dict[str, float] = field(default_factory=dict)
 
 
-class MavlinkFuture:
+@dataclass(frozen=True)
+class MissionDownloadResult:
+    """Mission items read from the flight controller without modifying it."""
+
+    success: bool
+    items: Tuple[MissionItem, ...] = ()
+    opaque_id: Optional[int] = None
+    message: str = ""
+
+
+_ResultT = TypeVar("_ResultT")
+
+
+class MavlinkFuture(Generic[_ResultT]):
     """Small future used by the existing asynchronous mission state machine."""
 
     def __init__(self) -> None:
         self._done = False
-        self._result: Optional[VehicleCommandResult] = None
+        self._result: Optional[_ResultT] = None
 
     def done(self) -> bool:
         return self._done
 
-    def result(self) -> VehicleCommandResult:
+    def result(self) -> _ResultT:
         if not self._done or self._result is None:
             raise RuntimeError("MAVLink operation has not completed")
         return self._result
 
-    def _finish(self, result: VehicleCommandResult) -> None:
+    def _finish(self, result: _ResultT) -> None:
         self._result = result
         self._done = True
 
@@ -86,13 +135,18 @@ class MavlinkFuture:
 @dataclass
 class _PendingOperation:
     name: str
-    future: MavlinkFuture
+    future: MavlinkFuture[Any]
     started_at: float
     command: Optional[int] = None
     payload: Tuple[float, ...] = ()
     expected_value: Optional[object] = None
     parameter_names: Tuple[str, ...] = ()
     parameters: Dict[str, float] = field(default_factory=dict)
+    mission_count: Optional[int] = None
+    mission_items: Dict[int, MissionItem] = field(default_factory=dict)
+    next_mission_request_at: float = 0.0
+    mission_type: int = _MISSION_TYPE_MISSION
+    opaque_id: Optional[int] = None
     acknowledged: bool = False
     last_sent_at: float = 0.0
 
@@ -187,7 +241,7 @@ class MavlinkVehicle:
             self._handle_message(message, now)
         self._advance_pending(now)
 
-    def prearm_async(self, now: float) -> MavlinkFuture:
+    def prearm_async(self, now: float) -> MavlinkFuture[VehicleCommandResult]:
         return self._begin_command(
             "prearm",
             self._mavutil.mavlink.MAV_CMD_RUN_PREARM_CHECKS,
@@ -195,7 +249,9 @@ class MavlinkVehicle:
             now,
         )
 
-    def set_mode_async(self, mode: int, now: float) -> MavlinkFuture:
+    def set_mode_async(
+        self, mode: int, now: float
+    ) -> MavlinkFuture[VehicleCommandResult]:
         return self._begin_command(
             "mode",
             self._mavutil.mavlink.MAV_CMD_DO_SET_MODE,
@@ -212,7 +268,9 @@ class MavlinkVehicle:
             expected_value=int(mode),
         )
 
-    def arm_async(self, arm: bool, now: float) -> MavlinkFuture:
+    def arm_async(
+        self, arm: bool, now: float
+    ) -> MavlinkFuture[VehicleCommandResult]:
         return self._begin_command(
             "arm",
             self._mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
@@ -221,7 +279,9 @@ class MavlinkVehicle:
             expected_value=bool(arm),
         )
 
-    def takeoff_async(self, altitude_m: float, now: float) -> MavlinkFuture:
+    def takeoff_async(
+        self, altitude_m: float, now: float
+    ) -> MavlinkFuture[VehicleCommandResult]:
         return self._begin_command(
             "takeoff",
             self._mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
@@ -229,9 +289,89 @@ class MavlinkVehicle:
             now,
         )
 
+    def set_mission_current_async(
+        self, sequence: int, *, reset: bool, now: float
+    ) -> MavlinkFuture[VehicleCommandResult]:
+        """Set the active onboard mission sequence through COMMAND_LONG."""
+        if (
+            not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or not 0 <= sequence <= 32767
+        ):
+            raise ValueError("mission sequence must be an integer in [0, 32767]")
+        return self._begin_command(
+            "set_mission_current",
+            self._mavutil.mavlink.MAV_CMD_DO_SET_MISSION_CURRENT,
+            (
+                float(sequence),
+                1.0 if reset else 0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+            now,
+        )
+
+    def start_mission_async(
+        self, now: float
+    ) -> MavlinkFuture[VehicleCommandResult]:
+        """Start the current onboard mission from its current sequence."""
+        return self._begin_command(
+            "start_mission",
+            self._mavutil.mavlink.MAV_CMD_MISSION_START,
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            now,
+        )
+
+    def request_dock_async(
+        self, now: float
+    ) -> MavlinkFuture[VehicleCommandResult]:
+        """Command the onboard mission to begin its landing sequence."""
+        return self._begin_command(
+            "request_dock",
+            self._mavutil.mavlink.MAV_CMD_DO_LAND_START,
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            now,
+        )
+
+    def rtl_async(self, now: float) -> MavlinkFuture[VehicleCommandResult]:
+        """Command a return-to-launch fallback."""
+        return self._begin_command(
+            "rtl",
+            self._mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            now,
+        )
+
+    def land_async(self, now: float) -> MavlinkFuture[VehicleCommandResult]:
+        """Command a direct landing fallback."""
+        return self._begin_command(
+            "land",
+            self._mavutil.mavlink.MAV_CMD_NAV_LAND,
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            now,
+        )
+
+    def download_mission_async(
+        self, now: float
+    ) -> MavlinkFuture[MissionDownloadResult]:
+        """Begin a non-blocking, read-only MISSION_ITEM_INT download."""
+        self._require_idle()
+        future: MavlinkFuture[MissionDownloadResult] = MavlinkFuture()
+        self._pending = _PendingOperation(
+            name="mission_download",
+            future=future,
+            started_at=now,
+            mission_type=_MISSION_TYPE_MISSION,
+        )
+        self._send_mission_request_list(now)
+        return future
+
     def get_parameters_async(
         self, names: Sequence[str], now: float
-    ) -> MavlinkFuture:
+    ) -> MavlinkFuture[VehicleCommandResult]:
         normalized = tuple(names)
         if (
             not normalized
@@ -246,7 +386,7 @@ class MavlinkVehicle:
         ):
             raise ValueError("parameter names must be unique 1-16 byte ASCII")
         self._require_idle()
-        future = MavlinkFuture()
+        future: MavlinkFuture[VehicleCommandResult] = MavlinkFuture()
         self._pending = _PendingOperation(
             name="parameters",
             future=future,
@@ -377,9 +517,9 @@ class MavlinkVehicle:
         payload: Tuple[float, ...],
         now: float,
         expected_value: Optional[object] = None,
-    ) -> MavlinkFuture:
+    ) -> MavlinkFuture[VehicleCommandResult]:
         self._require_idle()
-        future = MavlinkFuture()
+        future: MavlinkFuture[VehicleCommandResult] = MavlinkFuture()
         self._pending = _PendingOperation(
             name=name,
             future=future,
@@ -417,6 +557,41 @@ class MavlinkVehicle:
                 name.encode("ascii"),
                 -1,
             )
+
+    def _send_mission_request_list(self, now: float) -> None:
+        pending = self._pending
+        if pending is None:
+            return
+        self._connection.mav.mission_request_list_send(
+            self._target_system,
+            self._target_component,
+            pending.mission_type,
+        )
+        pending.last_sent_at = now
+
+    def _send_next_missing_mission_request(self, now: float) -> None:
+        pending = self._pending
+        if pending is None or pending.mission_count is None:
+            return
+        sequence = next(
+            (
+                sequence
+                for sequence in range(pending.mission_count)
+                if sequence not in pending.mission_items
+            ),
+            None,
+        )
+        if sequence is None:
+            return
+        self._connection.mav.mission_request_int_send(
+            self._target_system,
+            self._target_component,
+            sequence,
+            pending.mission_type,
+        )
+        pending.last_sent_at = now
+        pending.next_mission_request_at = now + _COMMAND_RETRY_S
+
     def _advance_pending(self, now: float) -> None:
         pending = self._pending
         if pending is None or pending.future.done():
@@ -425,9 +600,14 @@ class MavlinkVehicle:
         if pending.future.done():
             return
         if now - pending.started_at > _COMMAND_TIMEOUT_S:
-            pending.future._finish(
-                VehicleCommandResult(False, "MAVLink operation timed out")
-            )
+            if pending.name == "mission_download":
+                pending.future._finish(
+                    MissionDownloadResult(False, message="MAVLink operation timed out")
+                )
+            else:
+                pending.future._finish(
+                    VehicleCommandResult(False, "MAVLink operation timed out")
+                )
             return
         if now - pending.last_sent_at < _COMMAND_RETRY_S:
             return
@@ -439,6 +619,11 @@ class MavlinkVehicle:
             )
             self._send_parameter_requests(missing)
             pending.last_sent_at = now
+        elif pending.name == "mission_download":
+            if pending.mission_count is None:
+                self._send_mission_request_list(now)
+            elif now >= pending.next_mission_request_at:
+                self._send_next_missing_mission_request(now)
         elif not pending.acknowledged:
             self._send_pending_command(now)
 
@@ -454,6 +639,30 @@ class MavlinkVehicle:
                 }
                 pending.future._finish(
                     VehicleCommandResult(True, parameters=ordered)
+                )
+            return
+        if pending.name == "mission_download":
+            if (
+                pending.mission_count is not None
+                and len(pending.mission_items) == pending.mission_count
+                and not pending.acknowledged
+            ):
+                self._connection.mav.mission_ack_send(
+                    self._target_system,
+                    self._target_component,
+                    self._mavutil.mavlink.MAV_MISSION_ACCEPTED,
+                    pending.mission_type,
+                )
+                pending.acknowledged = True
+                pending.future._finish(
+                    MissionDownloadResult(
+                        True,
+                        tuple(
+                            pending.mission_items[sequence]
+                            for sequence in range(pending.mission_count)
+                        ),
+                        pending.opaque_id,
+                    )
                 )
             return
         if not pending.acknowledged:
@@ -538,6 +747,22 @@ class MavlinkVehicle:
                     and message.onboard_control_sensors_health & bit
                 ),
             )
+        elif message_type == "MISSION_CURRENT":
+            state = replace(
+                state,
+                mission_seq=int(message.seq),
+                mission_total=int(message.total),
+                mission_state=_optional_int(
+                    getattr(message, "mission_state", None)
+                ),
+                mission_mode=_optional_int(
+                    getattr(message, "mission_mode", None)
+                ),
+                mission_id=_optional_nonzero_int(
+                    getattr(message, "mission_id", None)
+                ),
+                mission_current_at=max(state.mission_current_at, now),
+            )
         elif message_type == "STATUSTEXT":
             text = message.text
             if isinstance(text, bytes):
@@ -549,6 +774,10 @@ class MavlinkVehicle:
             self._handle_command_ack(message)
         elif message_type == "PARAM_VALUE":
             self._handle_parameter_value(message)
+        elif message_type == "MISSION_COUNT":
+            self._handle_mission_count(message, now)
+        elif message_type == "MISSION_ITEM_INT":
+            self._handle_mission_item_int(message, now)
         self._try_complete_pending()
 
     def _handle_command_ack(self, message: Any) -> None:
@@ -586,6 +815,60 @@ class MavlinkVehicle:
             name = str(name).split("\0", 1)[0]
         if name in pending.parameter_names:
             pending.parameters[name] = float(message.param_value)
+
+    def _handle_mission_count(self, message: Any, now: float) -> None:
+        pending = self._pending
+        if (
+            pending is None
+            or pending.name != "mission_download"
+            or pending.mission_count is not None
+            or _message_mission_type(message) != pending.mission_type
+        ):
+            return
+        count = getattr(message, "count", None)
+        if not _valid_mission_sequence_count(count):
+            return
+        pending.mission_count = int(count)
+        opaque_id = _optional_nonzero_int(getattr(message, "opaque_id", None))
+        pending.opaque_id = opaque_id
+        if pending.mission_count:
+            self._send_next_missing_mission_request(now)
+
+    def _handle_mission_item_int(self, message: Any, now: float) -> None:
+        pending = self._pending
+        if (
+            pending is None
+            or pending.name != "mission_download"
+            or pending.mission_count is None
+            or _message_mission_type(message) != pending.mission_type
+        ):
+            return
+        sequence = getattr(message, "seq", None)
+        if (
+            not _valid_mission_sequence(sequence)
+            or sequence >= pending.mission_count
+            or sequence in pending.mission_items
+        ):
+            self._send_next_missing_mission_request(now)
+            return
+        try:
+            item = MissionItem(
+                int(sequence),
+                int(message.frame),
+                int(message.command),
+                float(message.param1),
+                float(message.param2),
+                float(message.param3),
+                float(message.param4),
+                int(message.x),
+                int(message.y),
+                float(message.z),
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            self._send_next_missing_mission_request(now)
+            return
+        pending.mission_items[item.seq] = item
+        self._send_next_missing_mission_request(now)
 
     def _matches_source(self, message: Any) -> bool:
         return (

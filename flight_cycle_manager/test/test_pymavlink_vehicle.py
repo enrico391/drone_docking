@@ -109,6 +109,37 @@ def push_ack(connection, command, result=MAVLINK.MAV_RESULT_ACCEPTED):
     )
 
 
+def mission_item_message(
+    *,
+    seq,
+    command,
+    mission_type=MAVLINK.MAV_MISSION_TYPE_MISSION,
+    src_system=1,
+    src_component=1,
+):
+    """Build a complete MISSION_ITEM_INT-shaped response from the FC."""
+    return FakeMessage(
+        "MISSION_ITEM_INT",
+        src_system=src_system,
+        src_component=src_component,
+        target_system=254,
+        target_component=191,
+        seq=seq,
+        frame=MAVLINK.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+        command=command,
+        current=0,
+        autocontinue=1,
+        param1=1.0,
+        param2=2.0,
+        param3=3.0,
+        param4=4.0,
+        x=450000000,
+        y=90000000,
+        z=4.0,
+        mission_type=mission_type,
+    )
+
+
 def test_telemetry_maps_vehicle_state_and_ned_pose_to_enu(vehicle, connection):
     """Break caught: direct telemetry retains NED axes or loses flight state."""
     push_heartbeat(connection, mode=3, armed=True)
@@ -484,3 +515,304 @@ def test_close_stops_vehicle_with_zero_velocity(vehicle, connection):
     call = connection.mav.calls_for("set_position_target_local_ned_send")[-1]
     assert call[8:11] == (0.0, 0.0, 0.0)
     assert connection.closed is True
+
+
+def test_download_mission_requests_every_int_item_and_acks(vehicle, connection):
+    """Break caught: a complete FC mission is not downloaded as INT items."""
+    future = vehicle.download_mission_async(now=10.0)
+
+    assert connection.mav.calls_for("mission_request_list_send")[-1] == (
+        1,
+        1,
+        MAVLINK.MAV_MISSION_TYPE_MISSION,
+    )
+    connection.incoming.append(
+        FakeMessage(
+            "MISSION_COUNT",
+            target_system=254,
+            target_component=191,
+            count=2,
+            mission_type=MAVLINK.MAV_MISSION_TYPE_MISSION,
+        )
+    )
+    vehicle.poll(10.1)
+    assert connection.mav.calls_for("mission_request_int_send")[-1] == (1, 1, 0, 0)
+
+    connection.incoming.append(
+        mission_item_message(seq=0, command=MAVLINK.MAV_CMD_DO_LAND_START)
+    )
+    vehicle.poll(10.2)
+    connection.incoming.append(
+        mission_item_message(seq=1, command=MAVLINK.MAV_CMD_NAV_LAND)
+    )
+    vehicle.poll(10.3)
+
+    assert future.done()
+    result = future.result()
+    assert [item.seq for item in result.items] == [0, 1]
+    assert result.items[0].param4 == 4.0
+    assert connection.mav.calls_for("mission_ack_send")[-1] == (
+        1,
+        1,
+        MAVLINK.MAV_MISSION_ACCEPTED,
+        MAVLINK.MAV_MISSION_TYPE_MISSION,
+    )
+
+
+def test_download_mission_re_requests_next_missing_sequence_for_out_of_order_items(
+    vehicle, connection
+):
+    """Break caught: an early later item skips the lower missing sequence."""
+    future = vehicle.download_mission_async(now=11.0)
+    connection.incoming.append(
+        FakeMessage("MISSION_COUNT", count=2, mission_type=0)
+    )
+    vehicle.poll(11.1)
+
+    connection.incoming.append(mission_item_message(seq=1, command=21))
+    vehicle.poll(11.2)
+
+    assert future.done() is False
+    assert connection.mav.calls_for("mission_request_int_send")[-1] == (1, 1, 0, 0)
+
+    connection.incoming.append(mission_item_message(seq=0, command=189))
+    vehicle.poll(11.3)
+
+    assert future.done()
+    assert [item.seq for item in future.result().items] == [0, 1]
+
+
+def test_download_mission_duplicate_item_does_not_advance_completion(
+    vehicle, connection
+):
+    """Break caught: a duplicate is treated as the next requested item."""
+    future = vehicle.download_mission_async(now=12.0)
+    connection.incoming.append(FakeMessage("MISSION_COUNT", count=2, mission_type=0))
+    vehicle.poll(12.1)
+    connection.incoming.append(mission_item_message(seq=0, command=189))
+    vehicle.poll(12.2)
+    assert connection.mav.calls_for("mission_request_int_send")[-1] == (1, 1, 1, 0)
+
+    connection.incoming.append(mission_item_message(seq=0, command=189))
+    vehicle.poll(12.3)
+
+    assert future.done() is False
+    assert connection.mav.calls_for("mission_request_int_send")[-1] == (1, 1, 1, 0)
+
+
+def test_download_mission_ignores_wrong_source_and_mission_type(vehicle, connection):
+    """Break caught: another vehicle or mission type can complete a download."""
+    future = vehicle.download_mission_async(now=13.0)
+    connection.incoming.extend(
+        [
+            FakeMessage("MISSION_COUNT", src_system=2, count=1, mission_type=0),
+            FakeMessage("MISSION_COUNT", count=1, mission_type=1),
+        ]
+    )
+    vehicle.poll(13.1)
+    assert connection.mav.calls_for("mission_request_int_send") == []
+
+    connection.incoming.append(FakeMessage("MISSION_COUNT", count=1, mission_type=0))
+    vehicle.poll(13.2)
+    connection.incoming.extend(
+        [
+            mission_item_message(seq=0, command=189, mission_type=1),
+            mission_item_message(seq=0, command=189, src_system=2),
+        ]
+    )
+    vehicle.poll(13.3)
+
+    assert future.done() is False
+    assert connection.mav.calls_for("mission_ack_send") == []
+
+
+def test_download_mission_empty_count_acks_and_returns_empty_mission(
+    vehicle, connection
+):
+    """Break caught: an empty FC mission hangs or is rejected."""
+    future = vehicle.download_mission_async(now=14.0)
+    connection.incoming.append(FakeMessage("MISSION_COUNT", count=0, mission_type=0))
+    vehicle.poll(14.1)
+
+    assert future.done()
+    assert future.result().items == ()
+    assert connection.mav.calls_for("mission_ack_send")[-1][2] == MAVLINK.MAV_MISSION_ACCEPTED
+
+
+def test_download_mission_retries_the_missing_item_request(vehicle, connection):
+    """Break caught: a lost indexed item request is never resent."""
+    future = vehicle.download_mission_async(now=15.0)
+    connection.incoming.append(FakeMessage("MISSION_COUNT", count=1, mission_type=0))
+    vehicle.poll(15.1)
+    assert len(connection.mav.calls_for("mission_request_int_send")) == 1
+
+    vehicle.poll(15.59)
+    assert len(connection.mav.calls_for("mission_request_int_send")) == 1
+    vehicle.poll(15.6)
+
+    assert future.done() is False
+    assert connection.mav.calls_for("mission_request_int_send")[-1] == (1, 1, 0, 0)
+
+
+def test_download_mission_times_out_if_fc_never_replies(vehicle):
+    """Break caught: an unanswered mission request remains active forever."""
+    future = vehicle.download_mission_async(now=16.0)
+
+    vehicle.poll(19.01)
+
+    assert future.done()
+    assert future.result().success is False
+    assert future.result().message == "MAVLink operation timed out"
+
+
+def test_download_mission_re_requests_when_an_item_sequence_is_absent(
+    vehicle, connection
+):
+    """Break caught: an out-of-range item is accepted in place of a missing one."""
+    future = vehicle.download_mission_async(now=17.0)
+    connection.incoming.append(FakeMessage("MISSION_COUNT", count=2, mission_type=0))
+    vehicle.poll(17.1)
+    connection.incoming.append(mission_item_message(seq=2, command=189))
+    vehicle.poll(17.2)
+
+    assert future.done() is False
+    assert connection.mav.calls_for("mission_request_int_send")[-1] == (1, 1, 0, 0)
+
+
+def test_download_mission_preserves_nonzero_opaque_id_and_ignores_absent_extension(
+    vehicle, connection
+):
+    """Break caught: opaque mission identity is mishandled when extensions vary."""
+    future = vehicle.download_mission_async(now=18.0)
+    connection.incoming.append(
+        FakeMessage("MISSION_COUNT", count=0, mission_type=0, opaque_id=12345)
+    )
+    vehicle.poll(18.1)
+    assert future.result().opaque_id == 12345
+
+    future = vehicle.download_mission_async(now=18.2)
+    connection.incoming.append(
+        FakeMessage("MISSION_COUNT", count=0, mission_type=0, opaque_id=0)
+    )
+    vehicle.poll(18.3)
+    assert future.result().opaque_id is None
+
+    future = vehicle.download_mission_async(now=18.4)
+    connection.incoming.append(FakeMessage("MISSION_COUNT", count=0, mission_type=0))
+    vehicle.poll(18.5)
+    assert future.result().opaque_id is None
+
+
+def test_mission_current_updates_persistent_progress_and_absent_extensions(
+    vehicle, connection
+):
+    """Break caught: MISSION_CURRENT progress is dropped or requires extensions."""
+    connection.incoming.append(
+        FakeMessage(
+            "MISSION_CURRENT",
+            seq=7,
+            total=9,
+            mission_state=MAVLINK.MISSION_STATE_ACTIVE,
+            mission_mode=1,
+            mission_id=2468,
+        )
+    )
+    vehicle.poll(20.0)
+
+    assert vehicle.state.mission_seq == 7
+    assert vehicle.state.mission_total == 9
+    assert vehicle.state.mission_state == MAVLINK.MISSION_STATE_ACTIVE
+    assert vehicle.state.mission_mode == 1
+    assert vehicle.state.mission_id == 2468
+    assert vehicle.state.mission_current_at == 20.0
+
+    connection.incoming.append(
+        FakeMessage("MISSION_CURRENT", seq=8, total=9, mission_id=0)
+    )
+    vehicle.poll(20.1)
+    assert vehicle.state.mission_seq == 8
+    assert vehicle.state.mission_state is None
+    assert vehicle.state.mission_mode is None
+    assert vehicle.state.mission_id is None
+    assert vehicle.state.mission_current_at == 20.1
+
+    connection.incoming.append(FakeMessage("MISSION_CURRENT", seq=9, total=9))
+    vehicle.poll(20.2)
+    assert vehicle.state.mission_id is None
+    assert vehicle.state.mission_current_at == 20.2
+
+
+@pytest.mark.parametrize(
+    ("method", "command", "params"),
+    [
+        (
+            lambda v: v.set_mission_current_async(0, reset=True, now=21.0),
+            MAVLINK.MAV_CMD_DO_SET_MISSION_CURRENT,
+            (0.0, 1.0),
+        ),
+        (
+            lambda v: v.start_mission_async(21.0),
+            MAVLINK.MAV_CMD_MISSION_START,
+            (0.0, 0.0),
+        ),
+        (
+            lambda v: v.request_dock_async(21.0),
+            MAVLINK.MAV_CMD_DO_LAND_START,
+            (0.0, 0.0),
+        ),
+        (
+            lambda v: v.rtl_async(21.0),
+            MAVLINK.MAV_CMD_NAV_RETURN_TO_LAUNCH,
+            (0.0, 0.0),
+        ),
+        (
+            lambda v: v.land_async(21.0),
+            MAVLINK.MAV_CMD_NAV_LAND,
+            (0.0, 0.0),
+        ),
+    ],
+)
+def test_acknowledged_cycle_commands_send_exact_parameters(
+    method, command, params, vehicle, connection
+):
+    """Break caught: a cycle command has the wrong MAVLink command or parameters."""
+    future = method(vehicle)
+    sent = connection.mav.calls_for("command_long_send")[-1]
+
+    assert sent == (1, 1, command, 0, *params, 0.0, 0.0, 0.0, 0.0, 0.0)
+    push_ack(connection, command)
+    vehicle.poll(21.1)
+    assert future.result().success
+
+
+@pytest.mark.parametrize("sequence", (-1, 32768, 1.5, True))
+def test_set_mission_current_rejects_invalid_sequence(vehicle, sequence):
+    """Break caught: invalid sequence numbers are encoded into control commands."""
+    with pytest.raises(ValueError, match="mission sequence"):
+        vehicle.set_mission_current_async(sequence, reset=False, now=22.0)
+
+
+def test_command_and_mission_download_share_the_single_pending_operation(
+    vehicle, connection
+):
+    """Break caught: a mission operation can overwrite an unacknowledged command."""
+    command = vehicle.land_async(now=23.0)
+
+    with pytest.raises(RuntimeError, match="another MAVLink operation is already active"):
+        vehicle.download_mission_async(now=23.1)
+
+    assert command.done() is False
+    assert connection.mav.calls_for("mission_request_list_send") == []
+
+
+def test_mission_download_and_command_share_the_single_pending_operation(
+    vehicle, connection
+):
+    """Break caught: a command can overwrite an incomplete mission download."""
+    mission = vehicle.download_mission_async(now=24.0)
+
+    with pytest.raises(RuntimeError, match="another MAVLink operation is already active"):
+        vehicle.land_async(now=24.1)
+
+    assert mission.done() is False
+    assert connection.mav.calls_for("command_long_send") == []
