@@ -240,6 +240,7 @@ class FlightCycleManager(Node):
                     "fresh heartbeat, position, and landed state telemetry "
                     "are required before arming",
                     grounded_state=CycleState.FAILED_DISARMED,
+                    now=now,
                 )
                 return
             self._begin_operation("prearm", self._vehicle.prearm_async(now), now)
@@ -257,6 +258,7 @@ class FlightCycleManager(Node):
                     "fresh heartbeat, position, and landed state telemetry "
                     "are required before arming",
                     grounded_state=CycleState.FAILED_DISARMED,
+                    now=now,
                 )
                 return
             self._begin_operation("arm", self._vehicle.arm_async(True, now), now)
@@ -326,7 +328,9 @@ class FlightCycleManager(Node):
                 timeout_name="mission_download_timeout_s",
             )
         except Exception as error:
-            self._invalid_mission(f"onboard mission download could not start: {error}")
+            self._invalid_mission(
+                f"onboard mission download could not start: {error}", now
+            )
 
     def _begin_operation(
         self,
@@ -348,18 +352,23 @@ class FlightCycleManager(Node):
         if not pending.future.done():
             if now > pending.deadline:
                 self._pending = None
-                self._operation_failed(pending.name, "MAVLink operation timed out")
+                self._operation_failed(
+                    pending.name, "MAVLink operation timed out", now
+                )
             return True
         self._pending = None
         try:
             result = pending.future.result()
         except Exception as error:
-            self._operation_failed(pending.name, f"MAVLink operation failed: {error}")
+            self._operation_failed(
+                pending.name, f"MAVLink operation failed: {error}", now
+            )
             return True
         if not getattr(result, "success", False):
             self._operation_failed(
                 pending.name,
                 getattr(result, "message", "MAVLink operation was rejected"),
+                now,
             )
             return True
         self._operation_succeeded(pending.name, result, now)
@@ -377,7 +386,7 @@ class FlightCycleManager(Node):
             if command.success or command.current_mode == GUIDED_MODE:
                 self._transition(CycleState.ARM, "GUIDED mode acknowledged")
             else:
-                self._operation_failed("set_guided", command.message)
+                self._operation_failed("set_guided", command.message, now)
         elif name == "arm":
             self._transition(CycleState.TAKEOFF, "arm command acknowledged")
         elif name == "takeoff":
@@ -410,15 +419,19 @@ class FlightCycleManager(Node):
                 force=True,
             )
 
-    def _operation_failed(self, name: str, message: str) -> None:
+    def _operation_failed(self, name: str, message: str, now: float) -> None:
         reason = f"{name.replace('_', ' ')} failed: {message or 'rejected'}"
         if name in {"mission_download", "native_landing_parameters"}:
-            self._invalid_mission(reason)
+            self._invalid_mission(reason, now)
             return
         if name == "direct_land":
             self._transition(CycleState.FC_FALLBACK_LAND, reason, force=True)
             return
-        self._route_failure(reason, grounded_state=CycleState.FAILED_DISARMED)
+        self._route_failure(
+            reason,
+            grounded_state=CycleState.FAILED_DISARMED,
+            now=now,
+        )
 
     def _validate_download(self, result: Any, now: float) -> None:
         try:
@@ -434,7 +447,9 @@ class FlightCycleManager(Node):
                 ),
             )
         except (MissionContractError, TypeError, ValueError) as error:
-            self._invalid_mission(f"onboard mission contract is invalid: {error}")
+            self._invalid_mission(
+                f"onboard mission contract is invalid: {error}", now
+            )
             return
         self._contract = contract
         if self._landing_backend == "precise_landing":
@@ -453,7 +468,8 @@ class FlightCycleManager(Node):
                 )
             except Exception as error:
                 self._invalid_mission(
-                    f"native precision landing parameter read could not start: {error}"
+                    f"native precision landing parameter read could not start: {error}",
+                    now,
                 )
             return
         self._validation_succeeded(now)
@@ -465,7 +481,8 @@ class FlightCycleManager(Node):
         if enabled != 1.0 or landing_type != 1.0:
             self._invalid_mission(
                 "ArduPilot native precision landing is not configured: "
-                f"PLND_ENABLED={enabled}, PLND_TYPE={landing_type}"
+                f"PLND_ENABLED={enabled}, PLND_TYPE={landing_type}",
+                now,
             )
             return
         self._validation_succeeded(now)
@@ -601,9 +618,19 @@ class FlightCycleManager(Node):
             <= self._positive_parameter("landed_state_timeout_s")
         )
 
-    def _vehicle_is_confirmed_disarmed_on_ground(self) -> bool:
+    def _vehicle_is_confirmed_disarmed_on_ground(self, now: float) -> bool:
         state = self._vehicle.state
-        return state.armed is False and state.flying is False
+        return (
+            self._vehicle.ready(
+                now,
+                heartbeat_timeout_s=self._positive_parameter(
+                    "mavlink_heartbeat_timeout_s"
+                ),
+            )
+            and state.armed is False
+            and state.flying is False
+            and self._fresh_landed_state(now, state)
+        )
 
     def _command_direct_land(self, reason: str) -> None:
         self._transition(CycleState.FC_FALLBACK_LAND, reason)
@@ -617,17 +644,24 @@ class FlightCycleManager(Node):
                 force=True,
             )
 
-    def _invalid_mission(self, reason: str) -> None:
+    def _invalid_mission(self, reason: str, now: float) -> None:
         self._contract = None
         self._route_failure(
             reason,
             grounded_state=CycleState.INVALID_ONBOARD_MISSION,
+            now=now,
         )
 
-    def _route_failure(self, reason: str, *, grounded_state: CycleState) -> None:
+    def _route_failure(
+        self,
+        reason: str,
+        *,
+        grounded_state: CycleState,
+        now: float,
+    ) -> None:
         """Land unless live telemetry confirms a disarmed vehicle on ground."""
         self._start_requested = False
-        if self._vehicle_is_confirmed_disarmed_on_ground():
+        if self._vehicle_is_confirmed_disarmed_on_ground(now):
             if grounded_state is CycleState.FAILED_DISARMED:
                 self._fail_disarmed(reason)
             else:

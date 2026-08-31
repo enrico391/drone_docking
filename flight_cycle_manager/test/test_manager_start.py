@@ -292,6 +292,7 @@ def test_invalid_contract_publishes_invalid_state_without_arming():
         assert manager.state is CycleState.INVALID_ONBOARD_MISSION
         assert "DO_LAND_START" in manager.reason
         assert vehicle.arm_calls == []
+        assert vehicle.land_calls == 0
         assert vehicle.mission_mutation_calls == []
     finally:
         manager.close()
@@ -344,6 +345,7 @@ def test_native_precision_validation_requires_both_flight_controller_parameters(
         vehicle.finish_download(valid_contract_items())
         manager.tick(now=1.0)
         assert vehicle.parameter_calls[-1] == ("PLND_ENABLED", "PLND_TYPE")
+        vehicle.state = ground_state(1.1)
         vehicle.finish_parameters({"PLND_ENABLED": 1.0, "PLND_TYPE": 0.0})
         manager.tick(now=1.1)
 
@@ -369,20 +371,42 @@ def test_pid_start_does_not_read_native_precision_landing_parameters():
         manager.close()
 
 
-def test_stale_heartbeat_or_pose_aborts_before_prearm_or_arm():
-    """Break caught: arming begins when required telemetry has gone stale."""
+def test_stale_heartbeat_with_cached_ground_flags_commands_direct_land_once():
+    """Break caught: stale disarmed flags are trusted as a current safe state."""
     vehicle = FakeVehicle(ground_state(0.0))
     manager = make_manager(vehicle)
     try:
         finish_startup_validation(manager, vehicle)
         request_valid_start(manager, vehicle)
-        vehicle.state = ground_state(0.0)
-        manager.tick(now=5.0)
+        vehicle.state = replace(ground_state(3.0), heartbeat_at=0.0)
+        manager.tick(now=3.0)
+        manager.tick(now=3.1)
 
-        assert manager.state is CycleState.FAILED_DISARMED
+        assert manager.state is CycleState.FC_FALLBACK_LAND
         assert "fresh heartbeat, position, and landed state" in manager.reason
         assert vehicle.prearm_calls == 0
         assert vehicle.arm_calls == []
+        assert vehicle.land_calls == 1
+    finally:
+        manager.close()
+
+
+def test_stale_landed_state_with_cached_ground_flags_commands_direct_land_once():
+    """Break caught: an old ON_GROUND report is trusted after validation fails."""
+    vehicle = FakeVehicle(ground_state(0.0))
+    manager = make_manager(vehicle)
+    try:
+        finish_startup_validation(manager, vehicle)
+        request_valid_start(manager, vehicle)
+        vehicle.state = replace(ground_state(3.0), landed_at=0.0)
+        manager.tick(now=3.0)
+        manager.tick(now=3.1)
+
+        assert manager.state is CycleState.FC_FALLBACK_LAND
+        assert "fresh heartbeat, position, and landed state" in manager.reason
+        assert vehicle.prearm_calls == 0
+        assert vehicle.arm_calls == []
+        assert vehicle.land_calls == 1
     finally:
         manager.close()
 
