@@ -198,6 +198,137 @@ def test_mode_future_requires_ack_and_observed_heartbeat(vehicle, connection):
     assert command[5] == 4.0
 
 
+def test_pending_command_retries_at_retry_interval(vehicle, connection):
+    """Break caught: an unacknowledged command is never resent at 0.5 s."""
+    future = vehicle.takeoff_async(altitude_m=3.0, now=11.0)
+
+    vehicle.poll(now=11.49)
+    assert len(connection.mav.calls_for("command_long_send")) == 1
+
+    vehicle.poll(now=11.5)
+
+    assert future.done() is False
+    assert len(connection.mav.calls_for("command_long_send")) == 2
+
+
+def test_pending_command_times_out_with_terminal_failure(vehicle):
+    """Break caught: a command remains pending past the three-second limit."""
+    future = vehicle.takeoff_async(altitude_m=3.0, now=12.0)
+
+    vehicle.poll(now=15.01)
+
+    assert future.done() is True
+    assert future.result().success is False
+    assert future.result().message == "MAVLink operation timed out"
+
+
+def test_condition_yaw_encodes_relative_signed_correction(vehicle, connection):
+    """Break caught: dock yaw correction loses sign or is sent as absolute."""
+    sent = vehicle.send_condition_yaw(yaw_error_rad=-1.5707963267948966)
+
+    assert sent is True
+    call = connection.mav.calls_for("command_long_send")[-1]
+    assert call == pytest.approx(
+        (
+            1,
+            1,
+            MAVLINK.MAV_CMD_CONDITION_YAW,
+            0,
+            90.0,
+            0.0,
+            -1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+    )
+
+
+def test_companion_heartbeat_emits_once_per_second(vehicle, connection):
+    """Break caught: companion heartbeats are absent or emitted too often."""
+    vehicle.poll(now=13.0)
+    vehicle.poll(now=13.99)
+    vehicle.poll(now=14.0)
+
+    heartbeats = connection.mav.calls_for("heartbeat_send")
+    assert heartbeats == [
+        (
+            MAVLINK.MAV_TYPE_ONBOARD_CONTROLLER,
+            MAVLINK.MAV_AUTOPILOT_INVALID,
+            0,
+            0,
+            MAVLINK.MAV_STATE_ACTIVE,
+            3,
+        ),
+        (
+            MAVLINK.MAV_TYPE_ONBOARD_CONTROLLER,
+            MAVLINK.MAV_AUTOPILOT_INVALID,
+            0,
+            0,
+            MAVLINK.MAV_STATE_ACTIVE,
+            3,
+        ),
+    ]
+
+
+def test_second_pending_operation_is_rejected(vehicle, connection):
+    """Break caught: a new operation overwrites an active MAVLink operation."""
+    first = vehicle.takeoff_async(altitude_m=3.0, now=16.0)
+
+    with pytest.raises(RuntimeError, match="another MAVLink operation is already active"):
+        vehicle.arm_async(True, now=16.1)
+
+    assert first.done() is False
+    assert len(connection.mav.calls_for("command_long_send")) == 1
+
+
+def test_rejected_command_ack_finishes_future_with_failure(vehicle, connection):
+    """Break caught: ArduPilot's terminal command rejection is ignored."""
+    future = vehicle.takeoff_async(altitude_m=3.0, now=17.0)
+    push_ack(
+        connection,
+        MAVLINK.MAV_CMD_NAV_TAKEOFF,
+        result=MAVLINK.MAV_RESULT_DENIED,
+    )
+
+    vehicle.poll(now=17.1)
+
+    assert future.done() is True
+    assert future.result().success is False
+    assert future.result().message == (
+        "ArduPilot rejected MAVLink command "
+        f"{MAVLINK.MAV_CMD_NAV_TAKEOFF} with result {MAVLINK.MAV_RESULT_DENIED}"
+    )
+
+
+def test_in_progress_ack_waits_for_observed_mode_before_success(
+    vehicle, connection
+):
+    """Break caught: an in-progress mode ACK is treated as terminal success."""
+    push_heartbeat(connection, mode=0, armed=False)
+    vehicle.poll(now=18.0)
+    future = vehicle.set_mode_async(4, now=18.1)
+
+    push_ack(
+        connection,
+        MAVLINK.MAV_CMD_DO_SET_MODE,
+        result=MAVLINK.MAV_RESULT_IN_PROGRESS,
+    )
+    vehicle.poll(now=18.2)
+    assert future.done() is False
+
+    push_ack(connection, MAVLINK.MAV_CMD_DO_SET_MODE)
+    vehicle.poll(now=18.3)
+    assert future.done() is False
+
+    push_heartbeat(connection, mode=4, armed=False)
+    vehicle.poll(now=18.4)
+
+    assert future.done() is True
+    assert future.result().success is True
+
+
 def test_parameter_future_collects_requested_values_out_of_order(
     vehicle, connection
 ):
