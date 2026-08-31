@@ -20,14 +20,3 @@ def test_package_declares_runtime_dependencies():
     package = ET.parse(ROOT / "package.xml").getroot()
     dependencies = {node.text for node in package.findall("exec_depend")}
     assert {"rclpy", "geometry_msgs", "std_msgs", "std_srvs"} <= dependencies
-
-
-def test_declared_entry_point_resolves_to_deliberate_stub():
-    from flight_cycle_manager.manager import main
-
-    try:
-        main()
-    except RuntimeError as error:
-        assert str(error) == "flight cycle manager is not implemented"
-    else:
-        raise AssertionError("manager entry point must remain an explicit stub")
