@@ -195,3 +195,94 @@ Result:
   `build/drone_mission_manager/package.xml` artifact while still returning a
   clean summary. I did not delete build artifacts because the task explicitly
   said to preserve build/install/log state.
+
+## Fix Round 1
+
+Review findings addressed:
+
+- Removed the obfuscated removed-key detector from
+  `flight_cycle_manager/test/test_launch_and_config.py`.
+- Removed the obfuscated legacy-package-name detector from
+  `flight_cycle_manager/test/test_package_metadata.py`.
+- Kept the behavior-level proof already present:
+  - exact expected common/PID config contents
+  - disjoint key sets
+  - union equals manager-declared parameters
+  - launch argument contract and launch construction tests
+  - package XML name, setuptools package name, and entry-point assertions
+
+Commands and results:
+
+1. Focused tests after cleanup:
+
+```bash
+source /opt/ros/humble/setup.bash
+export PYTHONPATH=flight_cycle_manager:${PYTHONPATH}
+/usr/bin/python3 -m pytest \
+  flight_cycle_manager/test/test_launch_and_config.py \
+  flight_cycle_manager/test/test_package_metadata.py -q
+```
+
+Result:
+
+- `9 passed`
+
+2. Post-migration reference scan after cleanup:
+
+```bash
+rg -n "drone_mission_manager|mission_file|simple_circle|dock_circle|repeat\.count|repeat\.delay_s" \
+  . -g '!docs/superpowers/**' -g '!**/__pycache__/**' -g '!*.pyc'
+```
+
+Result:
+
+- no output
+- exit code `1`
+
+3. Rebuilt workspace in required environment:
+
+```bash
+source /home/morowsl/ardu_ws/apriltag_venv/bin/activate
+source /opt/ros/humble/setup.bash
+python -m colcon build --symlink-install --packages-select \
+  flight_cycle_manager dock_apriltag_localizer drone_description drone_bringup
+```
+
+Result:
+
+- success
+- all 4 packages finished
+
+4. Full installed-environment replacement and localizer pytest:
+
+```bash
+source /home/morowsl/ardu_ws/apriltag_venv/bin/activate
+source /opt/ros/humble/setup.bash
+source /home/morowsl/ardu_ws/install/setup.bash
+python -m pytest /home/morowsl/ardu_ws/src/drone_docking/flight_cycle_manager/test -q
+python -m pytest /home/morowsl/ardu_ws/src/drone_docking/dock_apriltag_localizer/test -q
+```
+
+Result:
+
+- `flight_cycle_manager`: `265 passed`
+- `dock_apriltag_localizer`: `12 passed`
+
+5. Re-ran package gates and summary:
+
+```bash
+source /home/morowsl/ardu_ws/apriltag_venv/bin/activate
+source /opt/ros/humble/setup.bash
+source /home/morowsl/ardu_ws/install/setup.bash
+colcon test --packages-select flight_cycle_manager dock_apriltag_localizer \
+  --event-handlers console_direct+
+colcon test-result --verbose
+```
+
+Result:
+
+- `flight_cycle_manager`: `265 passed`
+- `dock_apriltag_localizer`: current package `colcon test` path still discovers `0` tests
+- summary: `448 tests, 0 errors, 0 failures, 0 skipped`
+- preserved-artifact warning remains for missing
+  `build/drone_mission_manager/package.xml`
