@@ -24,7 +24,7 @@ def _launch_bool(context: LaunchContext, name: str) -> bool:
     return LaunchConfiguration(name).perform(context).strip().lower() == "true"
 
 
-def create_manager_actions(
+def _launch_setup(
     context: LaunchContext, package_share: Path
 ):
     """Create the backend-aware manager node after validating launch inputs."""
@@ -170,6 +170,6 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="3",
             ),
             localizer,
-            OpaqueFunction(function=create_manager_actions, args=[package_share]),
+            OpaqueFunction(function=_launch_setup, args=[package_share]),
         ]
     )

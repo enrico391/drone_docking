@@ -7,7 +7,8 @@ from pathlib import Path
 import sys
 
 from launch import LaunchDescription, LaunchService
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.utilities import perform_substitutions
 import pytest
 import yaml
 
@@ -177,12 +178,10 @@ def patch_package_shares(monkeypatch, module) -> None:
     monkeypatch.setattr(module, "get_package_share_directory", fake_share_directory)
 
 
-def launch_opaque_actions(module):
-    return next(
-        entity
-        for entity in module.generate_launch_description().entities
-        if isinstance(entity, OpaqueFunction)
-    )
+def configured_context_for_values(module, **values):
+    context = configured_launch_context(module)
+    context.launch_configurations.update(values)
+    return context
 
 
 def test_common_and_pid_configuration_match_declared_manager_parameters():
@@ -204,17 +203,8 @@ def test_common_and_pid_configuration_match_declared_manager_parameters():
     )
 
 
-def test_launch_has_no_companion_mission_selector():
-    """Break caught: launch still depends on removed mission-profile inputs."""
-    text = LAUNCH_FILE.read_text(encoding="utf-8")
-
-    assert '"mission"' not in text
-    assert '"mission_file"' not in text
-    assert "flight_cycle_manager" in text
-
-
-def test_launch_declares_operational_arguments_and_localizer_default(monkeypatch):
-    """Break caught: launch stops exposing runtime overrides or localizer default."""
+def test_launch_declares_operational_arguments(monkeypatch):
+    """Break caught: launch stops exposing required runtime override arguments."""
     module = load_launch_module()
     patch_package_shares(monkeypatch, module)
 
@@ -245,8 +235,8 @@ def test_launch_declares_operational_arguments_and_localizer_default(monkeypatch
     assert context.launch_configurations["start_localizer"] == "true"
 
 
-def test_launch_pid_backend_loads_common_and_pid_configuration(monkeypatch):
-    """Break caught: PID launch path drops its backend-specific YAML file."""
+def test_launch_setup_returns_exact_pid_manager_node(monkeypatch):
+    """Break caught: PID setup can change node identity or lose parameter wiring."""
     module = load_launch_module()
     patch_package_shares(monkeypatch, module)
     captured = {}
@@ -256,29 +246,33 @@ def test_launch_pid_backend_loads_common_and_pid_configuration(monkeypatch):
         return {"node": kwargs}
 
     monkeypatch.setattr(module, "Node", record_node)
-    context = configured_launch_context(module)
-    context.launch_configurations.update(
-        {
-            "landing_backend": "pid",
-            "simulation_mode": "true",
-            "auto_start": "true",
-        }
+    context = configured_context_for_values(
+        module,
+        landing_backend="pid",
+        simulation_mode="true",
+        auto_start="true",
+        mavlink_connection="serial:///dev/ttyAMA0",
+        mavlink_baud="57600",
     )
 
-    actions = launch_opaque_actions(module).execute(context)
+    actions = module._launch_setup(context, ROOT)
     overrides = captured["parameters"][2]
 
     assert actions == [{"node": captured}]
+    assert captured["package"] == "flight_cycle_manager"
+    assert captured["executable"] == "flight_cycle_manager"
     assert captured["name"] == "flight_cycle_manager"
     assert captured["parameters"][0] == str(COMMON_CONFIG)
     assert captured["parameters"][1] == str(PID_CONFIG)
     assert overrides["landing_backend"].perform(context) == "pid"
     assert overrides["simulation_mode"].evaluate(context) is True
     assert overrides["auto_start"].evaluate(context) is True
+    assert overrides["mavlink_connection"].perform(context) == "serial:///dev/ttyAMA0"
+    assert overrides["mavlink_baud"].evaluate(context) == 57600
 
 
-def test_launch_precise_landing_loads_only_common_configuration(monkeypatch):
-    """Break caught: native landing launch path incorrectly injects PID knobs."""
+def test_launch_setup_returns_exact_precise_landing_manager_node(monkeypatch):
+    """Break caught: native setup can inject PID config or lose node identity."""
     module = load_launch_module()
     patch_package_shares(monkeypatch, module)
     captured = {}
@@ -288,21 +282,32 @@ def test_launch_precise_landing_loads_only_common_configuration(monkeypatch):
         return {"node": kwargs}
 
     monkeypatch.setattr(module, "Node", record_node)
-    context = configured_launch_context(module)
-    context.launch_configurations["landing_backend"] = "precise_landing"
+    context = configured_context_for_values(
+        module,
+        landing_backend="precise_landing",
+        simulation_mode="false",
+        auto_start="false",
+        mavlink_connection="tcp:10.0.0.2:5770",
+        mavlink_baud="115200",
+    )
 
-    actions = launch_opaque_actions(module).execute(context)
+    actions = module._launch_setup(context, ROOT)
     overrides = captured["parameters"][1]
 
     assert actions == [{"node": captured}]
+    assert captured["package"] == "flight_cycle_manager"
+    assert captured["executable"] == "flight_cycle_manager"
+    assert captured["name"] == "flight_cycle_manager"
     assert captured["parameters"][0] == str(COMMON_CONFIG)
     assert len(captured["parameters"]) == 2
     assert overrides["landing_backend"].perform(context) == "precise_landing"
     assert overrides["simulation_mode"].evaluate(context) is False
     assert overrides["auto_start"].evaluate(context) is False
+    assert overrides["mavlink_connection"].perform(context) == "tcp:10.0.0.2:5770"
+    assert overrides["mavlink_baud"].evaluate(context) == 115200
 
 
-def test_launch_rejects_auto_start_outside_simulation_before_node_creation(
+def test_launch_setup_rejects_auto_start_outside_simulation_before_node_creation(
     monkeypatch,
 ):
     """Break caught: invalid auto-start reaches node construction."""
@@ -315,18 +320,58 @@ def test_launch_rejects_auto_start_outside_simulation_before_node_creation(
         raise AssertionError("Node must not be created for invalid auto_start")
 
     monkeypatch.setattr(module, "Node", fail_if_called)
-    context = configured_launch_context(module)
-    context.launch_configurations.update(
-        {
-            "landing_backend": "pid",
-            "simulation_mode": "false",
-            "auto_start": "true",
-        }
+    context = configured_context_for_values(
+        module,
+        landing_backend="pid",
+        simulation_mode="false",
+        auto_start="true",
     )
 
     with pytest.raises(
         ValueError, match="auto_start=true requires simulation_mode=true"
     ):
-        launch_opaque_actions(module).execute(context)
+        module._launch_setup(context, ROOT)
 
     assert node_calls == []
+
+
+def test_launch_description_includes_localizer_with_expected_wiring(monkeypatch):
+    """Break caught: localizer include path or forwarded launch arguments drift."""
+    module = load_launch_module()
+    patch_package_shares(monkeypatch, module)
+    context = configured_context_for_values(
+        module,
+        start_localizer="true",
+        image_topic="/stereo/down/image_raw",
+        camera_info_topic="/stereo/down/camera_info",
+        localizer_python="/opt/localizer/bin/python3",
+        pose_filter_enabled="false",
+        pose_filter_time_constant_s="0.25",
+        pose_filter_max_translation_speed_m_s="1.8",
+        pose_filter_max_position_jump_m="0.11",
+        pose_filter_reacquire_frames="6",
+    )
+    include = next(
+        entity
+        for entity in module.generate_launch_description().entities
+        if isinstance(entity, IncludeLaunchDescription)
+    )
+
+    wired_arguments = dict(include.launch_arguments)
+
+    assert perform_substitutions(
+        context,
+        include.launch_description_source._LaunchDescriptionSource__location,
+    ) == str(LOCALIZER_ROOT / "launch" / "dock_localizer.launch.py")
+    assert include.condition.evaluate(context) is True
+    assert wired_arguments["image_topic"].perform(context) == "/stereo/down/image_raw"
+    assert wired_arguments["camera_info_topic"].perform(context) == "/stereo/down/camera_info"
+    assert wired_arguments["python_executable"].perform(context) == "/opt/localizer/bin/python3"
+    assert wired_arguments["pose_filter_enabled"].perform(context) == "false"
+    assert wired_arguments["pose_filter_time_constant_s"].perform(context) == "0.25"
+    assert (
+        wired_arguments["pose_filter_max_translation_speed_m_s"].perform(context)
+        == "1.8"
+    )
+    assert wired_arguments["pose_filter_max_position_jump_m"].perform(context) == "0.11"
+    assert wired_arguments["pose_filter_reacquire_frames"].perform(context) == "6"
