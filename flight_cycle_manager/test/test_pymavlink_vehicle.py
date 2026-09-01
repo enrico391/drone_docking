@@ -319,6 +319,23 @@ def test_pending_command_retries_at_retry_interval(vehicle, connection):
     assert len(connection.mav.calls_for("command_long_send")) == 2
 
 
+def test_receive_telemetry_without_service_does_not_retry_pending_command(
+    vehicle, connection
+):
+    """Break caught: ingesting telemetry resends an overdue command before authority can gate it."""
+    future = vehicle.takeoff_async(altitude_m=3.0, now=11.0)
+
+    vehicle.receive_telemetry(now=11.5)
+
+    assert future.done() is False
+    assert len(connection.mav.calls_for("command_long_send")) == 1
+
+    vehicle.service_pending(now=11.5)
+
+    assert future.done() is False
+    assert len(connection.mav.calls_for("command_long_send")) == 2
+
+
 def test_pending_command_times_out_with_terminal_failure(vehicle):
     """Break caught: a command remains pending past the three-second limit."""
     future = vehicle.takeoff_async(altitude_m=3.0, now=12.0)
@@ -622,6 +639,18 @@ def test_close_stops_vehicle_with_zero_velocity(vehicle, connection):
     assert connection.closed is True
 
 
+def test_close_without_output_skips_final_zero_velocity(vehicle, connection):
+    """Break caught: passive shutdown emits a final velocity command after authority is lost."""
+    vehicle.send_velocity(VelocityFrame.MAP_ENU, 1.0, 2.0, 3.0, now=50.0)
+
+    vehicle.close_without_output()
+
+    calls = connection.mav.calls_for("set_position_target_local_ned_send")
+    assert len(calls) == 1
+    assert calls[0][8:11] == (2.0, 1.0, -3.0)
+    assert connection.closed is True
+
+
 def test_download_mission_requests_every_int_item_and_acks(vehicle, connection):
     """Break caught: a complete FC mission is not downloaded as INT items."""
     future = vehicle.download_mission_async(now=10.0)
@@ -861,37 +890,42 @@ def test_mission_current_without_extensions_preserves_sequence_zero_progress(
 
 
 @pytest.mark.parametrize(
-    ("method", "command", "params"),
+    ("method", "command", "params", "confirmed_mode"),
     [
         (
             lambda v: v.set_mission_current_async(0, reset=True, now=21.0),
             MAVLINK.MAV_CMD_DO_SET_MISSION_CURRENT,
             (0.0, 1.0),
+            None,
         ),
         (
             lambda v: v.start_mission_async(21.0),
             MAVLINK.MAV_CMD_MISSION_START,
             (0.0, 0.0),
+            None,
         ),
         (
             lambda v: v.request_dock_async(21.0),
             MAVLINK.MAV_CMD_DO_LAND_START,
             (0.0, 0.0),
+            None,
         ),
         (
             lambda v: v.rtl_async(21.0),
             MAVLINK.MAV_CMD_NAV_RETURN_TO_LAUNCH,
             (0.0, 0.0),
+            27,
         ),
         (
             lambda v: v.land_async(21.0),
             MAVLINK.MAV_CMD_NAV_LAND,
             (0.0, 0.0),
+            9,
         ),
     ],
 )
 def test_acknowledged_cycle_commands_send_exact_parameters(
-    method, command, params, vehicle, connection
+    method, command, params, confirmed_mode, vehicle, connection
 ):
     """Break caught: a cycle command has the wrong MAVLink command or parameters."""
     future = method(vehicle)
@@ -900,7 +934,60 @@ def test_acknowledged_cycle_commands_send_exact_parameters(
     assert sent == (1, 1, command, 0, *params, 0.0, 0.0, 0.0, 0.0, 0.0)
     push_ack(connection, command)
     vehicle.poll(21.1)
+    if confirmed_mode is None:
+        assert future.result().success
+        return
+
+    assert future.done() is False
+    push_heartbeat(connection, mode=confirmed_mode, armed=True)
+    vehicle.poll(21.2)
     assert future.result().success
+
+
+@pytest.mark.parametrize(
+    ("method", "command", "confirmed_mode"),
+    [
+        (lambda v: v.rtl_async(22.0), MAVLINK.MAV_CMD_NAV_RETURN_TO_LAUNCH, 27),
+        (lambda v: v.land_async(22.0), MAVLINK.MAV_CMD_NAV_LAND, 9),
+    ],
+)
+def test_rtl_and_land_wait_for_mode_confirmation_after_ack(
+    method, command, confirmed_mode, vehicle, connection
+):
+    """Break caught: ACK success is mistaken for a completed flight-mode transition."""
+    future = method(vehicle)
+
+    push_ack(connection, command)
+    vehicle.poll(22.1)
+
+    assert future.done() is False
+
+    push_heartbeat(connection, mode=confirmed_mode, armed=True)
+    vehicle.poll(22.2)
+
+    assert future.done() is True
+    assert future.result().success is True
+    assert future.result().current_mode == confirmed_mode
+
+
+def test_cancel_pending_operation_ignores_late_ack_and_frees_transport(
+    vehicle, connection
+):
+    """Break caught: a canceled operation can still complete from a stale ACK or block the next command."""
+    stale = vehicle.land_async(now=23.0)
+
+    vehicle.cancel_pending_operation()
+    push_ack(connection, MAVLINK.MAV_CMD_NAV_LAND)
+    push_heartbeat(connection, mode=9, armed=True)
+    vehicle.receive_telemetry(now=23.1)
+    vehicle.service_pending(now=23.1)
+    replacement = vehicle.rtl_async(now=23.2)
+
+    assert stale.done() is False
+    assert replacement.done() is False
+    assert connection.mav.calls_for("command_long_send")[-1][2] == (
+        MAVLINK.MAV_CMD_NAV_RETURN_TO_LAUNCH
+    )
 
 
 @pytest.mark.parametrize("sequence", (-1, 32768, 1.5, True))

@@ -17,6 +17,8 @@ _COMMAND_TIMEOUT_S = 3.0
 _MISSION_TYPE_MISSION = 0
 _SET_MISSION_CURRENT_MAX_SEQUENCE = 32767
 _MAVLINK_UINT16_MAX = 65535
+_AUTO_RTL_MODE = 27
+_LAND_MODE = 9
 _MESSAGE_INTERVALS_US = (
     (32, 50_000),  # LOCAL_POSITION_NED at 20 Hz
     (30, 50_000),  # ATTITUDE at 20 Hz
@@ -224,6 +226,11 @@ class MavlinkVehicle:
 
     def poll(self, now: float) -> None:
         """Drain available messages and advance the active transaction."""
+        self.receive_telemetry(now)
+        self.service_pending(now)
+
+    def receive_telemetry(self, now: float) -> None:
+        """Drain available telemetry without retrying or timing out commands."""
         if self._closed:
             return
         self._send_companion_heartbeat(now)
@@ -234,6 +241,11 @@ class MavlinkVehicle:
             if not self._matches_source(message):
                 continue
             self._handle_message(message, now)
+
+    def service_pending(self, now: float) -> None:
+        """Advance the active transaction after higher-level authority checks."""
+        if self._closed:
+            return
         self._advance_pending(now)
 
     def prearm_async(self, now: float) -> MavlinkFuture[VehicleCommandResult]:
@@ -338,6 +350,7 @@ class MavlinkVehicle:
             self._mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
             now,
+            expected_value=_AUTO_RTL_MODE,
         )
 
     def land_async(self, now: float) -> MavlinkFuture[VehicleCommandResult]:
@@ -347,6 +360,7 @@ class MavlinkVehicle:
             self._mavutil.mavlink.MAV_CMD_NAV_LAND,
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
             now,
+            expected_value=_LAND_MODE,
         )
 
     def download_mission_async(
@@ -496,11 +510,23 @@ class MavlinkVehicle:
 
     def close(self) -> None:
         """Send a final zero setpoint and release the connection."""
+        self._close(send_final_zero=True)
+
+    def close_without_output(self) -> None:
+        """Release the connection without sending any final flight command."""
+        self._close(send_final_zero=False)
+
+    def cancel_pending_operation(self) -> None:
+        """Drop transport ownership of the active operation and ignore late ACKs."""
+        self._pending = None
+
+    def _close(self, *, send_final_zero: bool) -> None:
         if self._closed:
             return
-        self.send_velocity(
-            self._last_velocity_frame, 0.0, 0.0, 0.0, now=0.0
-        )
+        if send_final_zero:
+            self.send_velocity(
+                self._last_velocity_frame, 0.0, 0.0, 0.0, now=0.0
+            )
         self._connection.close()
         self._closed = True
         self._state = replace(self._state, connected=False)
@@ -662,7 +688,7 @@ class MavlinkVehicle:
             return
         if not pending.acknowledged:
             return
-        if pending.name == "mode":
+        if pending.name in {"mode", "rtl", "land"}:
             if self._state.mode == pending.expected_value:
                 pending.future._finish(
                     VehicleCommandResult(

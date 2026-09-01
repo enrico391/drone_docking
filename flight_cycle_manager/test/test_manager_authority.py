@@ -140,6 +140,33 @@ def configure_wait_takeoff_stable(monkeypatch):
     return manager, vehicle, now
 
 
+def configure_set_guided(monkeypatch):
+    del monkeypatch
+    manager, vehicle = ready_manager()
+    now = 20.0
+    manager._state = CycleState.SET_GUIDED
+    vehicle.state = mission_progress_state(now, mode=GUIDED_MODE, seq=0)
+    return manager, vehicle, now
+
+
+def configure_arm(monkeypatch):
+    del monkeypatch
+    manager, vehicle = ready_manager()
+    now = 20.0
+    manager._state = CycleState.ARM
+    vehicle.state = mission_progress_state(now, mode=GUIDED_MODE, seq=0)
+    return manager, vehicle, now
+
+
+def configure_takeoff(monkeypatch):
+    del monkeypatch
+    manager, vehicle = ready_manager()
+    now = 20.0
+    manager._state = CycleState.TAKEOFF
+    vehicle.state = mission_progress_state(now, mode=GUIDED_MODE, seq=0)
+    return manager, vehicle, now
+
+
 def configure_reset_onboard_mission(monkeypatch):
     del monkeypatch
     manager, vehicle = ready_manager()
@@ -305,6 +332,9 @@ def configure_wait_landed(monkeypatch):
 
 
 ACTIVE_MODE_SCENARIOS = [
+    ("set_guided_guided", configure_set_guided),
+    ("arm_guided", configure_arm),
+    ("takeoff_guided", configure_takeoff),
     ("wait_takeoff_stable_guided", configure_wait_takeoff_stable),
     ("reset_onboard_mission_guided", configure_reset_onboard_mission),
     ("start_auto_pre_ack_guided", configure_start_auto_pre_ack),
@@ -347,6 +377,32 @@ def test_unexpected_active_modes_latch_passive_override_without_output(
         manager.tick(now=now)
 
         assert manager.state is CycleState.PILOT_OVERRIDE
+        assert flight_output_snapshot(vehicle) == before
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize(
+    ("label", "configure"),
+    [
+        ("set_guided_guided", configure_set_guided),
+        ("arm_guided", configure_arm),
+        ("takeoff_guided", configure_takeoff),
+    ],
+)
+def test_stale_heartbeat_latches_link_loss_before_takeoff_transition_output(
+    label: str, configure, monkeypatch
+):
+    """Break caught: takeoff transition states emit commands after airborne link loss."""
+    del label
+    manager, vehicle, now = configure(monkeypatch)
+    try:
+        vehicle.state = replace(vehicle.state, heartbeat_at=now - 3.0)
+        before = flight_output_snapshot(vehicle)
+
+        manager.tick(now=now)
+
+        assert manager.state is CycleState.LINK_LOSS
         assert flight_output_snapshot(vehicle) == before
     finally:
         manager.close()
@@ -516,6 +572,7 @@ def test_mission_integrity_rtl_timeout_defers_direct_land_until_transport_clears
     manager, vehicle = ready_manager()
     try:
         now = 20.0
+        handoff_seq = manager.contract.handoff_seq
         manager._state = CycleState.SEARCH_DOCK
         manager._search_controller = StubSearchController(manager._build_search_config())
         setattr(manager, "_validated_mission_total", MISSION_TOTAL)
@@ -523,7 +580,7 @@ def test_mission_integrity_rtl_timeout_defers_direct_land_until_transport_clears
         vehicle.state = mission_progress_state(
             now,
             mode=GUIDED_MODE,
-            seq=manager.contract.handoff_seq,
+            seq=handoff_seq,
             total=MISSION_TOTAL,
             mission_id=24,
         )
@@ -533,7 +590,7 @@ def test_mission_integrity_rtl_timeout_defers_direct_land_until_transport_clears
         vehicle.state = mission_progress_state(
             now + 10.1,
             mode=GUIDED_MODE,
-            seq=manager.contract.handoff_seq,
+            seq=handoff_seq,
             total=MISSION_TOTAL,
             mission_id=24,
         )
@@ -559,13 +616,14 @@ def test_mission_integrity_fallback_accepts_rtl_and_land_modes(fallback_mode: in
     manager, vehicle = ready_manager()
     try:
         now = 20.0
+        handoff_seq = manager.contract.handoff_seq
         manager._state = CycleState.SEARCH_DOCK
         manager._search_controller = StubSearchController(manager._build_search_config())
         setattr(manager, "_validated_mission_total", MISSION_TOTAL)
         vehicle.state = mission_progress_state(
             now,
             mode=GUIDED_MODE,
-            seq=manager.contract.handoff_seq,
+            seq=handoff_seq,
             total=MISSION_TOTAL + 1,
         )
 
@@ -573,7 +631,7 @@ def test_mission_integrity_fallback_accepts_rtl_and_land_modes(fallback_mode: in
         vehicle.state = mission_progress_state(
             now + 0.1,
             mode=fallback_mode,
-            seq=manager.contract.handoff_seq,
+            seq=handoff_seq,
             total=MISSION_TOTAL + 1,
         )
         vehicle.finish_command()

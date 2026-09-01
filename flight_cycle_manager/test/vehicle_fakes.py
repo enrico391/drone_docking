@@ -255,6 +255,12 @@ class FakeVehicle:
     def poll(self, now: float) -> None:
         del now
 
+    def receive_telemetry(self, now: float) -> None:
+        del now
+
+    def service_pending(self, now: float) -> None:
+        del now
+
     def ready(self, now: float, heartbeat_timeout_s: float = 2.5) -> bool:
         return (
             self.state.connected
@@ -414,7 +420,14 @@ class FakeVehicle:
     def reject_pending(self, message: str) -> None:
         self.finish_command(success=False, message=message)
 
+    def cancel_pending_operation(self) -> None:
+        self._active_name = ""
+        self._active_future = None
+
     def close(self) -> None:
+        self.closed = True
+
+    def close_without_output(self) -> None:
         self.closed = True
 
     def _begin(self, name: str) -> MavlinkFuture[object]:

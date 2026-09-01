@@ -724,6 +724,7 @@ def test_postcommit_backend_failure_commands_direct_land_once(monkeypatch):
                 reason="vehicle left LAND",
             )
         )
+        manager._landing_expected_modes = frozenset({LAND_MODE})
 
         vehicle.state = guided_state(
             13.0,

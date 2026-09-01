@@ -89,6 +89,9 @@ class CycleState(Enum):
 
 _AIRBORNE_AUTHORITY_STATES = frozenset(
     {
+        CycleState.SET_GUIDED,
+        CycleState.ARM,
+        CycleState.TAKEOFF,
         CycleState.WAIT_TAKEOFF_STABLE,
         CycleState.RESET_ONBOARD_MISSION,
         CycleState.START_AUTO,
@@ -434,7 +437,7 @@ class FlightCycleManager(Node):
 
     def tick(self, now: float) -> None:
         """Advance at most one acknowledged transaction or lifecycle action."""
-        self._vehicle.poll(now)
+        self._vehicle.receive_telemetry(now)
         if self._closed:
             return
         if self._state is CycleState.DOCKED:
@@ -445,6 +448,7 @@ class FlightCycleManager(Node):
             return
         if self._handle_airborne_authority(now):
             return
+        self._vehicle.service_pending(now)
         if self._advance_pending(now):
             return
         if self._advance_deferred_command(now):
@@ -550,7 +554,10 @@ class FlightCycleManager(Node):
             return
         self._closed = True
         self._timer.cancel()
-        self._vehicle.close()
+        if self._state in {CycleState.PILOT_OVERRIDE, CycleState.LINK_LOSS}:
+            self._vehicle.close_without_output()
+        else:
+            self._vehicle.close()
         self.destroy_node()
 
     def _timer_callback(self) -> None:
@@ -998,11 +1005,7 @@ class FlightCycleManager(Node):
             )
             return
         self._landing_controller = backend
-        self._landing_expected_modes = (
-            frozenset({GUIDED_MODE, LAND_MODE})
-            if self._landing_backend == "precise_landing"
-            else frozenset({GUIDED_MODE})
-        )
+        self._landing_expected_modes = frozenset({GUIDED_MODE})
         self._transition(
             CycleState.LANDING_BACKEND,
             f"{self._landing_backend} landing backend started after shared search acquisition",
@@ -1046,10 +1049,7 @@ class FlightCycleManager(Node):
             self._stream_latest_landing_target_once(now)
         if decision.request_land:
             try:
-                expected_modes = {LAND_MODE}
-                if self._vehicle.state.mode is not None:
-                    expected_modes.add(self._vehicle.state.mode)
-                self._landing_expected_modes = frozenset(expected_modes)
+                self._landing_expected_modes = frozenset({GUIDED_MODE})
                 self._begin_operation(
                     "native_land",
                     self._vehicle.land_async(now),
@@ -1580,15 +1580,17 @@ class FlightCycleManager(Node):
                 "heartbeat became stale while airborne; manager is now passive",
             )
             return True
+        unexpected_mode_reason = self._unexpected_mode_reason(now)
+        if unexpected_mode_reason is not None:
+            self._enter_passive_state(
+                CycleState.PILOT_OVERRIDE, unexpected_mode_reason
+            )
+            return True
         mission_integrity_reason = self._mission_integrity_reason(now)
         if mission_integrity_reason is not None:
             self._request_mission_integrity_fallback(now, mission_integrity_reason)
             return True
-        unexpected_mode_reason = self._unexpected_mode_reason(now)
-        if unexpected_mode_reason is None:
-            return False
-        self._enter_passive_state(CycleState.PILOT_OVERRIDE, unexpected_mode_reason)
-        return True
+        return False
 
     def _unexpected_mode_reason(self, now: float) -> Optional[str]:
         state = self._vehicle.state
@@ -1733,9 +1735,13 @@ class FlightCycleManager(Node):
         )
 
     def _expected_modes(self) -> frozenset[int]:
-        if self._state is CycleState.WAIT_TAKEOFF_STABLE:
-            return frozenset({GUIDED_MODE})
-        if self._state is CycleState.RESET_ONBOARD_MISSION:
+        if self._state in {
+            CycleState.SET_GUIDED,
+            CycleState.ARM,
+            CycleState.TAKEOFF,
+            CycleState.WAIT_TAKEOFF_STABLE,
+            CycleState.RESET_ONBOARD_MISSION,
+        }:
             return frozenset({GUIDED_MODE})
         if self._state is CycleState.START_AUTO:
             return (
@@ -1754,11 +1760,7 @@ class FlightCycleManager(Node):
         if self._state in {CycleState.GUIDED_TAKEOVER, CycleState.SEARCH_DOCK}:
             return frozenset({GUIDED_MODE})
         if self._state is CycleState.LANDING_BACKEND:
-            if self._landing_expected_modes:
-                return self._landing_expected_modes
-            if self._landing_backend == "precise_landing":
-                return frozenset({GUIDED_MODE, LAND_MODE})
-            return frozenset({GUIDED_MODE})
+            return self._landing_expected_modes or frozenset({GUIDED_MODE})
         if self._state is CycleState.RETURN_TO_FC:
             return (
                 frozenset({GUIDED_MODE})
@@ -1815,13 +1817,18 @@ class FlightCycleManager(Node):
         return None
 
     def _request_mission_integrity_fallback(self, now: float, reason: str) -> None:
+        expected_modes = self._expected_modes()
+        self._contract = None
         self._validated_mission_total = None
         self._validated_mission_id = None
         self._reset_active_guidance()
-        expected_modes = {AUTO_RTL_MODE, LAND_MODE}
-        if self._vehicle.state.mode is not None:
-            expected_modes.add(self._vehicle.state.mode)
-        self._fc_fallback_expected_modes = frozenset(expected_modes)
+        self._cancel_active_operation()
+        self._deferred_command = None
+        self._deferred_command_reason = ""
+        self._fc_fallback_expected_modes = self._fallback_transition_modes(
+            expected_modes,
+            LAND_MODE,
+        )
         self._transition(
             CycleState.FC_FALLBACK_LAND,
             f"{reason}; requesting RTL and ceding landing to the flight controller",
@@ -1836,6 +1843,7 @@ class FlightCycleManager(Node):
 
     def _enter_passive_state(self, state: CycleState, reason: str) -> None:
         self._reset_active_guidance()
+        self._cancel_active_operation()
         self._fc_fallback_expected_modes = frozenset()
         self._deferred_command = None
         self._deferred_command_reason = ""
@@ -1854,6 +1862,18 @@ class FlightCycleManager(Node):
         self._last_streamed_dock_pose_generation = -1
         self._pending_pid_disarm_request_id = None
         self._pending_pid_disarm_timeout_notified = False
+
+    def _cancel_active_operation(self) -> None:
+        self._pending = None
+        self._vehicle.cancel_pending_operation()
+
+    @staticmethod
+    def _fallback_transition_modes(
+        expected_modes: frozenset[int], *additional_modes: int
+    ) -> frozenset[int]:
+        modes = set(expected_modes)
+        modes.update(additional_modes)
+        return frozenset(modes)
 
     def _begin_priority_command(
         self,
@@ -1892,10 +1912,7 @@ class FlightCycleManager(Node):
         return "already active" in str(error).lower()
 
     def _command_direct_land(self, reason: str) -> None:
-        expected_modes = {LAND_MODE}
-        if self._vehicle.state.mode is not None:
-            expected_modes.add(self._vehicle.state.mode)
-        self._fc_fallback_expected_modes = frozenset(expected_modes)
+        self._fc_fallback_expected_modes = self._expected_modes()
         self._transition(CycleState.FC_FALLBACK_LAND, reason)
         now = time.monotonic()
         self._begin_priority_command(
