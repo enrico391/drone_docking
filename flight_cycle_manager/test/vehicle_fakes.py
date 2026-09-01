@@ -265,72 +265,83 @@ class FakeVehicle:
         self, now: float
     ) -> MavlinkFuture[MissionDownloadResult]:
         del now
+        future = self._begin("mission_download")
         self.download_calls += 1
-        return self._begin("mission_download")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def get_parameters_async(
         self, names: Sequence[str], now: float
     ) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("parameters")
         self.parameter_calls.append(tuple(names))
-        return self._begin("parameters")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def prearm_async(self, now: float) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("prearm")
         self.prearm_calls += 1
-        return self._begin("prearm")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def set_mode_async(
         self, mode: int, now: float
     ) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("set_mode")
         self.set_mode_calls.append(mode)
-        return self._begin("set_mode")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def arm_async(
         self, arm: bool, now: float
     ) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("arm")
         self.arm_calls.append(arm)
-        return self._begin("arm")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def takeoff_async(
         self, altitude_m: float, now: float
     ) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("takeoff")
         self.takeoff_calls.append(altitude_m)
-        return self._begin("takeoff")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def set_mission_current_async(
         self, sequence: int, *, reset: bool, now: float
     ) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("set_mission_current")
         self.set_mission_current_calls.append((sequence, reset))
-        return self._begin("set_mission_current")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def start_mission_async(
         self, now: float
     ) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("start_mission")
         self.start_mission_calls += 1
-        return self._begin("start_mission")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def request_dock_async(
         self, now: float
     ) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("request_dock")
         self.request_dock_calls += 1
-        return self._begin("request_dock")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def land_async(self, now: float) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("land")
         self.land_calls += 1
-        return self._begin("land")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def rtl_async(self, now: float) -> MavlinkFuture[VehicleCommandResult]:
         del now
+        future = self._begin("rtl")
         self.rtl_calls += 1
-        return self._begin("rtl")  # type: ignore[return-value]
+        return future  # type: ignore[return-value]
 
     def send_velocity(
         self,

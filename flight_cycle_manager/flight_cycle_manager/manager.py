@@ -87,6 +87,23 @@ class CycleState(Enum):
     FAILED_DISARMED = auto()
 
 
+_AIRBORNE_AUTHORITY_STATES = frozenset(
+    {
+        CycleState.WAIT_TAKEOFF_STABLE,
+        CycleState.RESET_ONBOARD_MISSION,
+        CycleState.START_AUTO,
+        CycleState.AUTO_MISSION,
+        CycleState.WAIT_FOR_HANDOFF,
+        CycleState.GUIDED_TAKEOVER,
+        CycleState.SEARCH_DOCK,
+        CycleState.LANDING_BACKEND,
+        CycleState.RETURN_TO_FC,
+        CycleState.FC_FALLBACK_LAND,
+        CycleState.WAIT_LANDED,
+    }
+)
+
+
 @dataclass
 class _PendingOperation:
     """One correlated MAVLink transaction owned by the timer state machine."""
@@ -200,10 +217,16 @@ class FlightCycleManager(Node):
         self._mission_confirmation_expected_seq: Optional[int] = None
         self._auto_heartbeat_baseline: Optional[float] = None
         self._mission_current_baseline: Optional[float] = None
+        self._validated_mission_total: Optional[int] = None
+        self._validated_mission_id: Optional[int] = None
         self._dock_request_queued = False
         self._dock_request_acknowledged = False
         self._search_controller: Optional[Any] = None
         self._landing_controller: Optional[Any] = None
+        self._landing_expected_modes: frozenset[int] = frozenset()
+        self._fc_fallback_expected_modes: frozenset[int] = frozenset()
+        self._deferred_command: Optional[str] = None
+        self._deferred_command_reason = ""
         self._dock_pose: Optional[PoseStamped] = None
         self._dock_pose_received_at = 0.0
         self._dock_pose_generation = 0
@@ -351,13 +374,21 @@ class FlightCycleManager(Node):
         del request
         if self._vehicle.state.armed is True:
             return self._reject_start(response, "cycle request rejected: vehicle is armed")
+        if self._pending is not None and self._pending.future.done():
+            self._pending = None
         if self._state not in {
             CycleState.READY,
             CycleState.INVALID_ONBOARD_MISSION,
+            CycleState.DOCKED,
         }:
             return self._reject_start(
                 response,
                 f"cycle request rejected: lifecycle is {self._state.name}",
+            )
+        if self._pending is not None:
+            return self._reject_start(
+                response,
+                "cycle request rejected: previous MAVLink operation is still pending",
             )
         self._begin_validation(time.monotonic(), start_requested=True)
         response.success = True
@@ -406,7 +437,17 @@ class FlightCycleManager(Node):
         self._vehicle.poll(now)
         if self._closed:
             return
+        if self._state is CycleState.DOCKED:
+            self._advance_passive_pending()
+            return
+        if self._state in {CycleState.PILOT_OVERRIDE, CycleState.LINK_LOSS}:
+            self._advance_passive_state(now)
+            return
+        if self._handle_airborne_authority(now):
+            return
         if self._advance_pending(now):
+            return
+        if self._advance_deferred_command(now):
             return
         if self._state is CycleState.PREARM:
             if not self._fresh_ground_telemetry(now):
@@ -493,6 +534,15 @@ class FlightCycleManager(Node):
         if self._state is CycleState.RETURN_TO_FC:
             self._advance_return_to_fc(now)
             return
+        if self._state is CycleState.FC_FALLBACK_LAND:
+            self._advance_fc_fallback_land(now)
+            return
+        if self._state is CycleState.WAIT_LANDED:
+            self._advance_wait_landed(now)
+            return
+        if self._state is CycleState.WAIT_DISARM:
+            self._advance_wait_disarm(now)
+            return
 
     def close(self) -> None:
         """Cancel timer, release MAVLink once, then destroy the ROS node."""
@@ -514,10 +564,16 @@ class FlightCycleManager(Node):
         self._mission_confirmation_expected_seq = None
         self._auto_heartbeat_baseline = None
         self._mission_current_baseline = None
+        self._validated_mission_total = None
+        self._validated_mission_id = None
         self._dock_request_queued = False
         self._dock_request_acknowledged = False
         self._search_controller = None
         self._landing_controller = None
+        self._landing_expected_modes = frozenset()
+        self._fc_fallback_expected_modes = frozenset()
+        self._deferred_command = None
+        self._deferred_command_reason = ""
         self._last_streamed_dock_pose_generation = -1
         self._pending_pid_disarm_request_id = None
         self._pending_pid_disarm_timeout_notified = False
@@ -651,7 +707,17 @@ class FlightCycleManager(Node):
                 "fallback mission start acknowledged; awaiting AUTO NAV_LAND confirmation",
                 force=True,
             )
+        elif name == "mission_integrity_rtl":
+            self._fc_fallback_expected_modes = frozenset(
+                {AUTO_RTL_MODE, LAND_MODE}
+            )
+            self._transition(
+                CycleState.FC_FALLBACK_LAND,
+                "mission authority invalidated; RTL acknowledged; waiting for flight controller landing",
+                force=True,
+            )
         elif name == "direct_land":
+            self._fc_fallback_expected_modes = frozenset({LAND_MODE})
             self._transition(
                 CycleState.FC_FALLBACK_LAND,
                 "direct LAND command acknowledged; waiting for flight controller landing",
@@ -662,6 +728,9 @@ class FlightCycleManager(Node):
         reason = f"{name.replace('_', ' ')} failed: {message or 'rejected'}"
         if name in {"mission_download", "native_landing_parameters"}:
             self._invalid_mission(reason, now)
+            return
+        if name == "mission_integrity_rtl":
+            self._command_direct_land(reason)
             return
         if name in {"fallback_select", "fallback_start"}:
             self._command_direct_land(reason)
@@ -694,6 +763,15 @@ class FlightCycleManager(Node):
             )
             return
         self._contract = contract
+        self._validated_mission_total = len(result.items)
+        opaque_id = getattr(result, "opaque_id", None)
+        self._validated_mission_id = (
+            opaque_id
+            if isinstance(opaque_id, int)
+            and not isinstance(opaque_id, bool)
+            and opaque_id != 0
+            else None
+        )
         if self._landing_backend == "precise_landing":
             self._transition(
                 CycleState.VALIDATING_MISSION,
@@ -804,10 +882,6 @@ class FlightCycleManager(Node):
             )
 
     def _advance_wait_for_handoff(self, now: float) -> None:
-        unexpected_mode_reason = self._unexpected_approach_mode_reason(now)
-        if unexpected_mode_reason is not None:
-            self._transition(CycleState.PILOT_OVERRIDE, unexpected_mode_reason)
-            return
         if self._dock_request_queued and not self._dock_request_acknowledged:
             self._begin_operation(
                 "request_dock",
@@ -924,6 +998,11 @@ class FlightCycleManager(Node):
             )
             return
         self._landing_controller = backend
+        self._landing_expected_modes = (
+            frozenset({GUIDED_MODE, LAND_MODE})
+            if self._landing_backend == "precise_landing"
+            else frozenset({GUIDED_MODE})
+        )
         self._transition(
             CycleState.LANDING_BACKEND,
             f"{self._landing_backend} landing backend started after shared search acquisition",
@@ -967,12 +1046,17 @@ class FlightCycleManager(Node):
             self._stream_latest_landing_target_once(now)
         if decision.request_land:
             try:
+                expected_modes = {LAND_MODE}
+                if self._vehicle.state.mode is not None:
+                    expected_modes.add(self._vehicle.state.mode)
+                self._landing_expected_modes = frozenset(expected_modes)
                 self._begin_operation(
                     "native_land",
                     self._vehicle.land_async(now),
                     now,
                 )
             except Exception:
+                self._landing_expected_modes = frozenset({GUIDED_MODE})
                 self._notify_native_land_result(False, now)
             return
         if decision.request_disarm:
@@ -1000,6 +1084,7 @@ class FlightCycleManager(Node):
             )
             return
         if self._mission_progress_confirmed(now):
+            self._fc_fallback_expected_modes = frozenset({AUTO_MODE})
             self._transition(
                 CycleState.FC_FALLBACK_LAND,
                 "AUTO NAV_LAND fallback confirmed; waiting for flight controller landing",
@@ -1088,6 +1173,9 @@ class FlightCycleManager(Node):
         except Exception:
             success = False
         self._notify_native_land_result(success, now)
+        self._landing_expected_modes = (
+            frozenset({LAND_MODE}) if success else frozenset({GUIDED_MODE})
+        )
         return success
 
     def _notify_native_land_result(self, success: bool, now: float) -> None:
@@ -1101,10 +1189,7 @@ class FlightCycleManager(Node):
         if contract is None:
             self._command_direct_land(reason)
             return
-        self._mission_confirmation_deadline = None
-        self._mission_confirmation_expected_seq = None
-        self._auto_heartbeat_baseline = None
-        self._mission_current_baseline = None
+        self._reset_active_guidance()
         self._transition(
             CycleState.RETURN_TO_FC,
             f"{reason}; returning control to validated NAV_LAND",
@@ -1481,15 +1566,50 @@ class FlightCycleManager(Node):
             and self._fresh_position(now, state)
         )
 
-    def _unexpected_approach_mode_reason(self, now: float) -> Optional[str]:
+    def _handle_airborne_authority(self, now: float) -> bool:
+        if self._state not in _AIRBORNE_AUTHORITY_STATES:
+            return False
+        if self._vehicle.state.flying is not True:
+            return False
+        if not self._vehicle.ready(
+            now,
+            heartbeat_timeout_s=self._positive_parameter("mavlink_heartbeat_timeout_s"),
+        ):
+            self._enter_passive_state(
+                CycleState.LINK_LOSS,
+                "heartbeat became stale while airborne; manager is now passive",
+            )
+            return True
+        mission_integrity_reason = self._mission_integrity_reason(now)
+        if mission_integrity_reason is not None:
+            self._request_mission_integrity_fallback(now, mission_integrity_reason)
+            return True
+        unexpected_mode_reason = self._unexpected_mode_reason(now)
+        if unexpected_mode_reason is None:
+            return False
+        self._enter_passive_state(CycleState.PILOT_OVERRIDE, unexpected_mode_reason)
+        return True
+
+    def _unexpected_mode_reason(self, now: float) -> Optional[str]:
         state = self._vehicle.state
-        if not self._fresh_airborne_telemetry(now):
+        if self._state not in _AIRBORNE_AUTHORITY_STATES:
             return None
-        if state.mode in {AUTO_MODE, AUTO_RTL_MODE}:
+        allowed_modes = self._expected_modes()
+        if not allowed_modes:
             return None
+        pending_mode = self._pending_mode()
+        if pending_mode is not None and state.mode == pending_mode:
+            return None
+        if state.mode in allowed_modes:
+            return None
+        if self._state is CycleState.WAIT_FOR_HANDOFF:
+            return (
+                "unexpected approach mode "
+                f"{self._flight_mode_name(state.mode)}; pilot now owns approach authority"
+            )
         return (
-            "unexpected approach mode "
-            f"{self._flight_mode_name(state.mode)}; pilot now owns approach authority"
+            "unexpected flight mode "
+            f"{self._flight_mode_name(state.mode)}; pilot now owns flight authority"
         )
 
     def _flight_mode_name(self, mode: Optional[int]) -> str:
@@ -1530,17 +1650,260 @@ class FlightCycleManager(Node):
             and self._fresh_landed_state(now, state)
         )
 
-    def _command_direct_land(self, reason: str) -> None:
-        self._transition(CycleState.FC_FALLBACK_LAND, reason)
-        now = time.monotonic()
+    def _advance_passive_pending(self) -> bool:
+        pending = self._pending
+        if pending is None or not pending.future.done():
+            return False
+        self._pending = None
+        self._pending_pid_disarm_request_id = None
+        self._pending_pid_disarm_timeout_notified = False
+        return True
+
+    def _advance_passive_state(self, now: float) -> None:
+        self._advance_passive_pending()
+        self._advance_touchdown_completion(now)
+
+    def _advance_deferred_command(self, now: float) -> bool:
+        if self._deferred_command is None:
+            return False
+        if self._pending is not None:
+            return True
+        command = self._deferred_command
+        reason = self._deferred_command_reason
+        self._deferred_command = None
+        self._deferred_command_reason = ""
+        if command == "direct_land":
+            return self._begin_priority_command(
+                "direct_land",
+                reason,
+                now,
+                start_command=lambda: self._vehicle.land_async(now),
+            )
+        if command == "mission_integrity_rtl":
+            return self._begin_priority_command(
+                "mission_integrity_rtl",
+                reason,
+                now,
+                start_command=lambda: self._vehicle.rtl_async(now),
+            )
+        raise RuntimeError(f"unsupported deferred command: {command}")
+
+    def _advance_fc_fallback_land(self, now: float) -> None:
+        if self._advance_touchdown_completion(now):
+            return
+        state = self._vehicle.state
+        if (
+            self._vehicle.ready(
+                now,
+                heartbeat_timeout_s=self._positive_parameter("mavlink_heartbeat_timeout_s"),
+            )
+            and state.flying is True
+            and state.mode == LAND_MODE
+        ):
+            self._transition(
+                CycleState.WAIT_LANDED,
+                "LAND mode confirmed; waiting for touchdown",
+            )
+
+    def _advance_wait_landed(self, now: float) -> None:
+        self._advance_touchdown_completion(now)
+
+    def _advance_wait_disarm(self, now: float) -> None:
+        self._advance_touchdown_completion(now)
+
+    def _advance_touchdown_completion(self, now: float) -> bool:
+        state = self._vehicle.state
+        if not self._fresh_on_ground(now, state):
+            return False
+        if state.armed is False:
+            self._start_requested = False
+            self._transition(CycleState.DOCKED, "landing complete and vehicle disarmed")
+            return True
+        self._transition(CycleState.WAIT_DISARM, "touchdown confirmed; waiting for disarm")
+        return True
+
+    def _fresh_on_ground(self, now: float, state: VehicleState) -> bool:
+        return (
+            self._vehicle.ready(
+                now,
+                heartbeat_timeout_s=self._positive_parameter("mavlink_heartbeat_timeout_s"),
+            )
+            and state.flying is False
+            and self._fresh_landed_state(now, state)
+        )
+
+    def _expected_modes(self) -> frozenset[int]:
+        if self._state is CycleState.WAIT_TAKEOFF_STABLE:
+            return frozenset({GUIDED_MODE})
+        if self._state is CycleState.RESET_ONBOARD_MISSION:
+            return frozenset({GUIDED_MODE})
+        if self._state is CycleState.START_AUTO:
+            return (
+                frozenset({GUIDED_MODE})
+                if self._mission_confirmation_deadline is None
+                else frozenset({GUIDED_MODE, AUTO_MODE})
+            )
+        if self._state is CycleState.AUTO_MISSION:
+            return (
+                frozenset({AUTO_MODE, AUTO_RTL_MODE})
+                if self._landing_route_is_active()
+                else frozenset({AUTO_MODE})
+            )
+        if self._state is CycleState.WAIT_FOR_HANDOFF:
+            return frozenset({AUTO_MODE, AUTO_RTL_MODE})
+        if self._state in {CycleState.GUIDED_TAKEOVER, CycleState.SEARCH_DOCK}:
+            return frozenset({GUIDED_MODE})
+        if self._state is CycleState.LANDING_BACKEND:
+            if self._landing_expected_modes:
+                return self._landing_expected_modes
+            if self._landing_backend == "precise_landing":
+                return frozenset({GUIDED_MODE, LAND_MODE})
+            return frozenset({GUIDED_MODE})
+        if self._state is CycleState.RETURN_TO_FC:
+            return (
+                frozenset({GUIDED_MODE})
+                if self._mission_confirmation_deadline is None
+                else frozenset({GUIDED_MODE, AUTO_MODE})
+            )
+        if self._state is CycleState.FC_FALLBACK_LAND:
+            return self._fc_fallback_expected_modes
+        if self._state is CycleState.WAIT_LANDED:
+            return frozenset({LAND_MODE})
+        return frozenset()
+
+    def _pending_mode(self) -> Optional[int]:
+        pending = self._pending
+        if pending is None:
+            return None
+        if pending.name in {"set_guided", "handoff_guided"}:
+            return GUIDED_MODE
+        if pending.name in {"start_mission", "fallback_start"}:
+            return AUTO_MODE
+        if pending.name == "mission_integrity_rtl":
+            return AUTO_RTL_MODE
+        if pending.name in {"direct_land", "native_land"}:
+            return LAND_MODE
+        return None
+
+    def _mission_integrity_reason(self, now: float) -> Optional[str]:
+        state = self._vehicle.state
+        if (
+            self._validated_mission_total is None
+            or state.mission_current_at <= 0.0
+            or now - state.mission_current_at
+            > self._positive_parameter("mavlink_heartbeat_timeout_s")
+        ):
+            return None
+        if (
+            state.mission_total is not None
+            and state.mission_total != self._validated_mission_total
+        ):
+            return (
+                "validated mission item count changed from "
+                f"{self._validated_mission_total} to {state.mission_total}"
+            )
+        if (
+            self._validated_mission_id is not None
+            and state.mission_id is not None
+            and state.mission_id != 0
+            and state.mission_id != self._validated_mission_id
+        ):
+            return (
+                "validated mission ID changed from "
+                f"{self._validated_mission_id} to {state.mission_id}"
+            )
+        return None
+
+    def _request_mission_integrity_fallback(self, now: float, reason: str) -> None:
+        self._validated_mission_total = None
+        self._validated_mission_id = None
+        self._reset_active_guidance()
+        expected_modes = {AUTO_RTL_MODE, LAND_MODE}
+        if self._vehicle.state.mode is not None:
+            expected_modes.add(self._vehicle.state.mode)
+        self._fc_fallback_expected_modes = frozenset(expected_modes)
+        self._transition(
+            CycleState.FC_FALLBACK_LAND,
+            f"{reason}; requesting RTL and ceding landing to the flight controller",
+            force=True,
+        )
+        self._begin_priority_command(
+            "mission_integrity_rtl",
+            reason,
+            now,
+            start_command=lambda: self._vehicle.rtl_async(now),
+        )
+
+    def _enter_passive_state(self, state: CycleState, reason: str) -> None:
+        self._reset_active_guidance()
+        self._fc_fallback_expected_modes = frozenset()
+        self._deferred_command = None
+        self._deferred_command_reason = ""
+        self._transition(state, reason, force=True)
+
+    def _reset_active_guidance(self) -> None:
+        self._dock_request_queued = False
+        self._dock_request_acknowledged = False
+        self._search_controller = None
+        self._landing_controller = None
+        self._landing_expected_modes = frozenset()
+        self._mission_confirmation_deadline = None
+        self._mission_confirmation_expected_seq = None
+        self._auto_heartbeat_baseline = None
+        self._mission_current_baseline = None
+        self._last_streamed_dock_pose_generation = -1
+        self._pending_pid_disarm_request_id = None
+        self._pending_pid_disarm_timeout_notified = False
+
+    def _begin_priority_command(
+        self,
+        name: str,
+        reason: str,
+        now: float,
+        *,
+        start_command,
+    ) -> bool:
+        if self._pending is not None:
+            self._defer_priority_command(name, reason)
+            return True
         try:
-            self._begin_operation("direct_land", self._vehicle.land_async(now), now)
+            self._begin_operation(name, start_command(), now)
         except Exception as error:
+            if self._transport_operation_is_still_active(error):
+                self._defer_priority_command(name, reason)
+                return True
+            if name == "mission_integrity_rtl":
+                self._command_direct_land(f"{reason}; RTL could not start: {error}")
+                return True
             self._transition(
                 CycleState.FC_FALLBACK_LAND,
                 f"{reason}; direct LAND could not start: {error}",
                 force=True,
             )
+            return True
+        return True
+
+    def _defer_priority_command(self, name: str, reason: str) -> None:
+        self._deferred_command = name
+        self._deferred_command_reason = reason
+
+    @staticmethod
+    def _transport_operation_is_still_active(error: Exception) -> bool:
+        return "already active" in str(error).lower()
+
+    def _command_direct_land(self, reason: str) -> None:
+        expected_modes = {LAND_MODE}
+        if self._vehicle.state.mode is not None:
+            expected_modes.add(self._vehicle.state.mode)
+        self._fc_fallback_expected_modes = frozenset(expected_modes)
+        self._transition(CycleState.FC_FALLBACK_LAND, reason)
+        now = time.monotonic()
+        self._begin_priority_command(
+            "direct_land",
+            reason,
+            now,
+            start_command=lambda: self._vehicle.land_async(now),
+        )
 
     def _invalid_mission(self, reason: str, now: float) -> None:
         self._contract = None
