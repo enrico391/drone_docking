@@ -19,4 +19,14 @@ def test_package_metadata_uses_only_new_name():
 def test_package_declares_runtime_dependencies():
     package = ET.parse(ROOT / "package.xml").getroot()
     dependencies = {node.text for node in package.findall("exec_depend")}
-    assert {"rclpy", "geometry_msgs", "std_msgs", "std_srvs"} <= dependencies
+    assert {
+        "ament_index_python",
+        "dock_apriltag_localizer",
+        "geometry_msgs",
+        "launch",
+        "launch_ros",
+        "python3-yaml",
+        "rclpy",
+        "std_msgs",
+        "std_srvs",
+    } <= dependencies
