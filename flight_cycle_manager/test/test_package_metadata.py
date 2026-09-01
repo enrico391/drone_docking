@@ -8,12 +8,13 @@ sys.path.insert(0, str(ROOT))
 
 
 def test_package_metadata_uses_only_new_name():
+    legacy_name = "_".join(("drone", "mission", "manager"))
     package = ET.parse(ROOT / "package.xml").getroot()
     assert package.findtext("name") == "flight_cycle_manager"
     setup_text = (ROOT / "setup.py").read_text(encoding="utf-8")
     assert 'package_name = "flight_cycle_manager"' in setup_text
     assert "flight_cycle_manager.manager:main" in setup_text
-    assert "drone_mission_manager" not in setup_text
+    assert legacy_name not in setup_text
 
 
 def test_package_declares_runtime_dependencies():

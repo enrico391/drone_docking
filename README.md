@@ -10,8 +10,8 @@ the packages below it.
 - `drone_description`: Gazebo models, worlds, resource-path hooks, and the
   simulation launch file.
 - `dock_apriltag_localizer`: Existing camera-to-dock localization package.
-- `drone_mission_manager`: Typed, non-blocking missions with a shared staged
-  AprilTag precision-landing controller.
+- `flight_cycle_manager`: Typed, non-blocking takeoff-to-dock cycles that
+  validate a stored ArduPilot mission before each explicit start request.
 - `drone_bringup`: Top-level launch package for the project-owned stack.
 
 The grouping directory is deliberate. Upstream packages remain directly under
@@ -73,8 +73,9 @@ the bridge exposes `/camera/image_raw` and `/camera/camera_info` with
    to the airframe or sensor model.
 5. **Dock perception:** add dock tag visuals and validate detector output and
    camera-to-dock transforms independently of flight control.
-6. **Mission control:** enable the non-blocking mission manager only after the
-   preceding simulation and perception gates pass.
+6. **Mission control:** enable `flight_cycle_manager` only after the preceding
+   simulation and perception gates pass and ArduPilot already stores a valid
+   docking mission.
 
 ## Build
 
@@ -83,8 +84,8 @@ From the workspace root:
 ```bash
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install \
-  --packages-select drone_description dock_apriltag_localizer \
-  drone_mission_manager drone_bringup
+  --packages-select flight_cycle_manager dock_apriltag_localizer \
+  drone_description drone_bringup
 source install/setup.bash
 ```
 
@@ -119,6 +120,15 @@ backend for the complete articulated X500 model.
 SITL state is stored in the instance-specific directory (for instance `0/`)
 instead of reusing the workspace-root EEPROM. This keeps X500 parameters
 separate from existing Iris runs.
+
+When the simulator is up, start the canonical flight-cycle workflow from a
+second sourced terminal. ArduPilot must already hold a valid docking mission:
+
+```bash
+ros2 launch flight_cycle_manager flight_cycle.launch.py \
+  landing_backend:=pid simulation_mode:=true
+ros2 service call /flight_cycle_manager/start_cycle std_srvs/srv/Trigger "{}"
+```
 
 ## Downward camera
 

@@ -175,8 +175,8 @@ ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py \
 ```
 
 Exactly one process should own the selected serial or TCP endpoint. Do not run
-this bridge at the same time as `drone_mission_manager`, which maintains its
-own direct pymavlink connection.
+this bridge at the same time as `flight_cycle_manager`, which maintains its own
+direct pymavlink connection unless its launch starts the localizer itself.
 
 ## Pose convention
 

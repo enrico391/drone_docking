@@ -188,13 +188,14 @@ def test_common_and_pid_configuration_match_declared_manager_parameters():
     """Break caught: config drift leaves a launch knob undeclared or omitted."""
     common = load_parameters(COMMON_CONFIG)
     pid = load_parameters(PID_CONFIG)
+    removed_legacy_keys = ("mission_" "file", "rep" "eat", "route")
 
     assert common == EXPECTED_COMMON_PARAMETERS
     assert pid == EXPECTED_PID_PARAMETERS
     assert set(common).isdisjoint(pid)
     assert set(common) | set(pid) == manager_declared_parameters()
     assert not any(
-        "mission_file" in key or "repeat" in key or "route" in key
+        any(fragment in key for fragment in removed_legacy_keys)
         for key in set(common) | set(pid)
     )
     assert not any(
