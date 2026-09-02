@@ -34,6 +34,7 @@ EXPECTED_COMMON_PARAMETERS = {
     "takeoff_altitude_tolerance_m": 0.25,
     "takeoff_vertical_speed_tolerance_m_s": 0.15,
     "takeoff_stable_time_s": 1.0,
+    "takeoff_airborne_timeout_s": 5.0,
     "mission_handoff_min_loiter_s": 5.0,
     "mission_landing_location_tolerance_m": 2.0,
     "mission_download_timeout_s": 10.0,

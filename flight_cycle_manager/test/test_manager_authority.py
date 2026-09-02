@@ -522,6 +522,29 @@ def test_stale_heartbeat_enters_passive_link_loss_without_recovery_commands():
         manager.close()
 
 
+def test_ardupilot_mission_current_total_last_sequence_does_not_trigger_integrity_fallback():
+    """Break caught: ArduPilot reports MISSION_CURRENT.total as the last mission sequence."""
+    vehicle = FakeVehicle(ground_state(0.0))
+    manager = make_manager(vehicle)
+    try:
+        finish_startup_validation(manager, vehicle)
+        manager._state = CycleState.WAIT_TAKEOFF_STABLE
+        vehicle.state = mission_progress_state(
+            20.0,
+            mode=GUIDED_MODE,
+            seq=0,
+            total=MISSION_TOTAL - 1,
+        )
+
+        manager.tick(now=20.0)
+
+        assert manager.state is CycleState.WAIT_TAKEOFF_STABLE
+        assert vehicle.rtl_calls == 0
+        assert vehicle.land_calls == 0
+    finally:
+        manager.close()
+
+
 @pytest.mark.parametrize(
     ("field_name", "changed_total", "validated_id", "changed_id"),
     [

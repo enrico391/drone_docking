@@ -4,10 +4,11 @@ flight_cycle_manager:
     auto_start: false
     landing_backend: pid
     update_rate_hz: 20.0
-    takeoff_altitude_m: 4.0
+    takeoff_altitude_m: 5.0
     takeoff_altitude_tolerance_m: 0.25
     takeoff_vertical_speed_tolerance_m_s: 0.15
     takeoff_stable_time_s: 1.0
+    takeoff_airborne_timeout_s: 5.0
     mission_handoff_min_loiter_s: 5.0
     mission_landing_location_tolerance_m: 2.0
     mission_download_timeout_s: 10.0
@@ -16,7 +17,7 @@ flight_cycle_manager:
     mavlink_heartbeat_timeout_s: 2.5
     pose_timeout_s: 1.0
     landed_state_timeout_s: 1.0
-    dock_pose_timeout_s: 0.5
+    dock_pose_timeout_s: 1.0
     dock_pose_topic: /dock/pose
     dock_mode_topic: /dock/mode
     search_radius_m: 1.0

@@ -19,6 +19,10 @@ mission must contain exactly:
 arming. If the mission is invalid, the manager stays passive and publishes the
 failure reason.
 
+The checked-in QGC WPL fixture under `test/data/` and the upload helper in
+`test/sitl_mission_fixture.py` are test-only. Runtime `flight_cycle_manager`
+never uploads or mutates missions on the vehicle.
+
 ## Services and topics
 
 - `/flight_cycle_manager/start_cycle`: validate the stored mission and begin one
@@ -60,7 +64,8 @@ Start the simulator without a competing MAVLink owner:
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch drone_bringup docking_sim.launch.py \
-  use_dds_agent:=false use_mavproxy:=false
+  initial_point:=dock use_dds_agent:=false \
+  use_mavproxy:=false use_gz_sim_gui:=false
 ```
 
 In another sourced terminal:
@@ -72,11 +77,21 @@ ros2 launch flight_cycle_manager flight_cycle.launch.py \
   landing_backend:=pid simulation_mode:=true
 ```
 
+For the native backend:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch flight_cycle_manager flight_cycle.launch.py \
+  landing_backend:=precise_landing simulation_mode:=true
+```
+
 `auto_start:=true` is accepted only with `simulation_mode:=true`. Production
 and hardware runs should keep `auto_start:=false` and use the explicit service:
 
 ```bash
 ros2 service call /flight_cycle_manager/start_cycle std_srvs/srv/Trigger "{}"
+ros2 service call /flight_cycle_manager/request_dock std_srvs/srv/Trigger "{}"
 ```
 
 Start the localizer by default. Disable it only when another launch already
@@ -94,4 +109,52 @@ ros2 topic echo /flight_cycle_manager/state
 ros2 topic echo /flight_cycle_manager/reason
 ros2 topic echo /dock/mode
 ros2 topic echo /dock/pose
+```
+
+To force a manual mode takeover during SITL, use a separate MAVLink client on
+the observer port (`5762`). Replace `mode_id` with `3` (`AUTO`), `4`
+(`GUIDED`), or `9` (`LAND`):
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+python3 - <<'PY'
+from flight_cycle_manager.pymavlink_vehicle import load_mavutil
+
+mavutil = load_mavutil()
+mode_id = 9
+connection = mavutil.mavlink_connection(
+    "tcp:127.0.0.1:5762",
+    source_system=253,
+    source_component=1,
+    dialect="ardupilotmega",
+    autoreconnect=False,
+    robust_parsing=True,
+)
+heartbeat = connection.wait_heartbeat(timeout=20)
+connection.mav.command_long_send(
+    heartbeat.get_srcSystem(),
+    heartbeat.get_srcComponent(),
+    mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+    0,
+    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+    mode_id,
+    0,
+    0,
+    0,
+    0,
+    0,
+)
+connection.close()
+PY
+```
+
+The SITL acceptance suite owns the preflight mission upload and startup
+sequencing automatically:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+python3 -m pytest flight_cycle_manager/test/test_sitl_flight_cycle.py \
+  -m sitl -v --tb=short
 ```

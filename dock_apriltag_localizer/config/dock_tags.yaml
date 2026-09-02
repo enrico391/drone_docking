@@ -15,7 +15,7 @@ detector:
 
 switching:
   # Central tag must be closer than this before it can take control.
-  central_switch_distance_m: 1.80
+  central_switch_distance_m: 1.90
   # Require consecutive valid detections to avoid a sudden one-frame switch.
   central_stable_frames: 4
   # Keep central mode through a few missed frames, then fall back to outer tags.

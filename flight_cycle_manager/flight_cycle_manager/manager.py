@@ -216,6 +216,7 @@ class FlightCycleManager(Node):
         self._contract: Optional[MissionContract] = None
         self._start_requested = False
         self._stable_takeoff_since: Optional[float] = None
+        self._takeoff_airborne_deadline: Optional[float] = None
         self._mission_confirmation_deadline: Optional[float] = None
         self._mission_confirmation_expected_seq: Optional[int] = None
         self._auto_heartbeat_baseline: Optional[float] = None
@@ -290,6 +291,7 @@ class FlightCycleManager(Node):
             "takeoff_altitude_tolerance_m": 0.25,
             "takeoff_vertical_speed_tolerance_m_s": 0.15,
             "takeoff_stable_time_s": 1.0,
+            "takeoff_airborne_timeout_s": 5.0,
             "mission_handoff_min_loiter_s": 5.0,
             "mission_landing_location_tolerance_m": 2.0,
             "mission_download_timeout_s": 10.0,
@@ -340,6 +342,7 @@ class FlightCycleManager(Node):
             "pid_central_descent_speed_m_s": 0.12,
             "pid_recovery_speed_m_s": 0.2,
             "pid_max_yaw_rate_rad_s": 0.35,
+            "pid_target_loss_grace_s" : 0.5,
             "pid_x_kp": 1.0,
             "pid_x_ki": 0.0,
             "pid_x_kd": 0.0,
@@ -482,11 +485,11 @@ class FlightCycleManager(Node):
                 return
             self._begin_operation("arm", self._vehicle.arm_async(True, now), now)
             return
-        if self._state is CycleState.TAKEOFF:
+        if self._state is CycleState.TAKEOFF: # TODO : Remove -1 in order to handle correctly the difference between global and local position
             self._begin_operation(
                 "takeoff",
                 self._vehicle.takeoff_async(
-                    self._positive_parameter("takeoff_altitude_m"), now
+                    self._positive_parameter("takeoff_altitude_m") - 1, now
                 ),
                 now,
             )
@@ -514,6 +517,19 @@ class FlightCycleManager(Node):
                 )
                 return
             if now > self._mission_confirmation_deadline:
+                state = self._vehicle.state
+                self.get_logger().error(
+                    "Mission confirmation timeout: "
+                    f"mode={state.mode}, "
+                    f"seq={state.mission_seq}, "
+                    f"expected_seq={self._mission_confirmation_expected_seq}, "
+                    f"mission_state={state.mission_state}, "
+                    f"mission_mode={state.mission_mode}, "
+                    f"heartbeat_at={state.heartbeat_at}, "
+                    f"heartbeat_baseline={self._auto_heartbeat_baseline}, "
+                    f"mission_current_at={state.mission_current_at}, "
+                    f"mission_current_baseline={self._mission_current_baseline}"
+                )
                 self._command_direct_land("mission confirmation timed out")
             return
         if self._state is CycleState.AUTO_MISSION:
@@ -567,6 +583,7 @@ class FlightCycleManager(Node):
         self._start_requested = start_requested
         self._contract = None
         self._stable_takeoff_since = None
+        self._takeoff_airborne_deadline = None
         self._mission_confirmation_deadline = None
         self._mission_confirmation_expected_seq = None
         self._auto_heartbeat_baseline = None
@@ -663,6 +680,9 @@ class FlightCycleManager(Node):
             self._transition(CycleState.TAKEOFF, "arm command acknowledged")
         elif name == "takeoff":
             self._stable_takeoff_since = None
+            self._takeoff_airborne_deadline = now + self._positive_parameter(
+                "takeoff_airborne_timeout_s"
+            )
             self._transition(
                 CycleState.WAIT_TAKEOFF_STABLE,
                 "vertical takeoff acknowledged; waiting for stable altitude",
@@ -770,7 +790,11 @@ class FlightCycleManager(Node):
             )
             return
         self._contract = contract
-        self._validated_mission_total = len(result.items)
+        # ArduPilot's streamed MISSION_CURRENT.total follows the mission's last
+        # sequence index, not the raw MISSION_COUNT item count.
+        self._validated_mission_total = (
+            max(int(item.seq) for item in result.items) if result.items else None
+        )
         opaque_id = getattr(result, "opaque_id", None)
         self._validated_mission_id = (
             opaque_id
@@ -839,16 +863,23 @@ class FlightCycleManager(Node):
     def _update_takeoff_stability(self, now: float) -> None:
         state = self._vehicle.state
         if not self._fresh_airborne_telemetry(now):
+            if (
+                self._takeoff_airborne_deadline is not None
+                and now <= self._takeoff_airborne_deadline
+            ):
+                return
             self._command_direct_land(
                 "takeoff telemetry became stale before stable altitude confirmation"
             )
             return
+        self._takeoff_airborne_deadline = None
         assert state.position_enu_m is not None
         assert state.velocity_enu_m_s is not None
         altitude_error = abs(
             state.position_enu_m[2]
             - self._positive_parameter("takeoff_altitude_m")
-        )
+        ) # TODO : PERSISTENT ERROR OF 1 meter
+        self.get_logger().info(f"Altitude error { state.position_enu_m[2] - self._positive_parameter('takeoff_altitude_m') }")
         vertical_speed = abs(state.velocity_enu_m_s[2])
         is_stable = (
             altitude_error <= self._positive_parameter(
@@ -1024,6 +1055,10 @@ class FlightCycleManager(Node):
                 now=now,
                 dock=self._dock_observation(now),
                 vehicle=self._vehicle_observation(),
+            )
+
+            self.get_logger().info(
+                f"Landing backend update: {decision}"
             )
         except Exception as error:
             self._begin_fc_handback(
@@ -1238,10 +1273,11 @@ class FlightCycleManager(Node):
             )
             and state.mode == AUTO_MODE
             and state.heartbeat_at > heartbeat_baseline
-            and state.mission_seq == expected_seq
+            and state.mission_seq is not None
+            and state.mission_seq >= expected_seq # TODO: change here to not have 
             and state.mission_current_at > mission_current_baseline
             and mission_state_matches
-            and mission_mode_matches
+            # and mission_mode_matches
             and 0.0 <= now - state.mission_current_at
             <= self._positive_parameter("mavlink_heartbeat_timeout_s")
         )
@@ -1289,6 +1325,7 @@ class FlightCycleManager(Node):
             )
         except ValueError:
             return None
+
         return DockObservation(
             forward_m=forward_m,
             left_m=-right_m,
@@ -1497,6 +1534,9 @@ class FlightCycleManager(Node):
                 self._positive_parameter("search_max_vertical_speed_m_s"),
             ),
             yaw_pid=self._build_pid_axis_config("pid_yaw", max_yaw),
+            target_loss_grace_s=self._positive_parameter(
+                "pid_target_loss_grace_s"
+            ),
         )
 
     def _build_pid_axis_config(self, prefix: str, output_limit: float) -> PIDConfig:

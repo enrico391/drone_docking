@@ -561,6 +561,30 @@ def test_takeoff_stability_requires_low_vertical_speed_for_full_dwell():
         manager.close()
 
 
+def test_takeoff_waits_briefly_for_airborne_telemetry_before_fallback():
+    """Break caught: the takeoff ACK can fail immediately before airborne telemetry appears."""
+    vehicle = FakeVehicle(ground_state(0.0))
+    manager = make_manager(vehicle, takeoff_airborne_timeout_s=0.5)
+    try:
+        finish_startup_validation(manager, vehicle)
+        request_valid_start(manager, vehicle)
+        drive_to_takeoff_pending(manager, vehicle)
+        vehicle.finish_command()
+        vehicle.state = ground_state(1.7, mode=GUIDED_MODE, armed=True)
+        manager.tick(now=1.7)
+        manager.tick(now=1.8)
+
+        assert manager.state is CycleState.WAIT_TAKEOFF_STABLE
+        assert vehicle.land_calls == 0
+
+        manager.tick(now=2.3)
+
+        assert manager.state is CycleState.FC_FALLBACK_LAND
+        assert vehicle.land_calls == 1
+    finally:
+        manager.close()
+
+
 def test_reset_then_mission_start_wait_for_each_ack_in_order():
     """Break caught: mission start skips reset or overlaps its acknowledgement."""
     vehicle = FakeVehicle(ground_state(0.0))

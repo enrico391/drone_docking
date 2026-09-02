@@ -78,6 +78,7 @@ class PidLandingConfig:
     y_pid: PIDConfig
     z_pid: PIDConfig
     yaw_pid: PIDConfig
+    target_loss_grace_s: float
 
     def __post_init__(self) -> None:
         numeric_fields = (
@@ -103,6 +104,7 @@ class PidLandingConfig:
             "central_descent_speed_m_s",
             "recovery_speed_m_s",
             "max_yaw_rate_rad_s",
+            "target_loss_grace_s"
         )
         for field in numeric_fields:
             if not math.isfinite(getattr(self, field)):
@@ -168,6 +170,7 @@ class PidLandingController:
         self._next_disarm_request_id = 0
         self._active_disarm_request_id: Optional[int] = None
         self._failure_reason = ""
+        self._target_loss_started_at: Optional[float] = None
 
     def start_after_acquisition(self, now: float) -> None:
         """Begin at PID alignment after the shared search acquired the dock."""
@@ -271,9 +274,10 @@ class PidLandingController:
     def _update_pid_align(
         self, now: float, dock: Optional[DockObservation],
     ) -> PidLandingDecision:
-        if not self._usable_dock(dock):
+        usable, reason = self._usable_dock(dock)
+        if not usable:
             return self._fail(
-                now, "dock target lost before central acquisition"
+                now, f"dock target lost before central acquisition (pid alignment) due: {reason}"
             )
 
         tolerance = self._tolerance_for(dock.distance_m)
@@ -292,10 +296,31 @@ class PidLandingController:
     def _update_descend_outer(
         self, now: float, dock: Optional[DockObservation],
     ) -> PidLandingDecision:
-        if not self._usable_dock(dock):
+        usable, reason = self._usable_dock(dock)
+        if not usable:
+
+            if self._target_loss_started_at is None:
+                self._target_loss_started_at = now
+
+            # Brief waiting, used to wait the switching between outer and central mode
+            if (
+                now - self._target_loss_started_at
+                < self._config.target_loss_grace_s
+            ):
+                self._descent_last_updated_at = None
+                self._alignment_stable_started_at = None
+
+                return PidLandingDecision(
+                    self._state,
+                    _zero_body_command(),
+                )
+
             return self._fail(
-                now, "dock target lost before central acquisition"
+                now, f"dock target lost before central acquisition (descend outer) due: {reason}"
             )
+        
+        # Target recovered
+        self._target_loss_started_at = None
 
         central_is_stable = self._central_is_stable(now, dock)
         if dock.distance_m <= self._config.central_transition_distance_m:
@@ -341,12 +366,14 @@ class PidLandingController:
         dock: Optional[DockObservation],
         vehicle: VehicleObservation,
     ) -> PidLandingDecision:
-        if not self._usable_dock(dock) or dock.mode is not DockTargetMode.CENTRAL:
+        usable, reason = self._usable_dock(dock)
+        if not usable or dock.mode is not DockTargetMode.CENTRAL:
             if self._central_loss_started_at is None:
                 self._central_loss_started_at = now
             self._descent_last_updated_at = None
             self._alignment_stable_started_at = None
             self._reset_pids()
+            # CHECK IF the central is lost for more than the treshold
             if (
                 now - self._central_loss_started_at
                 >= self._config.central_loss_grace_s
@@ -574,7 +601,8 @@ class PidLandingController:
     def _central_is_stable(
         self, now: float, dock: Optional[DockObservation],
     ) -> bool:
-        if not self._usable_dock(dock) or dock.mode is not DockTargetMode.CENTRAL:
+        usable, reason = self._usable_dock(dock)
+        if not usable or dock.mode is not DockTargetMode.CENTRAL:
             self._central_stable_started_at = None
             return False
         if self._central_stable_started_at is None:
@@ -647,23 +675,35 @@ class PidLandingController:
         )
 
     @staticmethod
-    def _usable_dock(dock: Optional[DockObservation]) -> bool:
-        return (
-            dock is not None
-            and isinstance(dock.mode, DockTargetMode)
-            and dock.distance_m > 0.0
-            and all(
-                math.isfinite(value)
-                for value in (
-                    dock.forward_m,
-                    dock.left_m,
-                    dock.distance_m,
-                    dock.yaw_error_rad,
-                    dock.source_stamp_s,
-                    dock.received_at,
-                )
-            )
-        )
+    def _usable_dock(
+        dock: Optional[DockObservation],
+    ) -> tuple[bool, str]:
+        if dock is None:
+            return False, "dock observation is None"
+
+        if not isinstance(dock.mode, DockTargetMode):
+            return False, f"invalid dock mode: {dock.mode!r}"
+
+        if not math.isfinite(dock.distance_m):
+            return False, f"invalid distance_m: {dock.distance_m}"
+
+        if dock.distance_m <= 0.0:
+            return False, f"distance_m must be > 0, got {dock.distance_m}"
+
+        values = {
+            "forward_m": dock.forward_m,
+            "left_m": dock.left_m,
+            "distance_m": dock.distance_m,
+            "yaw_error_rad": dock.yaw_error_rad,
+            "source_stamp_s": dock.source_stamp_s,
+            "received_at": dock.received_at,
+        }
+
+        for name, value in values.items():
+            if not math.isfinite(value):
+                return False, f"{name} is not finite: {value}"
+
+        return True, "dock observation is usable"
 
     @staticmethod
     def _finite_position(
