@@ -1066,6 +1066,8 @@ class FlightCycleManager(Node):
                 f"landing backend update failed: {error}",
             )
             return
+
+        # 1) execute velocity requested by backend
         if decision.velocity is not None:
             command = decision.velocity
             self._vehicle.send_velocity(
@@ -1076,12 +1078,18 @@ class FlightCycleManager(Node):
                 now=now,
                 yaw_rate_rad_s=command.yaw_rate_rad_s,
             )
+
+        # 2) execute yaw correction if backend precise landing requested it 
         if decision.yaw_correction_rad is not None:
             self._vehicle.send_condition_yaw(
                 yaw_error_rad=decision.yaw_correction_rad
             )
+        
+        # 3) stream landing target
         if decision.stream_landing_target:
             self._stream_latest_landing_target_once(now)
+
+        # 4) if precise-landing backend request to land
         if decision.request_land:
             try:
                 self._landing_expected_modes = frozenset({GUIDED_MODE})
@@ -1094,8 +1102,23 @@ class FlightCycleManager(Node):
                 self._landing_expected_modes = frozenset({GUIDED_MODE})
                 self._notify_native_land_result(False, now)
             return
+        
+        # 5) If PID request to disarm
         if decision.request_disarm:
             self._begin_pid_disarm(decision.disarm_request_id, now)
+            return
+            
+        # 6) if backend mark complete 
+        if decision.outcome is LandingBackendOutcome.COMPLETE:
+            self._landing_controller = None
+
+            self._transition(
+                CycleState.DOCKED,
+                "landing backend completed; vehicle landed and disarmed",
+            )
+            return
+
+        # 7) Handling for failures
         if decision.outcome is LandingBackendOutcome.FAIL_BEFORE_COMMIT:
             self._begin_fc_handback(
                 now,

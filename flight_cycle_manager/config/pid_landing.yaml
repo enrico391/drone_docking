@@ -7,7 +7,7 @@ flight_cycle_manager:
     pid_recovery_climb_m: 0.3
     pid_recovery_altitude_tolerance_m: 0.05
     pid_max_recovery_attempts: 3
-    pid_touchdown_commit_height_m: 0.35
+    pid_touchdown_commit_height_m: 0.30
     pid_touchdown_speed_m_s: 0.05
     pid_touchdown_timeout_s: 15.0
     pid_landed_state_timeout_s: 1.0
@@ -23,7 +23,7 @@ flight_cycle_manager:
     pid_central_descent_speed_m_s: 0.12
     pid_recovery_speed_m_s: 0.2
     pid_max_yaw_rate_rad_s: 0.35
-    pid_target_loss_grace_s : 0.5
+    pid_target_loss_grace_s : 0.7
     pid_x_kp: 0.60
     pid_x_ki: 0.0
     pid_x_kd: 0.0
