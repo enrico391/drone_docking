@@ -23,6 +23,7 @@ class PidLandingState(Enum):
     ACQUIRE_CENTRAL = auto()
     DESCEND_CENTRAL = auto()
     RECOVERY_CLIMB = auto()
+    REACQUIRE_DOCK = auto()
     TOUCHDOWN_APPROACH = auto()
     DISARM = auto()
     COMPLETE = auto()
@@ -163,6 +164,7 @@ class PidLandingController:
         self._descent_last_updated_at: Optional[float] = None
         self._recovery_attempts = 0
         self._recovery_target_altitude_m: Optional[float] = None
+        self._dock_stable_started_at: Optional[float] = None
         self._landed_stable_started_at: Optional[float] = None
         self._disarm_request_in_flight = False
         self._disarm_acknowledged = False
@@ -186,6 +188,8 @@ class PidLandingController:
         self._descent_last_updated_at = None
         self._recovery_attempts = 0
         self._recovery_target_altitude_m = None
+        self._dock_stable_started_at = None
+        self._target_loss_started_at = None
         self._landed_stable_started_at = None
         self._disarm_request_in_flight = False
         self._disarm_acknowledged = False
@@ -217,15 +221,17 @@ class PidLandingController:
             return self._fail(now, "vehicle disarmed while mission was active")
 
         if self._state is PidLandingState.PID_ALIGN:
-            return self._update_pid_align(now, dock)
+            return self._update_pid_align(now, dock, vehicle)
         if self._state is PidLandingState.DESCEND_OUTER:
-            return self._update_descend_outer(now, dock)
+            return self._update_descend_outer(now, dock, vehicle)
         if self._state is PidLandingState.ACQUIRE_CENTRAL:
             return self._update_acquire_central(now, dock, vehicle)
         if self._state is PidLandingState.DESCEND_CENTRAL:
             return self._update_descend_central(now, dock, vehicle)
         if self._state is PidLandingState.RECOVERY_CLIMB:
             return self._update_recovery_climb(now, vehicle)
+        if self._state is PidLandingState.REACQUIRE_DOCK:
+            return self._update_reacquire_dock(now, dock, vehicle)
         if self._state is PidLandingState.TOUCHDOWN_APPROACH:
             return self._update_touchdown_approach(now, vehicle)
         if self._state is PidLandingState.DISARM:
@@ -273,12 +279,12 @@ class PidLandingController:
 
     def _update_pid_align(
         self, now: float, dock: Optional[DockObservation],
+        vehicle: VehicleObservation,
     ) -> PidLandingDecision:
         usable, reason = self._usable_dock(dock)
         if not usable:
-            return self._fail(
-                now, f"dock target lost before central acquisition (pid alignment) due: {reason}"
-            )
+            return self._handle_target_loss(now, vehicle, reason)
+        self._target_loss_started_at = None
 
         tolerance = self._tolerance_for(dock.distance_m)
         command = self._visual_command(now, dock, z_enabled=False)
@@ -295,31 +301,11 @@ class PidLandingController:
 
     def _update_descend_outer(
         self, now: float, dock: Optional[DockObservation],
+        vehicle: VehicleObservation,
     ) -> PidLandingDecision:
         usable, reason = self._usable_dock(dock)
         if not usable:
-
-            if self._target_loss_started_at is None:
-                self._target_loss_started_at = now
-
-            # Brief waiting, used to wait the switching between outer and central mode
-            if (
-                now - self._target_loss_started_at
-                < self._config.target_loss_grace_s
-            ):
-                self._descent_last_updated_at = None
-                self._alignment_stable_started_at = None
-
-                return PidLandingDecision(
-                    self._state,
-                    _zero_body_command(),
-                )
-
-            return self._fail(
-                now, f"dock target lost before central acquisition (descend outer) due: {reason}"
-            )
-        
-        # Target recovered
+            return self._handle_target_loss(now, vehicle, reason)
         self._target_loss_started_at = None
 
         central_is_stable = self._central_is_stable(now, dock)
@@ -346,6 +332,42 @@ class PidLandingController:
                 vertical_limit_m_s=self._config.outer_descent_speed_m_s,
             ),
         )
+
+    def _handle_target_loss(
+        self, now: float, vehicle: VehicleObservation, reason: str,
+    ) -> PidLandingDecision:
+        if self._target_loss_started_at is None:
+            self._target_loss_started_at = now
+        # An observation gap breaks all visual dwell and PID history. Rebase
+        # descent on the recovered measurement rather than an old setpoint.
+        self._alignment_stable_started_at = None
+        self._central_stable_started_at = None
+        self._distance_setpoint_m = None
+        self._descent_last_updated_at = None
+        self._reset_pids()
+        if now - self._target_loss_started_at >= self._config.target_loss_grace_s:
+            return self._enter_recovery(now, vehicle)
+        return PidLandingDecision(
+            self._state, _zero_body_command(),
+            reason=f"holding for dock target: {reason}",
+        )
+
+    def _update_reacquire_dock(
+        self, now: float, dock: Optional[DockObservation],
+        vehicle: VehicleObservation,
+    ) -> PidLandingDecision:
+        usable, _ = self._usable_dock(dock)
+        if not usable:
+            self._dock_stable_started_at = None
+        else:
+            if self._dock_stable_started_at is None:
+                self._dock_stable_started_at = now
+            if now - self._dock_stable_started_at >= self._config.tag_stable_time_s:
+                self._enter_state(PidLandingState.PID_ALIGN, now)
+                return PidLandingDecision(self._state, _zero_body_command())
+        if now - self._state_started_at >= self._config.central_acquire_timeout_s:
+            return self._enter_recovery(now, vehicle)
+        return PidLandingDecision(self._state, _zero_body_command())
 
     def _update_acquire_central(
         self,
@@ -497,8 +519,16 @@ class PidLandingController:
             self._recovery_target_altitude_m
             - self._config.recovery_altitude_tolerance_m
         ):
-            self._enter_state(PidLandingState.ACQUIRE_CENTRAL, now)
+            self._enter_state(PidLandingState.REACQUIRE_DOCK, now)
             return PidLandingDecision(self._state, _zero_body_command())
+        # Allow the nominal climb duration plus one acquisition window for
+        # settling, but never keep commanding a climb indefinitely.
+        climb_timeout_s = (
+            self._config.recovery_climb_m / self._config.recovery_speed_m_s
+            + self._config.central_acquire_timeout_s
+        )
+        if now - self._state_started_at >= climb_timeout_s:
+            return self._fail(now, "recovery climb timed out")
         return PidLandingDecision(
             self._state,
             VelocityCommand(
@@ -515,7 +545,7 @@ class PidLandingController:
         self._recovery_attempts += 1
         if self._recovery_attempts > self._config.max_recovery_attempts:
             return self._fail(
-                now, "central tag recovery attempts exhausted"
+                now, "dock target recovery attempts exhausted",
             )
         _, _, altitude_m = self._finite_position(vehicle)
         self._enter_state(PidLandingState.RECOVERY_CLIMB, now)
@@ -647,6 +677,8 @@ class PidLandingController:
         self._distance_setpoint_m = None
         self._descent_last_updated_at = None
         self._central_loss_started_at = None
+        self._target_loss_started_at = None
+        self._dock_stable_started_at = None
         self._landed_stable_started_at = None
         self._disarm_request_in_flight = False
         self._disarm_acknowledged = False

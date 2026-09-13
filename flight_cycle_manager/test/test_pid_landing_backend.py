@@ -35,6 +35,7 @@ def pid_config(**overrides):
         central_transition_distance_m=1.0,
         central_acquire_timeout_s=3.0,
         central_loss_grace_s=0.3,
+        target_loss_grace_s=0.7,
         recovery_climb_m=0.3,
         recovery_altitude_tolerance_m=0.05,
         max_recovery_attempts=3,
@@ -203,18 +204,131 @@ def test_removed_initial_search_is_absent_from_the_pid_public_path():
     )
 
 
-def test_loss_during_initial_alignment_fails_without_pid_owned_search():
+@pytest.mark.parametrize("outer_descent", [False, True])
+@pytest.mark.parametrize("lost_dock", [
+    None,
+    dock_observation(distance_m=0.0),
+    dock_observation(forward_m=float("nan")),
+    dock_observation(mode="LOST"),
+])
+def test_target_loss_holds_then_retries_before_handback(outer_descent, lost_dock):
     backend = start_backend()
+    if outer_descent:
+        enter_outer_descent(backend)
 
     decision = backend.update(
-        now=0.1,
-        dock=None,
+        now=2.0,
+        dock=lost_dock,
         vehicle=vehicle_observation(),
     )
 
-    assert decision.substate == "FAILED"
-    assert decision.outcome is LandingBackendOutcome.FAIL_BEFORE_COMMIT
-    assert decision.reason == "dock target lost before central acquisition"
+    assert decision.substate == ("DESCEND_OUTER" if outer_descent else "PID_ALIGN")
+    assert decision.outcome is LandingBackendOutcome.RUNNING
+    assert decision.velocity == VelocityCommand(VelocityFrame.BODY_FLU, 0.0, 0.0, 0.0)
+    recovery = backend.update(now=2.71, dock=lost_dock, vehicle=vehicle_observation())
+    assert recovery.substate == "RECOVERY_CLIMB"
+    assert recovery.outcome is LandingBackendOutcome.RUNNING
+
+
+def enter_outer_descent(backend):
+    backend.update(now=0.1, dock=dock_observation(0.1), vehicle=vehicle_observation())
+    decision = backend.update(
+        now=1.11, dock=dock_observation(1.11), vehicle=vehicle_observation(),
+    )
+    assert decision.substate == "DESCEND_OUTER"
+
+
+def test_brief_alignment_loss_restarts_stability_dwell():
+    backend = start_backend()
+    backend.update(now=0.1, dock=dock_observation(0.1), vehicle=vehicle_observation())
+    backend.update(now=0.9, dock=None, vehicle=vehicle_observation())
+    resumed = backend.update(now=1.2, dock=dock_observation(1.2), vehicle=vehicle_observation())
+    assert resumed.substate == "PID_ALIGN"
+    aligned = backend.update(now=2.21, dock=dock_observation(2.21), vehicle=vehicle_observation())
+    assert aligned.substate == "DESCEND_OUTER"
+
+
+def test_outer_recovery_reacquires_stable_outer_tag_and_realigns():
+    backend = start_backend()
+    enter_outer_descent(backend)
+    backend.update(now=2.0, dock=None, vehicle=vehicle_observation())
+    backend.update(now=2.71, dock=None, vehicle=vehicle_observation())
+    climbing = backend.update(now=2.8, dock=None, vehicle=vehicle_observation())
+    assert climbing.velocity.velocity_z == 0.2
+    waiting = backend.update(now=4.3, dock=None, vehicle=vehicle_observation(altitude_m=4.3))
+    assert waiting.substate == "REACQUIRE_DOCK"
+    backend.update(now=4.4, dock=dock_observation(4.4), vehicle=vehicle_observation())
+    backend.update(now=4.8, dock=None, vehicle=vehicle_observation())
+    unstable = backend.update(now=4.9, dock=dock_observation(4.9), vehicle=vehicle_observation())
+    assert unstable.substate == "REACQUIRE_DOCK"
+    recovered = backend.update(now=5.41, dock=dock_observation(5.41), vehicle=vehicle_observation())
+    assert recovered.substate == "PID_ALIGN"
+    assert recovered.velocity.velocity_z == 0.0
+    backend.update(now=5.5, dock=dock_observation(5.5), vehicle=vehicle_observation())
+    aligned = backend.update(now=6.51, dock=dock_observation(6.51), vehicle=vehicle_observation())
+    assert aligned.substate == "DESCEND_OUTER"
+
+
+def test_dock_recovery_exhausts_shared_attempt_budget():
+    backend = start_backend(pid_config(max_recovery_attempts=2))
+    backend.update(now=0.1, dock=None, vehicle=vehicle_observation())
+    backend.update(now=0.81, dock=None, vehicle=vehicle_observation())
+    backend.update(now=2.0, dock=None, vehicle=vehicle_observation(altitude_m=4.3))
+    retry = backend.update(now=5.01, dock=None, vehicle=vehicle_observation(altitude_m=4.3))
+    assert retry.substate == "RECOVERY_CLIMB"
+    backend.update(now=6.5, dock=None, vehicle=vehicle_observation(altitude_m=4.6))
+    failed = backend.update(now=9.51, dock=None, vehicle=vehicle_observation(altitude_m=4.6))
+    assert failed.outcome is LandingBackendOutcome.FAIL_BEFORE_COMMIT
+    assert "recovery attempts exhausted" in failed.reason
+    assert failed.velocity.velocity_z == 0.0
+
+
+def test_successful_dock_reacquisition_does_not_reset_central_retry_budget():
+    backend = start_backend(pid_config(max_recovery_attempts=1))
+    backend.update(now=0.1, dock=None, vehicle=vehicle_observation())
+    backend.update(now=0.81, dock=None, vehicle=vehicle_observation())
+    backend.update(now=2.0, dock=None, vehicle=vehicle_observation(altitude_m=4.3))
+    for now in [2.1, 2.61, 2.7, 3.71]:
+        recovered = backend.update(
+            now=now, dock=central_observation(now), vehicle=vehicle_observation(),
+        )
+    assert recovered.substate == "DESCEND_CENTRAL"
+    backend.update(now=3.8, dock=None, vehicle=vehicle_observation())
+    failed = backend.update(now=4.11, dock=None, vehicle=vehicle_observation())
+    assert failed.outcome is LandingBackendOutcome.FAIL_BEFORE_COMMIT
+    assert "recovery attempts exhausted" in failed.reason
+
+
+def test_backend_restart_clears_an_unfinished_target_loss_grace_period():
+    backend = start_backend()
+    backend.update(now=0.1, dock=None, vehicle=vehicle_observation())
+    backend.start(now=10.0, dock=dock_observation(10.0), vehicle=vehicle_observation())
+    holding = backend.update(now=10.1, dock=None, vehicle=vehicle_observation())
+    assert holding.substate == "PID_ALIGN"
+    recovery = backend.update(now=10.81, dock=None, vehicle=vehicle_observation())
+    assert recovery.substate == "RECOVERY_CLIMB"
+
+
+def test_recovery_climb_times_out_if_altitude_does_not_increase():
+    backend = start_backend()
+    backend.update(now=0.1, dock=None, vehicle=vehicle_observation())
+    backend.update(now=0.81, dock=None, vehicle=vehicle_observation())
+    failed = backend.update(now=5.32, dock=None, vehicle=vehicle_observation())
+    assert failed.outcome is LandingBackendOutcome.FAIL_BEFORE_COMMIT
+    assert "climb timed out" in failed.reason
+    assert failed.velocity.velocity_z == 0.0
+
+
+def test_brief_outer_loss_resets_descent_setpoint_and_central_dwell():
+    backend = start_backend()
+    enter_outer_descent(backend)
+    backend.update(now=1.2, dock=central_observation(1.2, distance_m=2.0), vehicle=vehicle_observation())
+    backend.update(now=1.6, dock=central_observation(1.6, distance_m=2.0), vehicle=vehicle_observation())
+    backend.update(now=1.7, dock=None, vehicle=vehicle_observation())
+    resumed = backend.update(now=2.0, dock=central_observation(2.0, distance_m=2.0), vehicle=vehicle_observation())
+    assert resumed.velocity.velocity_z == 0.0
+    low = backend.update(now=2.1, dock=central_observation(2.1), vehicle=vehicle_observation())
+    assert low.substate == "ACQUIRE_CENTRAL"
 
 
 def test_alignment_command_is_mapped_to_common_velocity():
@@ -250,9 +364,17 @@ def test_alignment_command_is_mapped_to_common_velocity():
     assert decision.request_land is False
 
 
-def test_recovery_climb_and_central_reacquisition_are_retained():
+@pytest.mark.parametrize("during_descent", [False, True])
+@pytest.mark.parametrize("reacquired_mode", [DockTargetMode.OUTER, DockTargetMode.CENTRAL])
+def test_central_failure_reacquires_any_dock_tag_then_realigns(
+    during_descent, reacquired_mode,
+):
     backend = start_backend()
-    enter_acquire_central(backend)
+    if during_descent:
+        enter_central_descent(backend)
+        backend.update(now=3.8, dock=None, vehicle=vehicle_observation())
+    else:
+        enter_acquire_central(backend)
 
     recovery = backend.update(
         now=4.12,
@@ -277,8 +399,30 @@ def test_recovery_climb_and_central_reacquisition_are_retained():
     assert climbing.velocity == VelocityCommand(
         VelocityFrame.BODY_FLU, 0.0, 0.0, 0.2
     )
-    assert reacquiring.substate == "ACQUIRE_CENTRAL"
+    assert reacquiring.substate == "REACQUIRE_DOCK"
     assert reacquiring.outcome is LandingBackendOutcome.RUNNING
+
+    for now in [4.4, 4.91]:
+        realigning = backend.update(
+            now=now,
+            dock=replace(central_observation(now), mode=reacquired_mode),
+            vehicle=vehicle_observation(altitude_m=5.3),
+        )
+    assert realigning.substate == "PID_ALIGN"
+    assert realigning.velocity.velocity_z == 0.0
+
+    for now in [5.0, 6.01]:
+        aligned = backend.update(
+            now=now,
+            dock=replace(central_observation(now), mode=reacquired_mode),
+            vehicle=vehicle_observation(altitude_m=5.3),
+        )
+    # A recovered outer tag still cannot authorize central descent.
+    assert aligned.substate == (
+        "ACQUIRE_CENTRAL" if reacquired_mode is DockTargetMode.OUTER
+        else "DESCEND_CENTRAL"
+    )
+    assert aligned.velocity.velocity_z == 0.0
 
 
 def test_precommit_failure_requests_mission_handback():
@@ -303,7 +447,7 @@ def test_precommit_failure_requests_mission_handback():
 
     assert failed.substate == "FAILED"
     assert failed.outcome is LandingBackendOutcome.FAIL_BEFORE_COMMIT
-    assert failed.reason == "central tag recovery attempts exhausted"
+    assert "recovery attempts exhausted" in failed.reason
 
 
 def test_touchdown_commitment_is_reported_as_running():

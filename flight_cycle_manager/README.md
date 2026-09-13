@@ -46,6 +46,28 @@ the next explicit `/flight_cycle_manager/start_cycle`.
 uses the checked-in `pid_landing.yaml` gains for alignment, descent, touchdown
 commit, and disarm retry behavior.
 
+During `PID_ALIGN` and `DESCEND_OUTER`, an unusable dock observation immediately
+commands zero velocity and resets visual PID history. The controller waits for
+`pid_target_loss_grace_s` (0.7 s in the supplied configuration). If the target
+remains unavailable, it climbs `pid_recovery_climb_m` (0.3 m) and enters
+`REACQUIRE_DOCK`. Any usable dock mode can be reacquired after
+`pid_tag_stable_time_s` (0.5 s) of continuous observations, then the controller
+returns to `PID_ALIGN` before descending again.
+
+The existing `pid_central_acquire_timeout_s` (3 s) bounds each acquisition
+window, including `REACQUIRE_DOCK`. All recovery paths share
+`pid_max_recovery_attempts` (3) for the entire landing attempt; reacquiring a
+tag does not replenish the budget. Every recovery, including a central-tag
+failure, follows `RECOVERY_CLIMB -> REACQUIRE_DOCK -> PID_ALIGN`. Alignment
+selects the next landing stage from the distance and detected tag mode;
+central descent and touchdown still require the central tag.
+A climb must reach its target within the nominal climb duration
+(`pid_recovery_climb_m / pid_recovery_speed_m_s`) plus the acquisition timeout
+(4.5 s with the supplied configuration). Exhausted retries or a climb timeout
+report failure before touchdown commit and use the manager's existing fallback.
+Telemetry loss and pilot takeover remain subject to the manager's authority
+checks throughout recovery.
+
 `landing_backend:=precise_landing` streams `LANDING_TARGET` updates and lets
 ArduPilot complete the descent in `LAND`. The common configuration still owns
 the dock-pose freshness limits, target warmup, yaw-correction enable flag, and

@@ -135,6 +135,7 @@ def pid_config(**overrides):
         central_transition_distance_m=1.0,
         central_acquire_timeout_s=3.0,
         central_loss_grace_s=0.3,
+        target_loss_grace_s=0.7,
         recovery_climb_m=0.3,
         recovery_altitude_tolerance_m=0.05,
         max_recovery_attempts=3,
