@@ -21,6 +21,7 @@ _AUTO_RTL_MODE = 27
 _LAND_MODE = 9
 _MESSAGE_INTERVALS_US = (
     (32, 50_000),  # LOCAL_POSITION_NED at 20 Hz
+    (33, 50_000),  # GLOBAL_POSITION_INT (altitude above home) at 20 Hz
     (30, 50_000),  # ATTITUDE at 20 Hz
     (245, 200_000),  # EXTENDED_SYS_STATE at 5 Hz
     (42, 200_000),  # MISSION_CURRENT at 5 Hz
@@ -77,6 +78,8 @@ class VehicleState:
     last_message_at: float = 0.0
     heartbeat_at: float = 0.0
     position_at: float = 0.0
+    relative_altitude_m: Optional[float] = None
+    relative_altitude_at: float = 0.0
     landed_at: float = 0.0
     mission_seq: Optional[int] = None
     mission_total: Optional[int] = None
@@ -742,6 +745,12 @@ class MavlinkVehicle:
                     -float(message.vz),
                 ),
                 position_at=max(state.position_at, now),
+            )
+        elif message_type == "GLOBAL_POSITION_INT":
+            state = replace(
+                state,
+                relative_altitude_m=float(message.relative_alt) * 0.001,
+                relative_altitude_at=max(state.relative_altitude_at, now),
             )
         elif message_type == "ATTITUDE":
             state = replace(state, heading_rad=float(message.yaw))

@@ -42,6 +42,22 @@ the next explicit `/flight_cycle_manager/start_cycle`.
 
 ## Backends and fallback
 
+`takeoff_altitude_m` is the vertical climb above the vehicle's resting position
+at the start of each cycle. The manager captures fresh local altitude and
+altitude above FC home after arming. It adds the requested climb to the
+home-relative altitude for `NAV_TAKEOFF`, and to local Z for the takeoff
+stability check. No platform-height correction or absolute global altitude is
+needed. For example, a vehicle starting at local Z = 1 m with
+`takeoff_altitude_m: 5.0` must reach local Z = 6 m. The reference is the vehicle's
+starting position, not a camera measurement of distance to the dock surface.
+
+The MAVLink adapter requests `GLOBAL_POSITION_INT` to obtain altitude above
+home; latitude, longitude, and altitude above sea level are not used for this
+calculation. Missing post-arm altitude references are bounded by
+`mavlink_operation_timeout_s` before the manager requests `LAND`. This conversion
+uses ArduPilot's standard home-relative guided takeoff; rangefinder-based
+terrain-relative takeoff requires a matching terrain reference instead.
+
 `landing_backend:=pid` keeps ArduPilot in `GUIDED` after shared dock search and
 uses the checked-in `pid_landing.yaml` gains for alignment, descent, touchdown
 commit, and disarm retry behavior.

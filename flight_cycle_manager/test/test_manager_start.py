@@ -96,6 +96,8 @@ def ground_state(
         prearm_ok=prearm_ok,
         heartbeat_at=now,
         position_at=now,
+        relative_altitude_m=0.0,
+        relative_altitude_at=now,
         landed_at=now,
     )
 
@@ -126,7 +128,7 @@ def auto_active_state(now: float, *, seq: int = 0) -> VehicleState:
     return replace(
         airborne_state(now, mode=AUTO_MODE),
         mission_seq=seq,
-        mission_total=3,
+        mission_total=2,
         mission_state=MISSION_STATE_ACTIVE,
         mission_mode=0,
         mission_current_at=now,
@@ -195,6 +197,7 @@ def drive_to_wait_takeoff(
     manager.tick(now=1.5)
     assert manager.state is CycleState.TAKEOFF
 
+    vehicle.state = ground_state(1.6, mode=GUIDED_MODE, armed=True)
     manager.tick(now=1.6)
     assert vehicle.takeoff_calls == [4.0]
     vehicle.finish_command()
@@ -219,6 +222,7 @@ def drive_to_takeoff_pending(
     vehicle.state = ground_state(1.4, mode=GUIDED_MODE, armed=True)
     vehicle.finish_command()
     manager.tick(now=1.5)
+    vehicle.state = ground_state(1.6, mode=GUIDED_MODE, armed=True)
     manager.tick(now=1.6)
     assert manager.state is CycleState.TAKEOFF
     assert vehicle.takeoff_calls == [4.0]
@@ -524,11 +528,92 @@ def test_takeoff_is_sent_once_while_its_ack_is_pending():
         vehicle.state = ground_state(1.4, mode=GUIDED_MODE, armed=True)
         vehicle.finish_command()
         manager.tick(now=1.5)
+        vehicle.state = ground_state(1.6, mode=GUIDED_MODE, armed=True)
         manager.tick(now=1.6)
         manager.tick(now=1.7)
 
         assert manager.state is CycleState.TAKEOFF
         assert vehicle.takeoff_calls == [4.0]
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("base_z, relative_alt, command_alt, target_z", [
+    (0.0, 0.0, 4.0, 4.0),
+    (1.0, 0.0, 4.0, 5.0),
+    (25.0, 2.0, 6.0, 29.0),
+    (-10.0, -2.0, 2.0, -6.0),
+])
+def test_takeoff_height_is_relative_to_starting_position(
+    base_z, relative_alt, command_alt, target_z,
+):
+    vehicle = FakeVehicle()
+    manager = make_manager(vehicle, takeoff_altitude_m=4.0)
+    try:
+        finish_startup_validation(manager, vehicle)
+        manager._operation_succeeded("arm", None, now=1.0)
+        vehicle.state = replace(
+            ground_state(1.1, mode=GUIDED_MODE, armed=True),
+            position_enu_m=(0.0, 0.0, base_z),
+            relative_altitude_m=relative_alt,
+        )
+        manager.tick(1.1)
+        assert vehicle.takeoff_calls == [command_alt]
+        vehicle.finish_command()
+        # The takeoff ACK can arrive after the aircraft has already risen.
+        vehicle.state = airborne_state(1.2, z=base_z + 0.5)
+        manager.tick(1.2)
+        for now in [2.0, 3.1]:
+            vehicle.state = airborne_state(now, z=target_z - 1.0)
+            manager.tick(now)
+        assert manager.state is CycleState.WAIT_TAKEOFF_STABLE
+        for now in [4.0, 5.1]:
+            vehicle.state = airborne_state(now, z=target_z)
+            manager.tick(now)
+        assert manager.state is CycleState.RESET_ONBOARD_MISSION
+        assert vehicle.set_mission_current_calls == [(0, True)]
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("invalid_reference", [
+    {"relative_altitude_m": None},
+    {"relative_altitude_m": float("nan")},
+    {"relative_altitude_at": 0.5},
+    {"position_at": 0.5},
+    {"position_enu_m": (0.0, 0.0, float("nan"))},
+])
+def test_takeoff_waits_for_fresh_post_arm_altitude_references(invalid_reference):
+    vehicle = FakeVehicle()
+    manager = make_manager(vehicle)
+    try:
+        finish_startup_validation(manager, vehicle)
+        manager._operation_succeeded("arm", None, now=1.0)
+        vehicle.state = replace(
+            ground_state(1.1, mode=GUIDED_MODE, armed=True), **invalid_reference,
+        )
+        manager.tick(1.1)
+        assert vehicle.takeoff_calls == []
+        vehicle.state = ground_state(1.2, mode=GUIDED_MODE, armed=True)
+        manager.tick(1.2)
+        assert vehicle.takeoff_calls == [4.0]
+    finally:
+        manager.close()
+
+
+def test_missing_takeoff_reference_times_out_to_land():
+    vehicle = FakeVehicle()
+    manager = make_manager(vehicle, mavlink_operation_timeout_s=1.0)
+    try:
+        finish_startup_validation(manager, vehicle)
+        manager._operation_succeeded("arm", None, now=1.0)
+        vehicle.state = replace(
+            ground_state(2.1, mode=GUIDED_MODE, armed=True),
+            relative_altitude_m=None,
+        )
+        manager.tick(2.1)
+        assert vehicle.takeoff_calls == []
+        assert vehicle.land_calls == 1
     finally:
         manager.close()
 

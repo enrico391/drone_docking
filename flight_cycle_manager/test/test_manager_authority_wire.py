@@ -139,6 +139,33 @@ def command_ids(connection: FakeConnection):
     return [args[2] for args in connection.mav.calls_for("command_long_send")]
 
 
+def test_takeoff_wire_altitude_adds_requested_climb_to_height_above_home():
+    connection = FakeConnection()
+    manager, vehicle = make_real_manager(connection, takeoff_altitude_m=4.0)
+    try:
+        manager._operation_succeeded("arm", None, now=1.0)
+        push_heartbeat(connection, mode=GUIDED_MODE, armed=True)
+        connection.incoming.extend([
+            FakeMessage(
+                "LOCAL_POSITION_NED", x=0.0, y=0.0, z=-1.0,
+                vx=0.0, vy=0.0, vz=0.0,
+            ),
+            FakeMessage("GLOBAL_POSITION_INT", relative_alt=1250, alt=512345),
+            FakeMessage(
+                "EXTENDED_SYS_STATE", landed_state=MAVLINK.MAV_LANDED_STATE_ON_GROUND,
+            ),
+        ])
+        manager.tick(1.1)
+        takeoffs = [
+            args for args in connection.mav.calls_for("command_long_send")
+            if args[2] == MAVLINK.MAV_CMD_NAV_TAKEOFF
+        ]
+        assert len(takeoffs) == 1
+        assert takeoffs[0][10] == 5.25
+    finally:
+        manager.close()
+
+
 def test_pilot_override_detection_tick_and_later_passive_ticks_do_not_retry_handoff():
     """Break caught: receive+retry happens before the passive override latch."""
     connection = FakeConnection()

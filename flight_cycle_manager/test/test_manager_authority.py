@@ -136,6 +136,7 @@ def configure_wait_takeoff_stable(monkeypatch):
     now = 20.0
     manager._state = CycleState.WAIT_TAKEOFF_STABLE
     manager._stable_takeoff_since = None
+    manager._takeoff_target_local_z_m = 4.0
     vehicle.state = mission_progress_state(now, mode=GUIDED_MODE, seq=0)
     return manager, vehicle, now
 
@@ -529,6 +530,7 @@ def test_ardupilot_mission_current_total_last_sequence_does_not_trigger_integrit
     try:
         finish_startup_validation(manager, vehicle)
         manager._state = CycleState.WAIT_TAKEOFF_STABLE
+        manager._takeoff_target_local_z_m = 4.0
         vehicle.state = mission_progress_state(
             20.0,
             mode=GUIDED_MODE,

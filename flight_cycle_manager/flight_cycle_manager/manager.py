@@ -216,6 +216,8 @@ class FlightCycleManager(Node):
         self._contract: Optional[MissionContract] = None
         self._start_requested = False
         self._stable_takeoff_since: Optional[float] = None
+        self._takeoff_reference_started_at: Optional[float] = None
+        self._takeoff_target_local_z_m: Optional[float] = None
         self._takeoff_airborne_deadline: Optional[float] = None
         self._mission_confirmation_deadline: Optional[float] = None
         self._mission_confirmation_expected_seq: Optional[int] = None
@@ -485,14 +487,8 @@ class FlightCycleManager(Node):
                 return
             self._begin_operation("arm", self._vehicle.arm_async(True, now), now)
             return
-        if self._state is CycleState.TAKEOFF: # TODO : Remove -1 in order to handle correctly the difference between global and local position
-            self._begin_operation(
-                "takeoff",
-                self._vehicle.takeoff_async(
-                    self._positive_parameter("takeoff_altitude_m") - 1, now
-                ),
-                now,
-            )
+        if self._state is CycleState.TAKEOFF:
+            self._begin_takeoff(now)
             return
         if self._state is CycleState.WAIT_TAKEOFF_STABLE:
             self._update_takeoff_stability(now)
@@ -583,6 +579,8 @@ class FlightCycleManager(Node):
         self._start_requested = start_requested
         self._contract = None
         self._stable_takeoff_since = None
+        self._takeoff_reference_started_at = None
+        self._takeoff_target_local_z_m = None
         self._takeoff_airborne_deadline = None
         self._mission_confirmation_deadline = None
         self._mission_confirmation_expected_seq = None
@@ -677,6 +675,7 @@ class FlightCycleManager(Node):
             else:
                 self._operation_failed("set_guided", command.message, now)
         elif name == "arm":
+            self._takeoff_reference_started_at = now
             self._transition(CycleState.TAKEOFF, "arm command acknowledged")
         elif name == "takeoff":
             self._stable_takeoff_since = None
@@ -860,6 +859,45 @@ class FlightCycleManager(Node):
         self._dock_mode = message.data
         self._dock_mode_received_at = time.monotonic()
 
+    def _begin_takeoff(self, now: float) -> None:
+        """Translate a climb above the launch position into FC altitude frames."""
+        if self._takeoff_reference_started_at is None:
+            self._takeoff_reference_started_at = now
+        state = self._vehicle.state
+        reference_is_fresh = (
+            self._vehicle.ready(
+                now,
+                heartbeat_timeout_s=self._positive_parameter("mavlink_heartbeat_timeout_s"),
+            )
+            and state.armed is True
+            and state.flying is False
+            and self._fresh_landed_state(now, state)
+            and self._fresh_position(now, state)
+            and all(math.isfinite(value) for value in state.position_enu_m)
+            and state.position_at > self._takeoff_reference_started_at
+            and state.relative_altitude_m is not None
+            and math.isfinite(state.relative_altitude_m)
+            and state.relative_altitude_at > self._takeoff_reference_started_at
+            and 0.0 <= now - state.relative_altitude_at
+            <= self._positive_parameter("pose_timeout_s")
+        )
+        if not reference_is_fresh:
+            if now - self._takeoff_reference_started_at >= self._positive_parameter(
+                "mavlink_operation_timeout_s"
+            ):
+                self._command_direct_land("fresh post-arm takeoff altitude reference timed out")
+            return
+
+        height_m = self._positive_parameter("takeoff_altitude_m")
+        # NAV_TAKEOFF uses height above FC home, whereas LOCAL_POSITION_NED
+        # uses the EKF origin. Apply the same climb to each starting altitude.
+        self._takeoff_target_local_z_m = state.position_enu_m[2] + height_m
+        self._begin_operation(
+            "takeoff",
+            self._vehicle.takeoff_async(state.relative_altitude_m + height_m, now),
+            now,
+        )
+
     def _update_takeoff_stability(self, now: float) -> None:
         state = self._vehicle.state
         if not self._fresh_airborne_telemetry(now):
@@ -875,11 +913,12 @@ class FlightCycleManager(Node):
         self._takeoff_airborne_deadline = None
         assert state.position_enu_m is not None
         assert state.velocity_enu_m_s is not None
+        if self._takeoff_target_local_z_m is None:
+            self._command_direct_land("takeoff altitude reference is unavailable")
+            return
         altitude_error = abs(
-            state.position_enu_m[2]
-            - self._positive_parameter("takeoff_altitude_m")
-        ) # TODO : PERSISTENT ERROR OF 1 meter
-        self.get_logger().info(f"Altitude error { state.position_enu_m[2] - self._positive_parameter('takeoff_altitude_m') }")
+            state.position_enu_m[2] - self._takeoff_target_local_z_m
+        )
         vertical_speed = abs(state.velocity_enu_m_s[2])
         is_stable = (
             altitude_error <= self._positive_parameter(

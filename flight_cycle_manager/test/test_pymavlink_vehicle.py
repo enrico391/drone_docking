@@ -262,6 +262,23 @@ def test_vehicle_state_has_neutral_mission_progress_defaults():
     assert state.mission_current_at == 0.0
 
 
+def test_global_position_provides_home_relative_altitude_in_metres(vehicle, connection):
+    push_heartbeat(connection)
+    connection.incoming.append(FakeMessage(
+        "GLOBAL_POSITION_INT", relative_alt=1250, alt=512345,
+    ))
+    vehicle.poll(now=10.0)
+
+    assert vehicle.state.relative_altitude_m == 1.25
+    assert vehicle.state.relative_altitude_at == 10.0
+    assert vehicle.state.position_enu_m is None
+    requested_streams = [
+        args[4] for args in connection.mav.calls_for("command_long_send")
+        if args[2] == MAVLINK.MAV_CMD_SET_MESSAGE_INTERVAL
+    ]
+    assert MAVLINK.MAVLINK_MSG_ID_GLOBAL_POSITION_INT in requested_streams
+
+
 def test_telemetry_ignores_other_vehicle_sources(vehicle, connection):
     """Break caught: a second MAVLink system can overwrite mission state."""
     connection.incoming.append(
