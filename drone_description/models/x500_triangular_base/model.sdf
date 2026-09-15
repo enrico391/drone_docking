@@ -6,7 +6,7 @@
     <static>false</static>
     <link name="base_link">
       <inertial>
-        <mass>1.0</mass>
+        <mass>1.277</mass> 
         <inertia>
           <ixx>0.02166666666666667</ixx>
           <ixy>0</ixy>
@@ -185,7 +185,7 @@
       <inertial>
         <!-- Fusion 360 values converted from g/mm to kg/m SI units. -->
         <pose>-0.000011 0.000805 0.097709 0 0 0</pose>
-        <mass>0.990387</mass>
+        <mass>0.914</mass>
         <inertia>
           <ixx>0.006604</ixx>
           <ixy>-0.000000005161</ixy>
