@@ -1,0 +1,212 @@
+# Simulation-only controller profile for ArduCopter 4.7.0 (1511f271).
+# Source: complete_param_tuned.param, verified against the 2026-09-14 flight log.
+# Load after copter.parm and gazebo-x500.parm in a fresh calibration state directory.
+# All four Gazebo servo_min/servo_max values MUST also be 1000/2000.
+# Physical mass, inertia, thrust and motor lag are still the existing model.
+# RC calibration and hardware-specific sensor/board settings are not imported.
+# MOT_THST_HOVER is the recording-start value; hover learning remains enabled.
+
+# Frame and motor assignment
+FRAME_CLASS          1
+FRAME_TYPE           1
+SERVO1_FUNCTION      33
+SERVO2_FUNCTION      34
+SERVO3_FUNCTION      35
+SERVO4_FUNCTION      36
+
+# Attitude and position controllers
+ATC_ACC_P_MAX        1269.275
+ATC_ACC_R_MAX        1076.967
+ATC_ACC_Y_MAX        205.7389
+ATC_ANG_LIM_TC       1
+ATC_ANG_PIT_P        13.49256
+ATC_ANG_RLL_P        8.283264
+ATC_ANG_YAW_P        2.796414
+ATC_ANGLE_BOOST      1
+ATC_ANGLE_MAX        30
+ATC_INPUT_TC         0.1
+ATC_LAND_P_MULT      1
+ATC_LAND_R_MULT      1
+ATC_LAND_Y_MULT      1
+ATC_RAT_PIT_D        0.005662718
+ATC_RAT_PIT_D_FF     0
+ATC_RAT_PIT_FF       0
+ATC_RAT_PIT_FLTD     21
+ATC_RAT_PIT_FLTE     0
+ATC_RAT_PIT_FLTT     21
+ATC_RAT_PIT_I        0.1466265
+ATC_RAT_PIT_IMAX     0.5
+ATC_RAT_PIT_NEF      0
+ATC_RAT_PIT_NTF      0
+ATC_RAT_PIT_P        0.1466265
+ATC_RAT_PIT_PDMX     0
+ATC_RAT_PIT_SMAX     0
+ATC_RAT_RLL_D        0.004612319
+ATC_RAT_RLL_D_FF     0
+ATC_RAT_RLL_FF       0
+ATC_RAT_RLL_FLTD     21
+ATC_RAT_RLL_FLTE     0
+ATC_RAT_RLL_FLTT     21
+ATC_RAT_RLL_I        0.1319997
+ATC_RAT_RLL_IMAX     0.5
+ATC_RAT_RLL_NEF      0
+ATC_RAT_RLL_NTF      0
+ATC_RAT_RLL_P        0.1319997
+ATC_RAT_RLL_PDMX     0
+ATC_RAT_RLL_SMAX     0
+ATC_RAT_YAW_D        0
+ATC_RAT_YAW_D_FF     0
+ATC_RAT_YAW_FF       0
+ATC_RAT_YAW_FLTD     0
+ATC_RAT_YAW_FLTE     1.073194
+ATC_RAT_YAW_FLTT     21
+ATC_RAT_YAW_I        0.07483686
+ATC_RAT_YAW_IMAX     0.5
+ATC_RAT_YAW_NEF      0
+ATC_RAT_YAW_NTF      0
+ATC_RAT_YAW_P        0.7483686
+ATC_RAT_YAW_PDMX     0
+ATC_RAT_YAW_SMAX     0
+ATC_RATE_FF_ENAB     1
+ATC_RATE_P_MAX       0
+ATC_RATE_R_MAX       0
+ATC_RATE_WPY_MAX     60
+ATC_RATE_Y_MAX       0
+ATC_THR_G_BOOST      0
+ATC_THR_MIX_MAN      0.1
+ATC_THR_MIX_MAX      0.5
+ATC_THR_MIX_MIN      0.1
+PSC_ANGLE_MAX        0
+PSC_D_ACC_D          0
+PSC_D_ACC_D_FF       0
+PSC_D_ACC_FF         0
+PSC_D_ACC_FLTD       0
+PSC_D_ACC_FLTE       20
+PSC_D_ACC_FLTT       0
+PSC_D_ACC_I          0.1
+PSC_D_ACC_IMAX       0.8
+PSC_D_ACC_NEF        0
+PSC_D_ACC_NTF        0
+PSC_D_ACC_P          0.05
+PSC_D_ACC_PDMX       0
+PSC_D_ACC_SMAX       0
+PSC_D_POS_P          1
+PSC_D_VEL_D          0
+PSC_D_VEL_FF         0
+PSC_D_VEL_FLTD       5
+PSC_D_VEL_FLTE       5
+PSC_D_VEL_I          0
+PSC_D_VEL_IMAX       10
+PSC_D_VEL_P          5
+PSC_JERK_D           5
+PSC_JERK_NE          5
+PSC_NE_POS_P         1
+PSC_NE_VEL_D         0.25
+PSC_NE_VEL_FF        0
+PSC_NE_VEL_FLTD      5
+PSC_NE_VEL_FLTE      5
+PSC_NE_VEL_I         1
+PSC_NE_VEL_IMAX      10
+PSC_NE_VEL_P         2
+
+# Control rates and filters
+FSTRATE_DIV          1
+FSTRATE_ENABLE       0
+INS_ACCEL_FILTER     10
+INS_GYRO_FILTER      42
+INS_HNTC2_ENABLE     0
+INS_HNTC3_ENABLE     0
+INS_HNTCH_ATT        40
+INS_HNTCH_BW         55
+INS_HNTCH_ENABLE     1
+INS_HNTCH_FM_RAT     1
+INS_HNTCH_FREQ       110
+INS_HNTCH_HMNCS      3
+INS_HNTCH_MODE       1
+INS_HNTCH_OPTS       0
+INS_HNTCH_REF        0.36
+SCHED_LOOP_RATE      400
+
+# Pilot input shaping and navigation limits
+ACRO_BAL_PITCH       1
+ACRO_BAL_ROLL        1
+ACRO_OPTIONS         0
+ACRO_RP_EXPO         0.3
+ACRO_RP_RATE         360
+ACRO_RP_RATE_TC      0
+ACRO_THR_MID         0
+ACRO_TRAINER         2
+ACRO_Y_EXPO          0
+ACRO_Y_RATE          202.5
+ACRO_Y_RATE_TC       0
+LAND_ALT_LOW_M       10
+LAND_REPOSITION      1
+LAND_SPD_HIGH_MS     0
+LAND_SPD_MS          0.3
+LOIT_ACC_MAX_M       5
+LOIT_ANG_MAX         0
+LOIT_BRK_ACC_M       2.5
+LOIT_BRK_DELAY       1
+LOIT_BRK_JRK_M       5
+LOIT_OPTIONS         1
+LOIT_SPEED_MS        12.5
+PILOT_ACC_Z          2.5
+PILOT_SPD_DN         0
+PILOT_SPD_UP         2.5
+PILOT_THR_BHV        0
+PILOT_THR_FILT       0
+PILOT_TKO_ALT_M      0
+PILOT_Y_EXPO         0
+PILOT_Y_RATE         202.5
+PILOT_Y_RATE_TC      0
+RTL_ALT_FINAL_M      0
+RTL_ALT_M            15
+RTL_ALT_TYPE         0
+RTL_CLIMB_MIN_M      0
+RTL_CONE_SLOPE       3
+RTL_LOIT_TIME        5000
+RTL_OPTIONS          0
+RTL_SPEED_MS         5
+WP_ACC               2.5
+WP_ACC_CNR           0
+WP_ACC_Z             1
+WP_JERK              1
+WP_NAVALT_MIN        0
+WP_RADIUS_M          2
+WP_RFND_USE          1
+WP_SPD               10
+WP_SPD_DN            1
+WP_SPD_UP            2.5
+WP_TER_MARGIN        10
+WP_YAW_BEHAVIOR      2
+
+# Motor controller and thrust compensation
+MOT_BAT_CURR_MAX     0
+MOT_BAT_CURR_TC      5
+MOT_BAT_IDX          0
+MOT_BAT_VOLT_MAX     16.8
+MOT_BAT_VOLT_MIN     13.2
+MOT_BOOST_SCALE      0
+MOT_HOVER_LEARN      2
+MOT_IDLE_SEC         0
+MOT_OPTIONS          0
+MOT_PWM_MAX          2000
+MOT_PWM_MIN          1000
+MOT_PWM_TYPE         0
+MOT_SAFE_DISARM      0
+MOT_SAFE_TIME        1
+MOT_SLEW_DN_TIME     0
+MOT_SLEW_UP_TIME     0
+MOT_SPIN_ARM         0.1
+MOT_SPIN_MAX         0.95
+MOT_SPIN_MIN         0.15
+MOT_SPOOL_TIM_DN     0
+MOT_SPOOL_TIME       0.5
+MOT_THST_EXPO        0.6
+MOT_THST_HOVER       0.36
+MOT_YAW_HEADROOM     200
+
+# Simulation adaptation: first logged battery voltage before flight (16.030447 V).
+# SITL adds its existing simple throttle-dependent voltage drop; this is not a
+# fitted battery model and does not make Gazebo motor thrust voltage-dependent.
+SIM_BATT_VOLTAGE     16.030447
