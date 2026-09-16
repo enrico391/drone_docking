@@ -199,8 +199,14 @@ python3 -m pytest flight_cycle_manager/test/test_sitl_flight_cycle.py \
 
 ## Disturbance injection
 
-To add disturbance in gazebo, use the following command:
+To add disturbance in gazebo, use the following command, select the desired axis, and set the force magnitude in Newtons. For example, to apply a 1 N force along the x-axis:
 
 ```bash
 gz topic -t /world/docking_world/wrench/persistent     -m gz.msgs.EntityWrench     -p "entity: {name: 'x500', type: MODEL}, wrench: {force: {x:1.0}}"
+```
+
+to remove the disturbance, use:
+
+```bash
+gz topic -t /world/docking_world/wrench/clear     -m gz.msgs.Entity     -p "name: 'x500', type: MODEL"
 ```
