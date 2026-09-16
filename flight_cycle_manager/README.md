@@ -196,3 +196,11 @@ source install/setup.bash
 python3 -m pytest flight_cycle_manager/test/test_sitl_flight_cycle.py \
   -m sitl -v --tb=short
 ```
+
+## Disturbance injection
+
+To add disturbance in gazebo, use the following command:
+
+```bash
+gz topic -t /world/docking_world/wrench/persistent     -m gz.msgs.EntityWrench     -p "entity: {name: 'x500', type: MODEL}, wrench: {force: {x:1.0}}"
+```
