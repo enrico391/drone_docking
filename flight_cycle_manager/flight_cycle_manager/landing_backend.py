@@ -68,3 +68,4 @@ class LandingBackendDecision:
     disarm_request_id: Optional[int] = None
     yaw_correction_rad: Optional[float] = None
     reason: str = ""
+    recovery_attempts: int = 0

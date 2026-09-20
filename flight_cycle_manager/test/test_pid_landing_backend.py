@@ -276,11 +276,13 @@ def test_dock_recovery_exhausts_shared_attempt_budget():
     backend.update(now=2.0, dock=None, vehicle=vehicle_observation(altitude_m=4.3))
     retry = backend.update(now=5.01, dock=None, vehicle=vehicle_observation(altitude_m=4.3))
     assert retry.substate == "RECOVERY_CLIMB"
+    assert retry.recovery_attempts == 2
     backend.update(now=6.5, dock=None, vehicle=vehicle_observation(altitude_m=4.6))
     failed = backend.update(now=9.51, dock=None, vehicle=vehicle_observation(altitude_m=4.6))
     assert failed.outcome is LandingBackendOutcome.FAIL_BEFORE_COMMIT
     assert "recovery attempts exhausted" in failed.reason
     assert failed.velocity.velocity_z == 0.0
+    assert failed.recovery_attempts == 2
 
 
 def test_successful_dock_reacquisition_does_not_reset_central_retry_budget():

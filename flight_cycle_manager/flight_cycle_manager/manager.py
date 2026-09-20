@@ -34,6 +34,7 @@ from .landing_target import (
     camera_target_to_body_frd,
     measurement_time_usec,
 )
+from .landing_attempt_log import LandingAttemptLog
 from .mission_contract import (
     MissionContract,
     MissionContractError,
@@ -258,6 +259,16 @@ class FlightCycleManager(Node):
         self._pending_pid_disarm_request_id: Optional[int] = None
         self._pending_pid_disarm_timeout_notified = False
         self._debug_land_trigger_armed = False
+        self._landing_attempt_log = LandingAttemptLog(
+            enabled=bool(
+                self.get_parameter("landing_attempt_log_enabled").value
+            ),
+            directory=str(
+                self.get_parameter("landing_attempt_log_directory").value
+            ),
+            warn=self.get_logger().warning,
+        )
+        self._last_landing_debug_event: Optional[tuple[object, ...]] = None
         self._closed = False
 
         # Startup validation is deliberately read-only. A later cycle request
@@ -345,6 +356,10 @@ class FlightCycleManager(Node):
             "landing_target_camera_down_m": 0.19,
             "landing_touchdown_warn_after_s": 30.0,
             "landing_disarm_warn_after_s": 20.0,
+            "landing_attempt_log_enabled": False,
+            "landing_attempt_log_directory": (
+                "~/.ros/flight_cycle_manager/landing_attempts"
+            ),
             "pid_tag_stable_time_s": 0.5,
             "pid_central_transition_distance_m": 1.0,
             "pid_central_acquire_timeout_s": 3.0,
@@ -692,6 +707,9 @@ class FlightCycleManager(Node):
         if self._closed:
             return
         self._closed = True
+        self._finish_landing_attempt_log(
+            "SHUTDOWN", self._state.name, "manager closed during landing attempt"
+        )
         self._timer.cancel()
         if self._state in {CycleState.PILOT_OVERRIDE, CycleState.LINK_LOSS}:
             self._vehicle.close_without_output()
@@ -1243,6 +1261,8 @@ class FlightCycleManager(Node):
                 vehicle=self._vehicle_observation(),
             )
 
+            self._safe_record_landing_backend_decision(decision, now)
+
             self.get_logger().info(
                 f"Landing backend update: {decision}"
             )
@@ -1345,6 +1365,9 @@ class FlightCycleManager(Node):
             return False
         if backend is None or request_id is None:
             self._pending = None
+            self._record_pid_disarm_result(
+                request_id, False, "disarm transaction lost its controller"
+            )
             self._command_direct_land("PID disarm transaction lost its controller")
             return True
         notifier = getattr(backend, "notify_disarm_result", None)
@@ -1353,6 +1376,9 @@ class FlightCycleManager(Node):
             and not self._pending_pid_disarm_timeout_notified
             and callable(notifier)
         ):
+            self._record_pid_disarm_result(
+                request_id, False, "command timed out"
+            )
             notifier(request_id, False, now)
             self._pending_pid_disarm_timeout_notified = True
         if not pending.future.done():
@@ -1361,18 +1387,28 @@ class FlightCycleManager(Node):
         try:
             result = pending.future.result()
             success = bool(getattr(result, "success", False))
-        except Exception:
+            result_reason = str(getattr(result, "message", "")).strip()
+            if not result_reason:
+                result_reason = "acknowledged" if success else "command rejected"
+        except Exception as error:
             success = False
+            result_reason = f"command raised {error}"
         self._pending = None
         self._pending_pid_disarm_request_id = None
         self._pending_pid_disarm_timeout_notified = False
         if not timeout_notified and callable(notifier):
+            self._record_pid_disarm_result(
+                request_id, success, result_reason
+            )
             notifier(request_id, success, now)
         return False
 
     def _begin_pid_disarm(self, request_id: Optional[int], now: float) -> None:
         backend = self._landing_controller
         if request_id is None:
+            self._record_pid_disarm_result(
+                None, False, "request did not include an ID"
+            )
             self._command_direct_land(
                 "PID disarm request did not include a request ID"
             )
@@ -1385,7 +1421,10 @@ class FlightCycleManager(Node):
                     self._vehicle.arm_async(False, now),
                     now,
                 )
-            except Exception:
+            except Exception as error:
+                self._record_pid_disarm_result(
+                    request_id, False, f"command could not start: {error}"
+                )
                 if callable(notifier):
                     notifier(request_id, False, now)
                 return
@@ -1393,7 +1432,20 @@ class FlightCycleManager(Node):
             self._pending_pid_disarm_timeout_notified = False
             return
         if request_id != self._pending_pid_disarm_request_id and callable(notifier):
+            self._record_pid_disarm_result(
+                request_id,
+                False,
+                f"request {self._pending_pid_disarm_request_id} is still pending",
+            )
             notifier(request_id, False, now)
+
+    def _record_pid_disarm_result(
+        self, request_id: Optional[int], success: bool, reason: str
+    ) -> None:
+        request = "none" if request_id is None else str(request_id)
+        self._write_landing_attempt_log(
+            f"DISARM_RESULT request={request} success={success} reason={reason}"
+        )
 
     def _advance_native_land(self, now: float) -> bool:
         pending = self._pending
@@ -2210,8 +2262,14 @@ class FlightCycleManager(Node):
     def _transition(self, state: CycleState, reason: str, *, force: bool = False) -> None:
         if not force and state is self._state and reason == self._reason:
             return
+        if state is CycleState.GUIDED_TAKEOVER:
+            self._last_landing_debug_event = None
+            self._start_landing_attempt_log(state.name, reason)
         self._state = state
         self._reason = reason
+        self._write_landing_attempt_log(
+            f"LIFECYCLE state={state.name} reason={reason}"
+        )
         state_message = String()
         state_message.data = state.name
         reason_message = String()
@@ -2225,6 +2283,91 @@ class FlightCycleManager(Node):
                 f"Could not send flight cycle status over MAVLink: {error}"
             )
         self.get_logger().info(f"Flight cycle state: {state.name}: {reason}")
+        terminal_outcome = {
+            CycleState.DOCKED: "COMPLETED",
+            CycleState.WAITING_LAND_TRIGGER: "CANCELLED",
+            CycleState.PILOT_OVERRIDE: "CANCELLED",
+            CycleState.LINK_LOSS: "CANCELLED",
+            CycleState.RETURN_TO_FC: "FAILED",
+            CycleState.FC_FALLBACK_LAND: "FAILED",
+            CycleState.FAILED_DISARMED: "FAILED",
+        }.get(state)
+        if terminal_outcome is not None:
+            self._finish_landing_attempt_log(
+                terminal_outcome, state.name, reason
+            )
+
+    def _start_landing_attempt_log(self, state: str, reason: str) -> None:
+        try:
+            if not self._landing_attempt_log.active:
+                self._landing_attempt_log.start(state, reason)
+        except Exception as error:
+            self._warn_landing_attempt_log(error)
+
+    def _write_landing_attempt_log(self, message: str) -> None:
+        try:
+            self._landing_attempt_log.write(message)
+        except Exception as error:
+            self._warn_landing_attempt_log(error)
+
+    def _finish_landing_attempt_log(
+        self, outcome: str, state: str, reason: str
+    ) -> None:
+        try:
+            self._landing_attempt_log.finish(outcome, state, reason)
+        except Exception as error:
+            self._warn_landing_attempt_log(error)
+
+    def _warn_landing_attempt_log(self, error: Exception) -> None:
+        try:
+            self.get_logger().warning(
+                f"Landing attempt log disabled after unexpected error: {error}"
+            )
+        except Exception:
+            pass
+
+    def _safe_record_landing_backend_decision(
+        self, decision: Any, now: float
+    ) -> None:
+        try:
+            self._record_landing_backend_decision(decision, now)
+        except Exception as error:
+            self._warn_landing_attempt_log(error)
+
+    def _record_landing_backend_decision(self, decision: Any, now: float) -> None:
+        signature = (
+            decision.substate,
+            decision.recovery_attempts,
+            decision.reason,
+            decision.request_disarm,
+            decision.disarm_request_id,
+            decision.outcome,
+        )
+        if signature == self._last_landing_debug_event:
+            return
+        self._last_landing_debug_event = signature
+        state = self._vehicle.state
+        dock = self._dock_observation(now)
+        if dock is None:
+            dock_summary = "dock=none"
+        else:
+            dock_summary = (
+                f"dock={dock.mode.name} forward_m={dock.forward_m:.3f} "
+                f"left_m={dock.left_m:.3f} distance_m={dock.distance_m:.3f} "
+                f"yaw_error_rad={dock.yaw_error_rad:.3f}"
+            )
+        message = (
+            f"PID state={decision.substate} "
+            f"recovery={decision.recovery_attempts}/"
+            f"{int(self.get_parameter('pid_max_recovery_attempts').value)} "
+            f"vehicle_mode={state.mode} armed={state.armed} flying={state.flying} "
+            f"{dock_summary}"
+        )
+        if decision.request_disarm:
+            message += f" disarm_request={decision.disarm_request_id}"
+        if decision.reason:
+            message += f" reason={decision.reason}"
+        self._write_landing_attempt_log(message)
 
     def _positive_parameter(self, name: str, *, allow_zero: bool = False) -> float:
         value = float(self.get_parameter(name).value)

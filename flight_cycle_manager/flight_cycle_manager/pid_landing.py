@@ -198,6 +198,11 @@ class PidLandingController:
         self._failure_reason = ""
         self._reset_pids()
 
+    @property
+    def recovery_attempts(self) -> int:
+        """Number of recovery climbs used by the current landing attempt."""
+        return min(self._recovery_attempts, self._config.max_recovery_attempts)
+
     def update(
         self,
         now: float,

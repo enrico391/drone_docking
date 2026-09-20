@@ -63,6 +63,10 @@ EXPECTED_COMMON_PARAMETERS = {
     "landing_target_camera_down_m": 0.19,
     "landing_touchdown_warn_after_s": 30.0,
     "landing_disarm_warn_after_s": 20.0,
+    "landing_attempt_log_enabled": False,
+    "landing_attempt_log_directory": (
+        "~/.ros/flight_cycle_manager/landing_attempts"
+    ),
     "mavlink_connection": "tcp:127.0.0.1:5760",
     "mavlink_baud": 921600,
     "mavlink_target_system": 1,

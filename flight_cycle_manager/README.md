@@ -187,6 +187,19 @@ while disarmed, on the ground, or already present when the node starts are not
 accepted as triggers. Stale MAVLink telemetry also cancels the attempt; after
 the link recovers, another fresh LAND edge is required.
 
+Each approach writes a separate timestamped text trace under
+`~/.ros/flight_cycle_manager/landing_attempts/`. The trace records lifecycle
+and PID state changes, vehicle and dock observations, recovery and disarm
+retries, cancellations, failures, and successful completion. Logging is enabled
+by default only in `pid_landing_debug.launch.py`. Override the destination or
+disable it when launching with:
+
+```bash
+ros2 launch flight_cycle_manager pid_landing_debug.launch.py \
+  landing_attempt_log_directory:=/tmp/landing_attempts \
+  landing_attempt_log_enabled:=false
+```
+
 To force a manual mode takeover during SITL, use a separate MAVLink client on
 the observer port (`5762`). Replace `mode_id` with `3` (`AUTO`), `4`
 (`GUIDED`), or `9` (`LAND`):

@@ -81,4 +81,5 @@ class PidLandingBackend:
             request_disarm=decision.request_disarm,
             disarm_request_id=decision.disarm_request_id,
             reason=decision.reason,
+            recovery_attempts=self._controller.recovery_attempts,
         )

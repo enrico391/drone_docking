@@ -20,7 +20,6 @@ def _default_localizer_python(workspace_root: Path) -> str:
 
 
 def _launch_setup(context: LaunchContext, package_share: Path):
-    del context
     return [
         Node(
             package="flight_cycle_manager",
@@ -33,6 +32,13 @@ def _launch_setup(context: LaunchContext, package_share: Path):
                 {
                     "operation_mode": "pid_landing_debug",
                     "landing_backend": "pid",
+                    "landing_attempt_log_enabled": ParameterValue(
+                        LaunchConfiguration("landing_attempt_log_enabled"),
+                        value_type=bool,
+                    ),
+                    "landing_attempt_log_directory": LaunchConfiguration(
+                        "landing_attempt_log_directory"
+                    ),
                     "mavlink_connection": LaunchConfiguration("mavlink_connection"),
                     "mavlink_baud": ParameterValue(
                         LaunchConfiguration("mavlink_baud"), value_type=int
@@ -107,6 +113,15 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("mavlink_connection", default_value="tcp:127.0.0.1:5760"),
             DeclareLaunchArgument("mavlink_baud", default_value="921600"),
+            DeclareLaunchArgument(
+                "landing_attempt_log_enabled",
+                default_value="true",
+                choices=["true", "false"],
+            ),
+            DeclareLaunchArgument(
+                "landing_attempt_log_directory",
+                default_value="~/.ros/flight_cycle_manager/landing_attempts",
+            ),
             DeclareLaunchArgument(
                 "config_file",
                 default_value=str(localizer_share / "config" / "dock_tags.yaml"),

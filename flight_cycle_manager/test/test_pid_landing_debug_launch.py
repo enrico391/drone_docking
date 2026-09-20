@@ -134,3 +134,9 @@ def test_publish_camera_selects_one_localizer_and_wires_debug_manager(monkeypatc
     ]
     assert overrides["operation_mode"] == "pid_landing_debug"
     assert overrides["landing_backend"] == "pid"
+    assert overrides["landing_attempt_log_enabled"].evaluate(
+        onboard_camera_context
+    ) is True
+    assert overrides["landing_attempt_log_directory"].perform(
+        onboard_camera_context
+    ) == "~/.ros/flight_cycle_manager/landing_attempts"
