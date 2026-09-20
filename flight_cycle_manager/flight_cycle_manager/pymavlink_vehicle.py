@@ -12,6 +12,7 @@ from flight_cycle_manager.mission_contract import MissionItem
 _POSITION_TARGET_TYPEMASK_VELOCITY_ONLY = 3527
 _POSITION_TARGET_TYPEMASK_VELOCITY_YAW_RATE = 1479
 _LANDING_TARGET_TYPE_FIDUCIAL = 2
+_STATUSTEXT_MAX_BYTES = 50
 _COMMAND_RETRY_S = 0.5
 _COMMAND_TIMEOUT_S = 3.0
 _MISSION_TYPE_MISSION = 0
@@ -508,6 +509,19 @@ class MavlinkVehicle:
             0.0,
             0.0,
             0.0,
+        )
+        return True
+
+    def send_status_text(self, text: str) -> bool:
+        """Send one informational MAVLink status message."""
+        if self._closed:
+            return False
+        payload = text.encode("ascii", errors="replace")[
+            :_STATUSTEXT_MAX_BYTES
+        ]
+        self._connection.mav.statustext_send(
+            self._mavutil.mavlink.MAV_SEVERITY_INFO,
+            payload,
         )
         return True
 

@@ -235,6 +235,15 @@ python3 -m pytest flight_cycle_manager/test/test_sitl_flight_cycle.py \
   -m sitl -v --tb=short
 ```
 
+### Raspberry Pi hardware usage
+To start the flight cycle manager on a Raspberry Pi with a connected camera, use:
+
+```bash
+source apriltag_venv/bin/activate
+source /opt/ros/humble/setup.bash
+ros2 launch flight_cycle_manager pid_landing_debug.launch.py   publish_camera:=true camera:=0 mavlink_connection:=/dev/ttyAMA0 simulation_mode:=false
+```
+
 ## Disturbance injection
 
 To add disturbance in gazebo, use the following command, select the desired axis, and set the force magnitude in Newtons. For example, to apply a 1 N force along the x-axis:

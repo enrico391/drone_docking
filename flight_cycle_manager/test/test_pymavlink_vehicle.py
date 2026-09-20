@@ -451,6 +451,23 @@ def test_companion_heartbeat_emits_once_per_second(vehicle, connection):
     ]
 
 
+def test_status_text_sends_one_ascii_message_within_mavlink_limit(
+    vehicle, connection
+):
+    """Break caught: lifecycle status is oversized or not sent over MAVLink."""
+    sent = vehicle.send_status_text(
+        "LANDING_BACKEND: caméra target acquired and descending slowly"
+    )
+
+    assert sent is True
+    assert connection.mav.calls_for("statustext_send") == [
+        (
+            MAVLINK.MAV_SEVERITY_INFO,
+            b"LANDING_BACKEND: cam?ra target acquired and descen",
+        )
+    ]
+
+
 def test_second_pending_operation_is_rejected(vehicle, connection):
     """Break caught: a new operation overwrites an active MAVLink operation."""
     first = vehicle.takeoff_async(altitude_m=3.0, now=16.0)

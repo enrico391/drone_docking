@@ -148,6 +148,35 @@ def make_manager(
     return FlightCycleManager(vehicle=vehicle, parameter_values=parameters)
 
 
+def test_lifecycle_transition_sends_state_and_reason_over_mavlink():
+    """Break caught: ROS state changes are not mirrored onto MAVLink."""
+    vehicle = FakeVehicle()
+    manager = make_manager(vehicle)
+    try:
+        assert vehicle.status_text_calls == [
+            "VALIDATING_MISSION: downloading onboard mission for validation"
+        ]
+    finally:
+        manager.destroy_node()
+
+
+def test_lifecycle_transition_survives_status_text_send_failure():
+    """Break caught: optional telemetry interrupts the flight lifecycle."""
+    vehicle = FakeVehicle()
+
+    def fail_status_text(text: str) -> bool:
+        del text
+        raise OSError("serial write failed")
+
+    vehicle.send_status_text = fail_status_text  # type: ignore[method-assign]
+    manager = make_manager(vehicle)
+    try:
+        assert manager.state is CycleState.VALIDATING_MISSION
+        assert manager.reason == "downloading onboard mission for validation"
+    finally:
+        manager.destroy_node()
+
+
 def finish_startup_validation(
     manager: FlightCycleManager, vehicle: FakeVehicle, now: float = 0.0
 ) -> None:

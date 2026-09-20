@@ -2218,6 +2218,12 @@ class FlightCycleManager(Node):
         reason_message.data = reason
         self._state_publisher.publish(state_message)
         self._reason_publisher.publish(reason_message)
+        try:
+            self._vehicle.send_status_text(f"{state.name}: {reason}")
+        except Exception as error:
+            self.get_logger().warning(
+                f"Could not send flight cycle status over MAVLink: {error}"
+            )
         self.get_logger().info(f"Flight cycle state: {state.name}: {reason}")
 
     def _positive_parameter(self, name: str, *, allow_zero: bool = False) -> float:

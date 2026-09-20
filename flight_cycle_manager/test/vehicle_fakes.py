@@ -247,6 +247,7 @@ class FakeVehicle:
         self.velocity_calls: list[tuple[object, float, float, float, Optional[float], float]] = []
         self.landing_target_calls: list[dict[str, object]] = []
         self.condition_yaw_calls: list[dict[str, object]] = []
+        self.status_text_calls: list[str] = []
         self.mission_mutation_calls: list[str] = []
         self.closed = False
         self._active_name = ""
@@ -377,6 +378,10 @@ class FakeVehicle:
 
     def send_condition_yaw(self, **values: object) -> bool:
         self.condition_yaw_calls.append(dict(values))
+        return True
+
+    def send_status_text(self, text: str) -> bool:
+        self.status_text_calls.append(text)
         return True
 
     def finish_download(
