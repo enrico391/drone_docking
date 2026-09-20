@@ -628,6 +628,29 @@ class MavlinkVehicle:
                 pending.future._finish(
                     MissionDownloadResult(False, message="MAVLink operation timed out")
                 )
+            elif pending.name == "mode":
+                observed_mode = (
+                    "unknown" if self._state.mode is None else str(self._state.mode)
+                )
+                if pending.acknowledged:
+                    message = (
+                        "MAVLink mode change acknowledged but timed out "
+                        f"waiting for mode {pending.expected_value}; "
+                        f"observed mode {observed_mode}"
+                    )
+                else:
+                    message = (
+                        "MAVLink mode change timed out waiting for COMMAND_ACK; "
+                        f"expected mode {pending.expected_value}, "
+                        f"observed mode {observed_mode}"
+                    )
+                pending.future._finish(
+                    VehicleCommandResult(
+                        False,
+                        message,
+                        current_mode=self._state.mode,
+                    )
+                )
             else:
                 pending.future._finish(
                     VehicleCommandResult(False, "MAVLink operation timed out")

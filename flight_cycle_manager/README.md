@@ -4,6 +4,11 @@
 does not upload missions, choose mission profiles, or repeat cycles on its own.
 ArduPilot must already hold a valid docking mission before startup.
 
+The separate `pid_landing_debug.launch.py` entry point is the exception: it
+skips the mission and takeoff lifecycle so an already-airborne vehicle can run
+only dock search and PID landing. It is intended for supervised PID tuning and
+debugging.
+
 ## Required onboard mission
 
 Upload the mission from Mission Planner before launching this node. The stored
@@ -148,6 +153,39 @@ ros2 topic echo /flight_cycle_manager/reason
 ros2 topic echo /dock/mode
 ros2 topic echo /dock/pose
 ```
+
+## Repeatable LAND-triggered PID debug
+
+Start the landing-only debug node against a simulated or externally published
+camera with:
+
+```bash
+ros2 launch flight_cycle_manager pid_landing_debug.launch.py \
+  publish_camera:=false
+```
+
+In Mission Planner, change the airborne vehicle to `LAND`. The node detects the
+fresh LAND mode edge, requests `GUIDED`, runs the shared dock search, and starts
+the existing PID landing backend. No onboard mission is downloaded or started.
+
+For hardware where this launch should also own the libcamera publisher, use:
+
+```bash
+ros2 launch flight_cycle_manager pid_landing_debug.launch.py \
+  publish_camera:=true camera:=0 camera_width:=800 camera_height:=600
+```
+
+`publish_camera:=true` includes `dock_localizer_with_camera.launch.py`;
+`false` includes `dock_localizer.launch.py` and expects the configured image
+and camera-info topics to be published elsewhere.
+
+While an attempt is active, changing away from manager-owned `GUIDED` cancels
+search and PID output without forcing another flight mode. A later fresh
+transition into `LAND` starts a new attempt, so a two-position RC mode switch
+can repeatedly enable and cancel docking without restarting ROS. LAND reports
+while disarmed, on the ground, or already present when the node starts are not
+accepted as triggers. Stale MAVLink telemetry also cancels the attempt; after
+the link recovers, another fresh LAND edge is required.
 
 To force a manual mode takeover during SITL, use a separate MAVLink client on
 the observer port (`5762`). Replace `mode_id` with `3` (`AUTO`), `4`

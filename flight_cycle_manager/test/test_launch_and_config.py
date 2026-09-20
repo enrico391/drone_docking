@@ -26,6 +26,7 @@ from vehicle_fakes import FakeVehicle, install_ros_fakes
 
 
 EXPECTED_COMMON_PARAMETERS = {
+    "operation_mode": "flight_cycle",
     "simulation_mode": False,
     "auto_start": False,
     "landing_backend": "pid",

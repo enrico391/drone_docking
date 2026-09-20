@@ -63,6 +63,7 @@ class CycleState(Enum):
     """All lifecycle states, including the later docking/authority slices."""
 
     READY = auto()
+    WAITING_LAND_TRIGGER = auto()
     VALIDATING_MISSION = auto()
     INVALID_ONBOARD_MISSION = auto()
     PREARM = auto()
@@ -150,6 +151,20 @@ class FlightCycleManager(Node):
         if self._auto_start and not self._simulation_mode:
             self.destroy_node()
             raise ValueError("auto_start=true requires simulation_mode=true")
+        self._operation_mode = str(
+            self.get_parameter("operation_mode").value
+        ).strip().lower()
+        if self._operation_mode not in {"flight_cycle", "pid_landing_debug"}:
+            self.destroy_node()
+            raise ValueError(
+                "operation_mode must be 'flight_cycle' or 'pid_landing_debug'"
+            )
+        if (
+            self._operation_mode == "pid_landing_debug"
+            and self._landing_backend != "pid"
+        ):
+            self.destroy_node()
+            raise ValueError("pid_landing_debug requires landing_backend=pid")
 
         self._vehicle = vehicle or MavlinkVehicle(
             connection=str(self.get_parameter("mavlink_connection").value),
@@ -227,6 +242,7 @@ class FlightCycleManager(Node):
         self._validated_mission_id: Optional[int] = None
         self._dock_request_queued = False
         self._dock_request_acknowledged = False
+        self._guided_search_telemetry_deadline: Optional[float] = None
         self._search_controller: Optional[Any] = None
         self._landing_controller: Optional[Any] = None
         self._landing_expected_modes: frozenset[int] = frozenset()
@@ -241,11 +257,18 @@ class FlightCycleManager(Node):
         self._dock_mode_received_at = 0.0
         self._pending_pid_disarm_request_id: Optional[int] = None
         self._pending_pid_disarm_timeout_notified = False
+        self._debug_land_trigger_armed = False
         self._closed = False
 
         # Startup validation is deliberately read-only. A later cycle request
         # always starts another download, so it never trusts this result.
-        self._begin_validation(time.monotonic(), start_requested=False)
+        if self._operation_mode == "pid_landing_debug":
+            self._transition(
+                CycleState.WAITING_LAND_TRIGGER,
+                "waiting for a fresh airborne LAND mode transition",
+            )
+        else:
+            self._begin_validation(time.monotonic(), start_requested=False)
 
     @property
     def vehicle(self) -> MavlinkVehicle:
@@ -285,6 +308,7 @@ class FlightCycleManager(Node):
     def _declare_parameters(self) -> None:
         """Declare lifecycle, shared-search, and landing backend defaults."""
         defaults = {
+            "operation_mode": "flight_cycle",
             "simulation_mode": False,
             "auto_start": False,
             "landing_backend": "pid",
@@ -380,6 +404,12 @@ class FlightCycleManager(Node):
     ) -> Trigger.Response:
         """Queue only a fresh mission validation for one explicit cycle."""
         del request
+        if self._operation_mode == "pid_landing_debug":
+            return self._reject_start(
+                response,
+                "cycle request rejected: mission lifecycle is disabled in "
+                "pid_landing_debug mode",
+            )
         if self._vehicle.state.armed is True:
             return self._reject_start(response, "cycle request rejected: vehicle is armed")
         if self._pending is not None and self._pending.future.done():
@@ -445,13 +475,19 @@ class FlightCycleManager(Node):
         self._vehicle.receive_telemetry(now)
         if self._closed:
             return
+        if self._operation_mode == "pid_landing_debug":
+            if self._advance_pid_landing_debug_lifecycle(now):
+                return
         if self._state is CycleState.DOCKED:
             self._advance_passive_pending()
             return
         if self._state in {CycleState.PILOT_OVERRIDE, CycleState.LINK_LOSS}:
             self._advance_passive_state(now)
             return
-        if self._handle_airborne_authority(now):
+        if (
+            self._operation_mode == "flight_cycle"
+            and self._handle_airborne_authority(now)
+        ):
             return
         self._vehicle.service_pending(now)
         if self._advance_pending(now):
@@ -535,6 +571,9 @@ class FlightCycleManager(Node):
             self._advance_wait_for_handoff(now)
             return
         if self._state is CycleState.GUIDED_TAKEOVER:
+            if self._guided_search_telemetry_deadline is not None:
+                self._advance_guided_search_start(now)
+                return
             self._begin_operation(
                 "handoff_guided",
                 self._vehicle.set_mode_async(GUIDED_MODE, now),
@@ -559,6 +598,94 @@ class FlightCycleManager(Node):
         if self._state is CycleState.WAIT_DISARM:
             self._advance_wait_disarm(now)
             return
+
+    def _advance_pid_landing_debug_lifecycle(self, now: float) -> bool:
+        """Start, cancel, and re-arm mission-free docking from flight-mode edges."""
+        state = self._vehicle.state
+
+        if self._state is CycleState.DOCKED:
+            if (
+                self._fresh_pid_landing_debug_trigger_state(now)
+                and state.mode != LAND_MODE
+            ):
+                self._debug_land_trigger_armed = True
+                self._transition(
+                    CycleState.WAITING_LAND_TRIGGER,
+                    "vehicle is airborne again; waiting for a LAND mode transition",
+                )
+            return True
+
+        if self._state is CycleState.WAITING_LAND_TRIGGER:
+            if not self._fresh_pid_landing_debug_trigger_state(now):
+                self._debug_land_trigger_armed = False
+                return True
+            if state.mode != LAND_MODE:
+                self._debug_land_trigger_armed = True
+                return True
+            if self._debug_land_trigger_armed:
+                self._debug_land_trigger_armed = False
+                self._transition(
+                    CycleState.GUIDED_TAKEOVER,
+                    "airborne LAND trigger received; requesting GUIDED for PID docking",
+                )
+                self._begin_operation(
+                    "handoff_guided",
+                    self._vehicle.set_mode_async(GUIDED_MODE, now),
+                    now,
+                )
+            return True
+
+        if self._state in {
+            CycleState.GUIDED_TAKEOVER,
+            CycleState.SEARCH_DOCK,
+            CycleState.LANDING_BACKEND,
+        }:
+            if not self._vehicle.ready(
+                now,
+                heartbeat_timeout_s=self._positive_parameter(
+                    "mavlink_heartbeat_timeout_s"
+                ),
+            ):
+                self._debug_land_trigger_armed = False
+                self._cancel_pid_landing_debug_attempt(
+                    "heartbeat became stale; docking attempt cancelled"
+                )
+                return True
+            guided_transition_pending = (
+                self._state is CycleState.GUIDED_TAKEOVER
+                and state.mode in {LAND_MODE, GUIDED_MODE}
+                and (
+                    self._pending_mode() == GUIDED_MODE
+                    or self._guided_search_telemetry_deadline is not None
+                )
+            )
+            if (
+                state.flying is True
+                and state.mode != GUIDED_MODE
+                and not guided_transition_pending
+            ):
+                self._debug_land_trigger_armed = (
+                    state.mode != LAND_MODE
+                    and self._fresh_pid_landing_debug_trigger_state(now)
+                )
+                self._cancel_pid_landing_debug_attempt(
+                    "flight mode changed away from GUIDED; docking attempt cancelled"
+                )
+                return True
+        return False
+
+    def _cancel_pid_landing_debug_attempt(self, reason: str) -> None:
+        self._reset_active_guidance()
+        self._cancel_active_operation()
+        self._deferred_command = None
+        self._deferred_command_reason = ""
+        self._transition(CycleState.WAITING_LAND_TRIGGER, reason, force=True)
+
+    def _fresh_pid_landing_debug_trigger_state(self, now: float) -> bool:
+        state = self._vehicle.state
+        return self._fresh_airborne_telemetry(now) and self._fresh_landed_state(
+            now, state
+        )
 
     def close(self) -> None:
         """Cancel timer, release MAVLink once, then destroy the ROS node."""
@@ -992,14 +1119,34 @@ class FlightCycleManager(Node):
         ):
             self._operation_failed("handoff_guided", command.message, now)
             return
-        if not self._fresh_guided_search_telemetry(now):
-            self._route_failure(
-                "fresh heartbeat, position, and landed state telemetry "
-                "are required before shared dock search",
-                grounded_state=CycleState.FAILED_DISARMED,
-                now=now,
-            )
+        self._guided_search_telemetry_deadline = now + max(
+            self._positive_parameter("pose_timeout_s"),
+            self._positive_parameter("landed_state_timeout_s"),
+        )
+        self._advance_guided_search_start(now)
+
+    def _advance_guided_search_start(self, now: float) -> None:
+        deadline = self._guided_search_telemetry_deadline
+        if deadline is None:
             return
+        if not self._fresh_guided_search_telemetry(now):
+            if now >= deadline:
+                self._guided_search_telemetry_deadline = None
+                self._route_failure(
+                    "fresh heartbeat, position, and landed state telemetry "
+                    "did not arrive before the shared dock search timeout",
+                    grounded_state=CycleState.FAILED_DISARMED,
+                    now=now,
+                )
+            elif "waiting for fresh telemetry" not in self._reason:
+                self._transition(
+                    CycleState.GUIDED_TAKEOVER,
+                    "GUIDED handoff confirmed; waiting for fresh telemetry "
+                    "before shared dock search",
+                    force=True,
+                )
+            return
+        self._guided_search_telemetry_deadline = None
         state = self._vehicle.state
         assert state.position_enu_m is not None
         try:
@@ -1954,6 +2101,7 @@ class FlightCycleManager(Node):
     def _reset_active_guidance(self) -> None:
         self._dock_request_queued = False
         self._dock_request_acknowledged = False
+        self._guided_search_telemetry_deadline = None
         self._search_controller = None
         self._landing_controller = None
         self._landing_expected_modes = frozenset()

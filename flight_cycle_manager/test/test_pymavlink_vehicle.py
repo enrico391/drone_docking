@@ -365,6 +365,42 @@ def test_pending_command_times_out_with_terminal_failure(vehicle):
     assert future.result().message == "MAVLink operation timed out"
 
 
+def test_mode_timeout_reports_when_command_ack_is_missing(vehicle, connection):
+    """Break caught: a missing mode ACK looks like a rejected transition."""
+    push_heartbeat(connection, mode=9)
+    vehicle.poll(now=20.0)
+    future = vehicle.set_mode_async(4, now=20.1)
+
+    vehicle.poll(now=23.11)
+
+    assert future.done() is True
+    assert future.result().success is False
+    assert future.result().message == (
+        "MAVLink mode change timed out waiting for COMMAND_ACK; "
+        "expected mode 4, observed mode 9"
+    )
+
+
+def test_mode_timeout_reports_when_ack_arrives_without_expected_heartbeat(
+    vehicle, connection
+):
+    """Break caught: an ACK hides that the FC still reports another mode."""
+    push_heartbeat(connection, mode=9)
+    vehicle.poll(now=21.0)
+    future = vehicle.set_mode_async(4, now=21.1)
+    push_ack(connection, MAVLINK.MAV_CMD_DO_SET_MODE)
+
+    vehicle.poll(now=21.2)
+    vehicle.poll(now=24.11)
+
+    assert future.done() is True
+    assert future.result().success is False
+    assert future.result().message == (
+        "MAVLink mode change acknowledged but timed out waiting for mode 4; "
+        "observed mode 9"
+    )
+
+
 def test_condition_yaw_encodes_relative_signed_correction(vehicle, connection):
     """Break caught: dock yaw correction loses sign or is sent as absolute."""
     sent = vehicle.send_condition_yaw(yaw_error_rad=-1.5707963267948966)
