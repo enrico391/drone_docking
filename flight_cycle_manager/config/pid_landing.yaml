@@ -1,12 +1,12 @@
 flight_cycle_manager:
   ros__parameters:
     pid_tag_stable_time_s: 0.5
-    pid_central_transition_distance_m: 0.8
-    pid_central_acquire_timeout_s: 3.0
+    pid_central_transition_distance_m: 1.6
+    pid_central_acquire_timeout_s: 6.0
     pid_central_loss_grace_s: 0.3
     pid_recovery_climb_m: 0.3
     pid_recovery_altitude_tolerance_m: 0.05
-    pid_max_recovery_attempts: 3
+    pid_max_recovery_attempts: 10
     pid_touchdown_commit_height_m: 0.30
     pid_touchdown_speed_m_s: 0.05
     pid_touchdown_timeout_s: 15.0
@@ -18,18 +18,18 @@ flight_cycle_manager:
     pid_fine_horizontal_tolerance_m: 0.07
     pid_coarse_yaw_tolerance_rad: 0.2
     pid_fine_yaw_tolerance_rad: 0.1
-    pid_max_horizontal_speed_m_s: 0.5
-    pid_outer_descent_speed_m_s: 0.25
-    pid_central_descent_speed_m_s: 0.12
-    pid_recovery_speed_m_s: 0.2
+    pid_max_horizontal_speed_m_s: 0.6
+    pid_outer_descent_speed_m_s: 0.30
+    pid_central_descent_speed_m_s: 0.20
+    pid_recovery_speed_m_s: 0.20
     pid_max_yaw_rate_rad_s: 0.35
-    pid_target_loss_grace_s : 0.7
-    pid_x_kp: 0.60
+    pid_target_loss_grace_s : 4.0
+    pid_x_kp: 0.70
     pid_x_ki: 0.0
     pid_x_kd: 0.0
     pid_x_integral_limit: 0.5
     pid_x_derivative_filter_time_constant_s: 0.1
-    pid_y_kp: 0.60
+    pid_y_kp: 0.65
     pid_y_ki: 0.0
     pid_y_kd: 0.0
     pid_y_integral_limit: 0.5

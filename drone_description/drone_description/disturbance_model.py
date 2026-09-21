@@ -109,7 +109,7 @@ class DisturbanceModel:
             force = rotate_vector(force, orientation_xyzw)
             torque = rotate_vector(torque, orientation_xyzw)
         force_z = self.settings.ground_effect_max_force * ground_gain
-        force = (force[0], force[1], force[2] + force_z)
+        force = (force[0], force[1], max(0.0, force[2] + force_z))
         return Wrench(
             force=_clamp_vector(force, self.settings.force_limits),
             torque=_clamp_vector(torque, self.settings.torque_limits),

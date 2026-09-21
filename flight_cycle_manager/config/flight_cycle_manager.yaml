@@ -16,7 +16,7 @@ flight_cycle_manager:
     mission_download_timeout_s: 10.0
     mavlink_operation_timeout_s: 10.0
     mission_start_confirmation_timeout_s: 5.0
-    mavlink_heartbeat_timeout_s: 2.5
+    mavlink_heartbeat_timeout_s: 10.0 # 2.5 default
     pose_timeout_s: 1.0
     landed_state_timeout_s: 1.0
     dock_pose_timeout_s: 1.0
