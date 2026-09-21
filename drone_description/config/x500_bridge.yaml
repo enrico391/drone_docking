@@ -39,3 +39,13 @@
   ros_type_name: "sensor_msgs/msg/CameraInfo"
   gz_type_name: "gz.msgs.CameraInfo"
   direction: GZ_TO_ROS
+- ros_topic_name: "disturbance/wrench"
+  gz_topic_name: "/world/{{ world_name }}/wrench/persistent"
+  ros_type_name: "ros_gz_interfaces/msg/EntityWrench"
+  gz_type_name: "gz.msgs.EntityWrench"
+  direction: ROS_TO_GZ
+- ros_topic_name: "disturbance/clear"
+  gz_topic_name: "/world/{{ world_name }}/wrench/clear"
+  ros_type_name: "ros_gz_interfaces/msg/Entity"
+  gz_type_name: "gz.msgs.Entity"
+  direction: ROS_TO_GZ

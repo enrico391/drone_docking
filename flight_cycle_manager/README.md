@@ -259,13 +259,43 @@ ros2 launch flight_cycle_manager pid_landing_debug.launch.py   publish_camera:=t
 
 ## Disturbance injection
 
-To add disturbance in gazebo, use the following command, select the desired axis, and set the force magnitude in Newtons. For example, to apply a 1 N force along the x-axis:
+Start the configurable disturbance model with:
+
+```bash
+ros2 launch drone_bringup docking_sim.launch.py use_disturbances:=true
+```
+
+The default profile is `drone_description/config/disturbances.yaml`. It combines
+constant force and torque, seeded colored turbulence, periodic gusts, and a
+height-dependent ground-effect approximation. Wrenches are limited per axis and
+cleared when the node shuts down. It starts disabled so the vehicle can arm and
+take off level. Enable or disable it at runtime with:
+
+```bash
+ros2 param set /disturbance_injector enabled true
+ros2 param set /disturbance_injector enabled false
+```
+
+With a namespace, use `/namespace/disturbance_injector`. Disabling immediately
+publishes a zero wrench and clears Gazebo's persistent wrench. Set
+`ground_effect.surface_z` to the surface under the vehicle (`0.0` for the ground
+plane or `0.88` for the current dock).
+
+Select a different profile with:
+
+```bash
+ros2 launch drone_bringup docking_sim.launch.py \
+  use_disturbances:=true disturbance_config:=/path/to/disturbances.yaml
+```
+
+For a manual constant disturbance, select the desired axis and magnitude in
+Newtons. For example, to apply a 1 N force along the world x-axis:
 
 ```bash
 gz topic -t /world/docking_world/wrench/persistent     -m gz.msgs.EntityWrench     -p "entity: {name: 'x500', type: MODEL}, wrench: {force: {x:1.0}}"
 ```
 
-to remove the disturbance, use:
+To remove the manual disturbance, use:
 
 ```bash
 gz topic -t /world/docking_world/wrench/clear     -m gz.msgs.Entity     -p "name: 'x500', type: MODEL"

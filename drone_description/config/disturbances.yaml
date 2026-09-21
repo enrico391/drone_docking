@@ -1,0 +1,36 @@
+/**:
+  ros__parameters:
+    use_sim_time: true
+    # Start unloaded so the vehicle can arm and take off level. Enable at runtime.
+    enabled: false
+    target_model: x500
+    update_rate: 50.0
+    frame: body
+    random_seed: 42
+
+    constant.force: [0.0, 0.0, 0.0]
+    constant.torque: [0.0, 0.0, 0.0]
+
+    turbulence.enabled: true
+    turbulence.force_stddev: [0.01, 0.01, 0.008]
+    turbulence.torque_stddev: [0.001, 0.001, 0.001]
+    turbulence.correlation_time: 0.3
+
+    gust.enabled: true
+    gust.force: [0.01, 0.0, 0.0]
+    gust.torque: [0.0, 0.001, 0.0]
+    gust.duration: 0.3
+    gust.interval: 5.0
+
+    # Height is measured from this flat surface to the rotor plane.
+    # Use 0.88 for the current dock top instead of the surrounding ground.
+    ground_effect.enabled: true
+    ground_effect.surface_z: 0.88
+    ground_effect.rotor_plane_offset: 0.03
+    ground_effect.minimum_height: 0.88
+    ground_effect.maximum_height: 1.2
+    ground_effect.maximum_upward_force: 0.2
+    ground_effect.turbulence_gain: 1.8
+
+    limits.force: [0.01, 0.01, 0.02]
+    limits.torque: [0.003, 0.003, 0.003]

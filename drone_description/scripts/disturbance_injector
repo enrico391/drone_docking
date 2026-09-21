@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+"""Executable entry point for the simulation disturbance injector."""
+
+from drone_description.disturbance_injector import main
+
+
+if __name__ == "__main__":
+    main()
