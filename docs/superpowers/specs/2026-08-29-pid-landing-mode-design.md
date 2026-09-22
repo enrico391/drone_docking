@@ -220,9 +220,28 @@ retry count fails PID landing and holds zero velocity.
 
 Touchdown is committed because climbing after the tag fills or leaves the
 camera view near the surface would be unsafe. Tag loss no longer triggers
-recovery. X, Y and yaw corrections stop, and the vehicle sends zero horizontal
-velocity, zero yaw rate and a constant slow downward velocity. The initial
-touchdown speed is 0.05 m/s.
+recovery.
+
+Visual corrections stop being *measured* but not being *commanded*. At the
+commit update, which is the last update with a usable, finely aligned central
+observation, the tag becomes the aperture reference:
+
+- the sampled vehicle position is shifted by the residual `forward_m`/`left_m`
+  tag offset (rotated out of body FLU with `ATTITUDE.yaw`) and latched as an ENU
+  position;
+- the heading (`ATTITUDE.yaw`, NED) reduced by `yaw_error_rad` is latched as the
+  reference orientation.
+
+While a constant slow downward velocity is applied, the X, Y and yaw PIDs keep
+running against that frozen reference with the same gains, limits and frame
+conversions as the visual states. The initial touchdown speed is 0.05 m/s.
+
+This keeps a vehicle entering a cube-shaped dock centred on the aperture and
+aligned with it, instead of relying on the flight controller's implicit position
+hold and on a zero yaw *rate*, which only rate-damps ground-effect and wall
+torque. Heading feedback is required: when attitude telemetry is missing (or a
+bounced touchdown never latched a reference), the controller degrades to zero
+horizontal velocity, zero yaw rate and the constant descent.
 
 The vehicle remains in `GUIDED`. A fresh ArduPilot
 `MAV_LANDED_STATE_ON_GROUND` held for `pid_landed_stable_time_s` transitions to

@@ -40,6 +40,11 @@ def install_ros_fakes() -> None:
             self.name = name
             self.value = value
 
+    class SetParametersResult:
+        def __init__(self, *, successful: bool = False, reason: str = "") -> None:
+            self.successful = successful
+            self.reason = reason
+
     class _ParameterValue:
         def __init__(self, value: object) -> None:
             self.value = value
@@ -89,6 +94,7 @@ def install_ros_fakes() -> None:
                 for parameter in (parameter_overrides or ())
             }
             self.destroyed = False
+            self._parameters_callbacks: list[object] = []
 
         def declare_parameter(self, name: str, value: object) -> _ParameterValue:
             self._parameter_values.setdefault(name, value)
@@ -96,6 +102,20 @@ def install_ros_fakes() -> None:
 
         def get_parameter(self, name: str) -> _ParameterValue:
             return _ParameterValue(self._parameter_values[name])
+
+        def add_on_set_parameters_callback(self, callback: object) -> object:
+            self._parameters_callbacks.append(callback)
+            return callback
+
+        def set_parameters_atomically(
+            self, parameters: Sequence[Parameter]
+        ) -> SetParametersResult:
+            for callback in reversed(self._parameters_callbacks):
+                result = callback(list(parameters))
+                if not result.successful:
+                    return result
+            self._parameter_values.update({item.name: item.value for item in parameters})
+            return SetParametersResult(successful=True)
 
         def create_publisher(self, message_type: object, topic: str, qos: object) -> _Publisher:
             del message_type, qos
@@ -212,6 +232,9 @@ def install_ros_fakes() -> None:
     std_srvs_module = ModuleType("std_srvs")
     std_srvs_srv_module = ModuleType("std_srvs.srv")
     std_srvs_srv_module.Trigger = Trigger
+    rcl_interfaces_module = ModuleType("rcl_interfaces")
+    rcl_interfaces_msg_module = ModuleType("rcl_interfaces.msg")
+    rcl_interfaces_msg_module.SetParametersResult = SetParametersResult
     sys.modules.update(
         {
             "rclpy": rclpy_module,
@@ -224,6 +247,8 @@ def install_ros_fakes() -> None:
             "std_msgs.msg": std_msgs_msg_module,
             "std_srvs": std_srvs_module,
             "std_srvs.srv": std_srvs_srv_module,
+            "rcl_interfaces": rcl_interfaces_module,
+            "rcl_interfaces.msg": rcl_interfaces_msg_module,
         }
     )
 

@@ -1,3 +1,4 @@
+import math
 from dataclasses import fields, replace
 
 import pytest
@@ -95,23 +96,37 @@ def central_observation(received_at, *, distance_m=0.9):
     )
 
 
-def vehicle_observation(*, altitude_m=4.0, armed=True, flying=True, landed_at=0.0):
+def vehicle_observation(
+    *,
+    altitude_m=4.0,
+    armed=True,
+    flying=True,
+    landed_at=0.0,
+    heading_rad=None,
+    position_enu_m=None,
+):
     return VehicleObservation(
-        position_enu_m=(4.0, -2.0, altitude_m),
+        position_enu_m=(
+            (4.0, -2.0, altitude_m)
+            if position_enu_m is None
+            else position_enu_m
+        ),
         velocity_enu_m_s=(0.0, 0.0, 0.0),
         armed=armed,
         flying=flying,
         mode=4,
         landed_at=landed_at,
+        heading_rad=heading_rad,
     )
 
 
-def grounded_vehicle(now, *, armed=True, landed_at=None):
+def grounded_vehicle(now, *, armed=True, landed_at=None, heading_rad=None):
     return vehicle_observation(
         altitude_m=0.0,
         armed=armed,
         flying=False,
         landed_at=now if landed_at is None else landed_at,
+        heading_rad=heading_rad,
     )
 
 
@@ -187,6 +202,55 @@ def test_pid_backend_starts_at_alignment_after_shared_search():
     assert decision.outcome is LandingBackendOutcome.RUNNING
 
 
+def test_alignment_only_backend_never_advances_or_commands_height():
+    """Break caught: tuning resumes landing after stable alignment."""
+    backend = PidLandingBackend(pid_config(), align_only=True)
+    backend.start(
+        now=0.0,
+        dock=dock_observation(0.0),
+        vehicle=vehicle_observation(),
+    )
+
+    backend.update(
+        now=0.1,
+        dock=dock_observation(0.1),
+        vehicle=vehicle_observation(),
+    )
+    decision = backend.update(
+        now=2.0,
+        dock=dock_observation(2.0),
+        vehicle=vehicle_observation(),
+    )
+
+    assert decision.substate == "PID_ALIGN"
+    assert decision.outcome is LandingBackendOutcome.RUNNING
+    assert decision.velocity is not None
+    assert decision.velocity.velocity_z == 0.0
+    assert decision.velocity.velocity_x != 0.0
+
+
+def test_alignment_only_backend_waits_without_recovery_when_target_is_lost():
+    """Break caught: target loss makes tuning mode climb or hand back."""
+    backend = PidLandingBackend(
+        pid_config(target_loss_grace_s=0.1), align_only=True
+    )
+    backend.start(
+        now=0.0,
+        dock=dock_observation(0.0),
+        vehicle=vehicle_observation(),
+    )
+
+    decision = backend.update(
+        now=10.0, dock=None, vehicle=vehicle_observation()
+    )
+
+    assert decision.substate == "PID_ALIGN"
+    assert decision.outcome is LandingBackendOutcome.RUNNING
+    assert decision.velocity == VelocityCommand(
+        VelocityFrame.BODY_FLU, 0.0, 0.0, 0.0
+    )
+
+
 def test_removed_initial_search_is_absent_from_the_pid_public_path():
     assert "ACQUIRE_DOCK" not in PidLandingState.__members__
     assert "SEARCH_CIRCLE" not in PidLandingState.__members__
@@ -236,6 +300,28 @@ def enter_outer_descent(backend):
         now=1.11, dock=dock_observation(1.11), vehicle=vehicle_observation(),
     )
     assert decision.substate == "DESCEND_OUTER"
+
+
+@pytest.mark.parametrize("central", [False, True])
+@pytest.mark.parametrize("axis", ["forward_m", "yaw_error_rad"])
+def test_misalignment_pauses_descent_and_resumes_without_old_vertical_error(central, axis):
+    backend = start_backend()
+    (enter_central_descent if central else enter_outer_descent)(backend)
+    dock = central_observation(2.0) if central else dock_observation(2.0)
+    vehicle = vehicle_observation()
+    backend.update(now=2.0, dock=dock, vehicle=vehicle)
+    descending = backend.update(now=2.1, dock=dock, vehicle=vehicle)
+    assert descending.velocity.velocity_z < 0.0
+    paused = backend.update(now=2.2, dock=replace(dock, **{axis: 0.3}), vehicle=vehicle)
+    assert paused.velocity.velocity_z == 0.0
+    assert paused.velocity.velocity_x != 0.0
+    tolerance = (0.1 if axis == "yaw_error_rad" else 0.07) if central else 0.2
+    near_boundary = replace(dock, **{axis: tolerance * 0.9})
+    assert backend.update(now=2.3, dock=near_boundary, vehicle=vehicle).velocity.velocity_z == 0.0
+    # Rebase on the current height after drift during the pause.
+    recovered = replace(dock, distance_m=dock.distance_m - 0.1)
+    assert backend.update(now=2.4, dock=recovered, vehicle=vehicle).velocity.velocity_z == 0.0
+    assert backend.update(now=2.5, dock=recovered, vehicle=vehicle).velocity.velocity_z < 0.0
 
 
 def test_brief_alignment_loss_restarts_stability_dwell():
@@ -462,6 +548,152 @@ def test_touchdown_commitment_is_reported_as_running():
     assert committed.velocity == VelocityCommand(
         VelocityFrame.BODY_FLU, 0.0, 0.0, 0.0
     )
+
+
+def enter_touchdown_commitment_with_reference(
+    backend, *, heading_rad, dock=None, vehicle=None
+):
+    dock = dock or central_observation(1.8, distance_m=0.20)
+    vehicle = vehicle or {}
+    enter_central_descent(backend)
+    backend.update(
+        now=1.8,
+        dock=dock,
+        vehicle=vehicle_observation(heading_rad=heading_rad, **vehicle),
+    )
+    return backend.update(
+        now=2.81,
+        dock=replace(dock, source_stamp_s=2.81, received_at=2.81),
+        vehicle=vehicle_observation(heading_rad=heading_rad, **vehicle),
+    )
+
+
+def test_touchdown_reference_is_the_last_aligned_tag_position():
+    """Break caught: touchdown is blind to the aperture centre it must enter."""
+    backend = start_backend()
+    committed = enter_touchdown_commitment_with_reference(
+        backend, heading_rad=0.0
+    )
+    assert committed.substate == "TOUCHDOWN_APPROACH"
+
+    holding = backend.update(
+        now=2.9, dock=None, vehicle=vehicle_observation(heading_rad=0.0)
+    )
+
+    # The tag sat 0.05 m ahead and 0.05 m left of the vehicle at commit, so the
+    # latched aperture is 0.05 m east and 0.05 m north of it. The residual
+    # 0.05 rad yaw error is removed from the reference orientation too.
+    assert holding.velocity.velocity_x == pytest.approx(0.05)
+    assert holding.velocity.velocity_y == pytest.approx(-0.05)
+    assert holding.velocity.velocity_z == -0.05
+    assert holding.velocity.yaw_rate_rad_s == pytest.approx(0.05)
+
+
+def test_touchdown_pulls_the_vehicle_back_onto_the_aperture_axis():
+    """Break caught: a disturbance pushes the vehicle off the entry axis."""
+    backend = start_backend()
+    enter_touchdown_commitment_with_reference(backend, heading_rad=0.0)
+
+    disturbed = backend.update(
+        now=2.9,
+        dock=None,
+        vehicle=vehicle_observation(
+            heading_rad=0.0,
+            position_enu_m=(4.08, -2.02, 4.0),
+        ),
+    )
+
+    # 0.03 m east and 0.07 m south of the aperture: fly north and west.
+    assert disturbed.velocity.velocity_x == pytest.approx(0.07)
+    assert disturbed.velocity.velocity_y == pytest.approx(0.03)
+
+
+def test_touchdown_reference_rotates_into_the_body_frame():
+    """Break caught: the ENU error is not rotated into the body FLU frame."""
+    backend = start_backend()
+    aligned = replace(
+        central_observation(1.8, distance_m=0.20),
+        forward_m=0.0,
+        left_m=0.0,
+        yaw_error_rad=0.0,
+    )
+    enter_touchdown_commitment_with_reference(
+        backend, heading_rad=math.pi / 2.0, dock=aligned
+    )
+
+    disturbed = backend.update(
+        now=2.9,
+        dock=None,
+        vehicle=vehicle_observation(
+            heading_rad=math.pi / 2.0,
+            position_enu_m=(3.90, -2.0, 4.0),
+        ),
+    )
+
+    # Facing east, a 0.10 m westward push is a pure forward error.
+    assert disturbed.velocity.velocity_x == pytest.approx(0.10)
+    assert disturbed.velocity.velocity_y == pytest.approx(0.0)
+    assert disturbed.velocity.yaw_rate_rad_s == pytest.approx(0.0)
+
+
+def test_touchdown_heading_reference_wraps_across_the_pi_boundary():
+    """Break caught: the heading hold forgets the shortest-path yaw error."""
+    backend = start_backend()
+    aligned = replace(
+        central_observation(1.8, distance_m=0.20),
+        forward_m=0.0,
+        left_m=0.0,
+        yaw_error_rad=0.0,
+    )
+    enter_touchdown_commitment_with_reference(
+        backend, heading_rad=math.pi - 0.05, dock=aligned
+    )
+
+    disturbed = backend.update(
+        now=2.9,
+        dock=None,
+        vehicle=vehicle_observation(heading_rad=-math.pi + 0.05),
+    )
+
+    assert disturbed.velocity.yaw_rate_rad_s == pytest.approx(0.10)
+
+
+def test_touchdown_without_attitude_keeps_the_passive_descent():
+    """Break caught: missing attitude telemetry must not invent a setpoint."""
+    backend = start_backend()
+    enter_touchdown_commitment(backend)
+
+    descending = backend.update(
+        now=2.9, dock=None, vehicle=vehicle_observation()
+    )
+
+    assert descending.velocity == VelocityCommand(
+        VelocityFrame.BODY_FLU, 0.0, 0.0, -0.05
+    )
+
+
+def test_disarm_bounce_keeps_the_latched_touchdown_reference():
+    """Break caught: a bounced touchdown re-latches a disturbed pose."""
+    backend = start_backend()
+    enter_touchdown_commitment_with_reference(backend, heading_rad=0.30)
+    backend.update(
+        now=2.9, dock=None, vehicle=grounded_vehicle(2.9, heading_rad=0.30)
+    )
+    disarming = backend.update(
+        now=3.41,
+        dock=None,
+        vehicle=grounded_vehicle(3.41, landed_at=2.9, heading_rad=0.30),
+    )
+    assert disarming.substate == "DISARM"
+
+    bounced = backend.update(
+        now=3.5, dock=None, vehicle=vehicle_observation(heading_rad=0.40)
+    )
+
+    # The reference is the tag orientation (0.30 - 0.05 rad), not the vehicle
+    # orientation sampled at commit.
+    assert bounced.substate == "TOUCHDOWN_APPROACH"
+    assert bounced.velocity.yaw_rate_rad_s == pytest.approx(0.15)
 
 
 def test_postcommit_failure_requests_direct_land():

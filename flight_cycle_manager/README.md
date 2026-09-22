@@ -9,6 +9,10 @@ skips the mission and takeoff lifecycle so an already-airborne vehicle can run
 only dock search and PID landing. It is intended for supervised PID tuning and
 debugging.
 
+For gain tuning without landing, `pid_align_debug.launch.py` runs only the X/Y
+and yaw alignment PIDs. It never commands vertical motion and never advances
+to descent, recovery climb, touchdown, or disarm.
+
 ## Required onboard mission
 
 Upload the mission from Mission Planner before launching this node. The stored
@@ -69,25 +73,39 @@ commit, and disarm retry behavior.
 
 During `PID_ALIGN` and `DESCEND_OUTER`, an unusable dock observation immediately
 commands zero velocity and resets visual PID history. The controller waits for
-`pid_target_loss_grace_s` (0.7 s in the supplied configuration). If the target
+`pid_target_loss_grace_s` (4.0 s in the supplied configuration). If the target
 remains unavailable, it climbs `pid_recovery_climb_m` (0.3 m) and enters
 `REACQUIRE_DOCK`. Any usable dock mode can be reacquired after
 `pid_tag_stable_time_s` (0.5 s) of continuous observations, then the controller
 returns to `PID_ALIGN` before descending again.
 
-The existing `pid_central_acquire_timeout_s` (3 s) bounds each acquisition
+The existing `pid_central_acquire_timeout_s` (6 s) bounds each acquisition
 window, including `REACQUIRE_DOCK`. All recovery paths share
-`pid_max_recovery_attempts` (3) for the entire landing attempt; reacquiring a
+`pid_max_recovery_attempts` (10) for the entire landing attempt; reacquiring a
 tag does not replenish the budget. Every recovery, including a central-tag
 failure, follows `RECOVERY_CLIMB -> REACQUIRE_DOCK -> PID_ALIGN`. Alignment
 selects the next landing stage from the distance and detected tag mode;
 central descent and touchdown still require the central tag.
 A climb must reach its target within the nominal climb duration
 (`pid_recovery_climb_m / pid_recovery_speed_m_s`) plus the acquisition timeout
-(4.5 s with the supplied configuration). Exhausted retries or a climb timeout
-report failure before touchdown commit and use the manager's existing fallback.
+(7.5 s with the supplied configuration, floored at 10 s by the current
+`climb_timeout_s = max(..., 10.0)` temporary fix). Exhausted retries or a climb
+timeout report failure before touchdown commit and use the manager's existing
+fallback.
 Telemetry loss and pilot takeover remain subject to the manager's authority
 checks throughout recovery.
+
+Touchdown does not go blind. At the last usable, finely aligned central
+observation the controller latches the docking tag as the entry reference: the
+sampled vehicle position shifted by the residual `forward_m`/`left_m` tag
+offset, plus the heading from `ATTITUDE.yaw` corrected by the tag yaw error. The
+X, Y and yaw PIDs then keep running against that frozen reference while a
+constant `pid_touchdown_speed_m_s` descent is commanded, so entering a cube-shaped
+dock stays centred and aligned instead of relying on the flight controller's
+implicit position hold and on a zero yaw rate. When attitude telemetry is
+unavailable the touchdown command degrades to zero horizontal velocity, zero
+yaw rate and the constant descent.
+
 
 `landing_backend:=precise_landing` streams `LANDING_TARGET` updates and lets
 ArduPilot complete the descent in `LAND`. The common configuration still owns
@@ -199,6 +217,67 @@ ros2 launch flight_cycle_manager pid_landing_debug.launch.py \
   landing_attempt_log_directory:=/tmp/landing_attempts \
   landing_attempt_log_enabled:=false
 ```
+
+## Alignment-only PID tuning
+
+To switch an already-airborne vehicle to `GUIDED` and begin alignment as soon
+as fresh telemetry is available, run:
+
+```bash
+ros2 launch flight_cycle_manager pid_align_debug.launch.py \
+  pid_align_auto_start:=true
+```
+
+The controller uses the dock pose to drive X, Y, and yaw error toward zero but
+always commands zero vertical velocity. It bypasses dock search and remains in
+`PID_ALIGN`, even after the alignment tolerance has been held. If the dock tag
+is lost, it commands zero velocity and waits for a fresh target without
+climbing or landing.
+
+For manual engagement, leave `pid_align_auto_start:=false` (the default) and
+select `LAND` once while airborne. As in landing debug mode, changing away from
+manager-owned `GUIDED` cancels the attempt.
+
+Run `ros2 run flight_cycle_manager pid_tuner` in another terminal to modify the
+active gains and inspect `/flight_cycle_manager/pid_debug`.
+
+### Live PID tuning
+
+PID gains can be changed while a PID landing is active. Updates are validated
+atomically and ramped over 0.5 seconds to avoid a command step. The active
+controller keeps its derivative and integral history, while enabling or
+changing `Ki` avoids releasing an old hidden integral value.
+
+For a small visual tuner with live error/command plots, run:
+
+```bash
+ros2 run flight_cycle_manager pid_tuner
+```
+
+Then open `http://127.0.0.1:8765`. Select one axis, change its gains, and press
+**Apply**. **Undo** restores the last applied values, **P-only** zeros Ki/Kd,
+and **Download YAML** saves all displayed gains. The page is local-only and
+uses atomic ROS parameter updates.
+
+The same parameters can be changed from a terminal, for example:
+
+```bash
+ros2 param set /flight_cycle_manager pid_x_kp 1.0
+ros2 param set /flight_cycle_manager pid_y_kp 1.0
+```
+
+During PID landing, `/flight_cycle_manager/pid_debug` publishes compact JSON
+with the landing state, visual error, commanded and measured velocity, active
+gains, P/I/D terms, saturation, and whether descent is paused:
+
+```bash
+ros2 topic echo /flight_cycle_manager/pid_debug
+```
+
+Start with X/Y `Kp`; only add a small `Ki` when the trace shows a persistent
+offset. Descent pauses outside the phase's existing alignment tolerance and
+resumes inside 80% of that tolerance, preventing stale vertical error from
+continuing the descent during a disturbance.
 
 To force a manual mode takeover during SITL, use a separate MAVLink client on
 the observer port (`5762`). Replace `mode_id` with `3` (`AUTO`), `4`

@@ -48,6 +48,82 @@ def make_debug_manager(
     )
 
 
+def make_align_manager(
+    vehicle: FakeVehicle, *, auto_start: bool
+) -> FlightCycleManager:
+    return FlightCycleManager(
+        vehicle=vehicle,
+        parameter_values={
+            "operation_mode": "pid_align_debug",
+            "pid_align_auto_start": auto_start,
+        },
+    )
+
+
+def test_align_debug_auto_start_requests_guided_without_land_trigger():
+    """Break caught: auto-start alignment remains blocked on a LAND edge."""
+    vehicle = FakeVehicle(airborne_state(1.0, mode=LOITER_MODE))
+    manager = make_align_manager(vehicle, auto_start=True)
+    try:
+        manager.tick(1.0)
+
+        assert manager.state is CycleState.GUIDED_TAKEOVER
+        assert vehicle.set_mode_calls == [GUIDED_MODE]
+    finally:
+        manager.close()
+
+
+def test_align_debug_manual_start_still_requires_fresh_land_edge():
+    """Break caught: disabling auto-start no longer keeps alignment passive."""
+    vehicle = FakeVehicle(airborne_state(1.0, mode=LOITER_MODE))
+    manager = make_align_manager(vehicle, auto_start=False)
+    try:
+        manager.tick(1.0)
+        assert manager.state is CycleState.WAITING_LAND_TRIGGER
+        assert vehicle.set_mode_calls == []
+
+        vehicle.state = airborne_state(1.1, mode=LAND_MODE)
+        manager.tick(1.1)
+        assert manager.state is CycleState.GUIDED_TAKEOVER
+        assert vehicle.set_mode_calls == [GUIDED_MODE]
+    finally:
+        manager.close()
+
+
+def test_align_debug_starts_backend_without_shared_search():
+    """Break caught: alignment tuning runs the height-changing dock search."""
+    vehicle = FakeVehicle(airborne_state(2.0, mode=LOITER_MODE))
+    manager = make_align_manager(vehicle, auto_start=True)
+    try:
+        manager.tick(2.0)
+        vehicle.finish_command(current_mode=GUIDED_MODE)
+        vehicle.state = airborne_state(2.1, mode=GUIDED_MODE)
+        manager.tick(2.1)
+
+        assert manager.state is CycleState.LANDING_BACKEND
+        assert manager.search_controller is None
+        assert manager.backend is not None
+    finally:
+        manager.close()
+
+
+def test_align_debug_guided_rejection_stops_without_commanding_land():
+    """Break caught: failed tuning engagement unexpectedly starts a landing."""
+    vehicle = FakeVehicle(airborne_state(3.0, mode=LOITER_MODE))
+    manager = make_align_manager(vehicle, auto_start=True)
+    try:
+        manager.tick(3.0)
+        vehicle.finish_command(success=False, message="GUIDED rejected")
+
+        manager.tick(3.1)
+
+        assert manager.state is CycleState.WAITING_LAND_TRIGGER
+        assert vehicle.land_calls == 0
+        assert "GUIDED rejected" in manager.reason
+    finally:
+        manager.close()
+
+
 class _OneDecisionBackend:
     def __init__(self, decision: LandingBackendDecision) -> None:
         self._decision = decision

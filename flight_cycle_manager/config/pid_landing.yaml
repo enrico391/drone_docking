@@ -3,12 +3,12 @@ flight_cycle_manager:
     pid_tag_stable_time_s: 0.5
     pid_central_transition_distance_m: 1.6
     pid_central_acquire_timeout_s: 6.0
-    pid_central_loss_grace_s: 0.3
+    pid_central_loss_grace_s: 1.0 # used in update descend central 
     pid_recovery_climb_m: 0.3
     pid_recovery_altitude_tolerance_m: 0.05
     pid_max_recovery_attempts: 10
     pid_touchdown_commit_height_m: 0.30
-    pid_touchdown_speed_m_s: 0.05
+    pid_touchdown_speed_m_s: 0.10
     pid_touchdown_timeout_s: 15.0
     pid_landed_state_timeout_s: 1.0
     pid_landed_stable_time_s: 0.5
@@ -24,19 +24,19 @@ flight_cycle_manager:
     pid_recovery_speed_m_s: 0.20
     pid_max_yaw_rate_rad_s: 0.35
     pid_target_loss_grace_s : 4.0
-    pid_x_kp: 0.70
-    pid_x_ki: 0.0
-    pid_x_kd: 0.0
+    pid_x_kp: 0.30
+    pid_x_ki: 0.02
+    pid_x_kd: 0.20
     pid_x_integral_limit: 0.5
     pid_x_derivative_filter_time_constant_s: 0.1
-    pid_y_kp: 0.65
-    pid_y_ki: 0.0
-    pid_y_kd: 0.0
+    pid_y_kp: 0.30
+    pid_y_ki: 0.02
+    pid_y_kd: 0.20
     pid_y_integral_limit: 0.5
     pid_y_derivative_filter_time_constant_s: 0.1
     pid_z_kp: 0.7
-    pid_z_ki: 0.0
-    pid_z_kd: 0.0
+    pid_z_ki: 0.05
+    pid_z_kd: 0.05
     pid_z_integral_limit: 0.5
     pid_z_derivative_filter_time_constant_s: 0.1
     pid_yaw_kp: 0.7
@@ -44,4 +44,3 @@ flight_cycle_manager:
     pid_yaw_kd: 0.0
     pid_yaw_integral_limit: 0.5
     pid_yaw_derivative_filter_time_constant_s: 0.1
-

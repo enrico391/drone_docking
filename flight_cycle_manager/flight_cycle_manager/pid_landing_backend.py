@@ -15,6 +15,7 @@ from .pid_landing import (
     PidLandingOutcome,
     PidLandingState,
 )
+from .pid import PIDConfig
 
 
 _COMMITTED_STATES = frozenset(
@@ -29,9 +30,15 @@ _COMMITTED_STATES = frozenset(
 class PidLandingBackend:
     """Map pure PID decisions into the shared landing-backend contract."""
 
-    def __init__(self, config: PidLandingConfig):
-        self._controller = PidLandingController(config)
+    def __init__(self, config: PidLandingConfig, *, align_only: bool = False):
+        self._controller = PidLandingController(config, align_only=align_only)
         self._touchdown_committed = False
+
+    def reconfigure_pids(self, configs: tuple[PIDConfig, ...]) -> None:
+        self._controller.reconfigure_pids(configs)
+
+    def diagnostics(self) -> dict:
+        return self._controller.diagnostics()
 
     def start(
         self,

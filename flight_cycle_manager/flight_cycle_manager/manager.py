@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import json
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -12,6 +13,7 @@ import rclpy
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -155,17 +157,25 @@ class FlightCycleManager(Node):
         self._operation_mode = str(
             self.get_parameter("operation_mode").value
         ).strip().lower()
-        if self._operation_mode not in {"flight_cycle", "pid_landing_debug"}:
+        if self._operation_mode not in {
+            "flight_cycle",
+            "pid_landing_debug",
+            "pid_align_debug",
+        }:
             self.destroy_node()
             raise ValueError(
-                "operation_mode must be 'flight_cycle' or 'pid_landing_debug'"
+                "operation_mode must be 'flight_cycle', 'pid_landing_debug', "
+                "or 'pid_align_debug'"
             )
         if (
-            self._operation_mode == "pid_landing_debug"
+            self._operation_mode in {"pid_landing_debug", "pid_align_debug"}
             and self._landing_backend != "pid"
         ):
             self.destroy_node()
-            raise ValueError("pid_landing_debug requires landing_backend=pid")
+            raise ValueError("PID debug modes require landing_backend=pid")
+        self._pid_align_auto_start = bool(
+            self.get_parameter("pid_align_auto_start").value
+        )
 
         self._vehicle = vehicle or MavlinkVehicle(
             connection=str(self.get_parameter("mavlink_connection").value),
@@ -219,6 +229,12 @@ class FlightCycleManager(Node):
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
             ),
         )
+        self._pid_debug_publisher = self.create_publisher(
+            String, "~/pid_debug", 10
+        )
+        self._parameter_callback = self.add_on_set_parameters_callback(
+            self._on_parameters_changed
+        )
         self._start_service = self.create_service(
             Trigger, "~/start_cycle", self._start_cycle_callback
         )
@@ -259,6 +275,10 @@ class FlightCycleManager(Node):
         self._pending_pid_disarm_request_id: Optional[int] = None
         self._pending_pid_disarm_timeout_notified = False
         self._debug_land_trigger_armed = False
+        self._pid_align_auto_start_pending = (
+            self._operation_mode == "pid_align_debug"
+            and self._pid_align_auto_start
+        )
         self._landing_attempt_log = LandingAttemptLog(
             enabled=bool(
                 self.get_parameter("landing_attempt_log_enabled").value
@@ -273,10 +293,15 @@ class FlightCycleManager(Node):
 
         # Startup validation is deliberately read-only. A later cycle request
         # always starts another download, so it never trusts this result.
-        if self._operation_mode == "pid_landing_debug":
+        if self._operation_mode in {"pid_landing_debug", "pid_align_debug"}:
+            reason = (
+                "waiting for fresh airborne telemetry to start PID alignment"
+                if self._pid_align_auto_start_pending
+                else "waiting for a fresh airborne LAND mode transition"
+            )
             self._transition(
                 CycleState.WAITING_LAND_TRIGGER,
-                "waiting for a fresh airborne LAND mode transition",
+                reason,
             )
         else:
             self._begin_validation(time.monotonic(), start_requested=False)
@@ -320,6 +345,7 @@ class FlightCycleManager(Node):
         """Declare lifecycle, shared-search, and landing backend defaults."""
         defaults = {
             "operation_mode": "flight_cycle",
+            "pid_align_auto_start": False,
             "simulation_mode": False,
             "auto_start": False,
             "landing_backend": "pid",
@@ -419,11 +445,11 @@ class FlightCycleManager(Node):
     ) -> Trigger.Response:
         """Queue only a fresh mission validation for one explicit cycle."""
         del request
-        if self._operation_mode == "pid_landing_debug":
+        if self._operation_mode in {"pid_landing_debug", "pid_align_debug"}:
             return self._reject_start(
                 response,
                 "cycle request rejected: mission lifecycle is disabled in "
-                "pid_landing_debug mode",
+                f"{self._operation_mode} mode",
             )
         if self._vehicle.state.armed is True:
             return self._reject_start(response, "cycle request rejected: vehicle is armed")
@@ -490,7 +516,7 @@ class FlightCycleManager(Node):
         self._vehicle.receive_telemetry(now)
         if self._closed:
             return
-        if self._operation_mode == "pid_landing_debug":
+        if self._operation_mode in {"pid_landing_debug", "pid_align_debug"}:
             if self._advance_pid_landing_debug_lifecycle(now):
                 return
         if self._state is CycleState.DOCKED:
@@ -634,6 +660,20 @@ class FlightCycleManager(Node):
             if not self._fresh_pid_landing_debug_trigger_state(now):
                 self._debug_land_trigger_armed = False
                 return True
+            if self._pid_align_auto_start_pending:
+                self._pid_align_auto_start_pending = False
+                self._debug_land_trigger_armed = False
+                self._transition(
+                    CycleState.GUIDED_TAKEOVER,
+                    "fresh airborne telemetry received; requesting GUIDED "
+                    "for PID alignment",
+                )
+                self._begin_operation(
+                    "handoff_guided",
+                    self._vehicle.set_mode_async(GUIDED_MODE, now),
+                    now,
+                )
+                return True
             if state.mode != LAND_MODE:
                 self._debug_land_trigger_armed = True
                 return True
@@ -668,7 +708,10 @@ class FlightCycleManager(Node):
                 return True
             guided_transition_pending = (
                 self._state is CycleState.GUIDED_TAKEOVER
-                and state.mode in {LAND_MODE, GUIDED_MODE}
+                and (
+                    self._operation_mode == "pid_align_debug"
+                    or state.mode in {LAND_MODE, GUIDED_MODE}
+                )
                 and (
                     self._pending_mode() == GUIDED_MODE
                     or self._guided_search_telemetry_deadline is not None
@@ -844,7 +887,10 @@ class FlightCycleManager(Node):
                 force=True,
             )
         elif name == "handoff_guided":
-            self._start_shared_search(now, result)
+            if self._operation_mode == "pid_align_debug":
+                self._start_pid_alignment(now, result)
+            else:
+                self._start_shared_search(now, result)
         elif name == "start_mission":
             state = self._vehicle.state
             self._auto_heartbeat_baseline = state.heartbeat_at
@@ -897,6 +943,12 @@ class FlightCycleManager(Node):
 
     def _operation_failed(self, name: str, message: str, now: float) -> None:
         reason = f"{name.replace('_', ' ')} failed: {message or 'rejected'}"
+        if (
+            self._operation_mode == "pid_align_debug"
+            and name == "handoff_guided"
+        ):
+            self._cancel_pid_landing_debug_attempt(reason)
+            return
         if name in {"mission_download", "native_landing_parameters"}:
             self._invalid_mission(reason, now)
             return
@@ -1143,6 +1195,22 @@ class FlightCycleManager(Node):
         )
         self._advance_guided_search_start(now)
 
+    def _start_pid_alignment(self, now: float, result: Any) -> None:
+        """Confirm GUIDED and await telemetry without running dock search."""
+        command = self._command_result(result)
+        if not (
+            command.success
+            or command.current_mode == GUIDED_MODE
+            or self._vehicle.state.mode == GUIDED_MODE
+        ):
+            self._operation_failed("handoff_guided", command.message, now)
+            return
+        self._guided_search_telemetry_deadline = now + max(
+            self._positive_parameter("pose_timeout_s"),
+            self._positive_parameter("landed_state_timeout_s"),
+        )
+        self._advance_guided_search_start(now)
+
     def _advance_guided_search_start(self, now: float) -> None:
         deadline = self._guided_search_telemetry_deadline
         if deadline is None:
@@ -1165,6 +1233,9 @@ class FlightCycleManager(Node):
                 )
             return
         self._guided_search_telemetry_deadline = None
+        if self._operation_mode == "pid_align_debug":
+            self._start_selected_backend(now)
+            return
         state = self._vehicle.state
         assert state.position_enu_m is not None
         try:
@@ -1223,7 +1294,8 @@ class FlightCycleManager(Node):
     def _start_selected_backend(self, now: float) -> None:
         if not self._fresh_landing_backend_telemetry(now):
             self._command_direct_land(
-                "landing telemetry became stale before backend start"
+                "landing telemetry became stale before backend start: "
+                + self._landing_backend_stale_reason(now)
             )
             return
         try:
@@ -1243,7 +1315,12 @@ class FlightCycleManager(Node):
         self._landing_expected_modes = frozenset({GUIDED_MODE})
         self._transition(
             CycleState.LANDING_BACKEND,
-            f"{self._landing_backend} landing backend started after shared search acquisition",
+            (
+                "PID alignment-only backend started"
+                if self._operation_mode == "pid_align_debug"
+                else f"{self._landing_backend} landing backend started after "
+                "shared search acquisition"
+            ),
         )
 
     def _advance_landing_backend(self, now: float) -> None:
@@ -1252,16 +1329,27 @@ class FlightCycleManager(Node):
             self._begin_fc_handback(now, "landing backend is unavailable")
             return
         if not self._fresh_landing_backend_telemetry(now):
-            self._command_direct_land("landing telemetry became stale during docking")
+            if self._operation_mode == "pid_align_debug":
+                self._cancel_pid_landing_debug_attempt(
+                    "landing telemetry became stale; PID alignment cancelled"
+                )
+                return
+            self._command_direct_land(
+                "landing telemetry became stale during docking: "
+                + self._landing_backend_stale_reason(now)
+            )
             return
         try:
+            dock = self._dock_observation(now)
+            vehicle = self._vehicle_observation()
             decision = backend.update(
                 now=now,
-                dock=self._dock_observation(now),
-                vehicle=self._vehicle_observation(),
+                dock=dock,
+                vehicle=vehicle,
             )
 
             self._safe_record_landing_backend_decision(decision, now)
+            self._publish_pid_debug(now, dock, vehicle, decision)
 
             self.get_logger().info(
                 f"Landing backend update: {decision}"
@@ -1665,20 +1753,64 @@ class FlightCycleManager(Node):
 
     def _fresh_landing_backend_telemetry(self, now: float) -> bool:
         state = self._vehicle.state
+        freshness = self._landing_backend_telemetry_freshness(now)
         return (
-            self._vehicle.ready(
-                now,
-                heartbeat_timeout_s=self._positive_parameter(
-                    "mavlink_heartbeat_timeout_s"
-                ),
-            )
+            freshness["heartbeat"]
             and state.armed is not None
             and state.flying is not None
             and state.position_enu_m is not None
             and state.velocity_enu_m_s is not None
-            and self._fresh_position(now, state)
-            and self._fresh_landed_state(now, state)
+            and freshness["position"]
+            and freshness["landed_state"]
         )
+
+    def _landing_backend_telemetry_freshness(self, now: float) -> dict[str, bool]:
+        """Return the individual freshness gates used during landing."""
+        state = self._vehicle.state
+        return {
+            "heartbeat": self._vehicle.ready(
+                now,
+                heartbeat_timeout_s=self._positive_parameter(
+                    "mavlink_heartbeat_timeout_s"
+                ),
+            ),
+            "position": self._fresh_position(now, state),
+            "landed_state": self._fresh_landed_state(now, state),
+            "dock_target": self._dock_target_is_fresh(now),
+        }
+
+    def _landing_backend_stale_reason(self, now: float) -> str:
+        """Explain which landing telemetry freshness gates are failing."""
+        state = self._vehicle.state
+        freshness = self._landing_backend_telemetry_freshness(now)
+        limits = {
+            "heartbeat": self._positive_parameter("mavlink_heartbeat_timeout_s"),
+            "position": self._positive_parameter("pose_timeout_s"),
+            "landed_state": self._positive_parameter("landed_state_timeout_s"),
+            "dock_target": self._positive_parameter("dock_pose_timeout_s"),
+        }
+        received_at = {
+            "heartbeat": state.heartbeat_at,
+            "position": state.position_at,
+            "landed_state": state.landed_at,
+            "dock_target": min(
+                self._dock_pose_received_at,
+                self._dock_mode_received_at,
+            ),
+        }
+        details = []
+        for name in ("heartbeat", "position", "landed_state", "dock_target"):
+            age = max(0.0, now - received_at[name])
+            status = "OK" if freshness[name] else "STALE"
+            details.append(
+                f"{name}={status} age={age:.2f}s limit={limits[name]:.2f}s"
+            )
+        details.append(
+            f"armed={state.armed!r} flying={state.flying!r} "
+            f"position_value={state.position_enu_m is not None} "
+            f"velocity_value={state.velocity_enu_m_s is not None}"
+        )
+        return "; ".join(details)
 
     def _vehicle_observation(self) -> VehicleObservation:
         state = self._vehicle.state
@@ -1691,6 +1823,7 @@ class FlightCycleManager(Node):
             flying=state.flying,
             mode=state.mode,
             landed_at=state.landed_at,
+            heading_rad=state.heading_rad,
         )
 
     def _build_search_config(self) -> SearchConfig:
@@ -1724,7 +1857,10 @@ class FlightCycleManager(Node):
 
     def _build_landing_backend(self) -> Any:
         if self._landing_backend == "pid":
-            return PidLandingBackend(self._build_pid_landing_config())
+            config = self._build_pid_landing_config()
+            if self._operation_mode == "pid_align_debug":
+                return PidLandingBackend(config, align_only=True)
+            return PidLandingBackend(config)
         return PreciseLandingBackend(self._build_precise_landing_config())
 
     def _build_pid_landing_config(self) -> PidLandingConfig:
@@ -1815,6 +1951,93 @@ class FlightCycleManager(Node):
                 allow_zero=True,
             ),
         )
+
+    def _on_parameters_changed(self, parameters: list[Parameter]) -> SetParametersResult:
+        """Validate and atomically apply live PID tuning to an active landing."""
+        tunable_suffixes = {
+            "kp", "ki", "kd", "integral_limit",
+            "derivative_filter_time_constant_s",
+        }
+        updates = {parameter.name: parameter.value for parameter in parameters}
+        tuning_updates = {
+            name: value for name, value in updates.items()
+            if any(name == f"pid_{axis}_{suffix}"
+                   for axis in ("x", "y", "z", "yaw")
+                   for suffix in tunable_suffixes)
+        }
+        if not tuning_updates:
+            return SetParametersResult(successful=True)
+        try:
+            for name, value in tuning_updates.items():
+                numeric = float(value)
+                if not math.isfinite(numeric) or numeric < 0.0:
+                    raise ValueError(f"{name} must be finite and nonnegative")
+            max_horizontal = self._positive_parameter("pid_max_horizontal_speed_m_s")
+            max_yaw = self._positive_parameter("pid_max_yaw_rate_rad_s")
+            limits = (max_horizontal, max_horizontal,
+                      self._positive_parameter("search_max_vertical_speed_m_s"), max_yaw)
+            configs = tuple(
+                self._build_live_pid_axis_config(f"pid_{axis}", limit, tuning_updates)
+                for axis, limit in zip(("x", "y", "z", "yaw"), limits)
+            )
+            backend = self._landing_controller
+            reconfigure = getattr(backend, "reconfigure_pids", None)
+            if callable(reconfigure):
+                reconfigure(configs)
+        except (TypeError, ValueError) as error:
+            return SetParametersResult(successful=False, reason=str(error))
+        return SetParametersResult(successful=True)
+
+    def _build_live_pid_axis_config(
+        self, prefix: str, output_limit: float, updates: Mapping[str, object],
+    ) -> PIDConfig:
+        def value(suffix: str) -> float:
+            name = f"{prefix}_{suffix}"
+            return float(updates.get(name, self.get_parameter(name).value))
+
+        return PIDConfig(
+            kp=value("kp"), ki=value("ki"), kd=value("kd"),
+            integral_limit=value("integral_limit"),
+            output_limit=output_limit,
+            derivative_filter_time_constant_s=value(
+                "derivative_filter_time_constant_s"
+            ),
+        )
+
+    def _publish_pid_debug(self, now: float, dock: Any, vehicle: Any, decision: Any) -> None:
+        diagnostics = getattr(self._landing_controller, "diagnostics", None)
+        if not callable(diagnostics) or decision.velocity is None:
+            return
+        command = decision.velocity
+        data = diagnostics()
+        data.update({
+            "time_s": now,
+            "state": decision.substate,
+            "command_body_flu": [command.velocity_x, command.velocity_y,
+                                 command.velocity_z, command.yaw_rate_rad_s],
+            "measured_velocity_enu": list(vehicle.velocity_enu_m_s),
+        })
+        heading = vehicle.heading_rad
+        if heading is not None and math.isfinite(heading):
+            east, north, up = vehicle.velocity_enu_m_s
+            data["measured_velocity_body_flu"] = [
+                east * math.sin(heading) + north * math.cos(heading),
+                -east * math.cos(heading) + north * math.sin(heading),
+                up,
+            ]
+        else:
+            data["measured_velocity_body_flu"] = None
+        if dock is not None:
+            data["error"] = {
+                "x": dock.forward_m, "y": dock.left_m,
+                "z": (data.get("distance_setpoint_m") - dock.distance_m)
+                if data.get("distance_setpoint_m") is not None else None,
+                "yaw": dock.yaw_error_rad,
+            }
+            data["dock_age_s"] = max(0.0, now - dock.received_at)
+        message = String()
+        message.data = json.dumps(data, separators=(",", ":"), allow_nan=False)
+        self._pid_debug_publisher.publish(message)
 
     def _build_precise_landing_config(self) -> PreciseLandingConfig:
         yaw_threshold = (

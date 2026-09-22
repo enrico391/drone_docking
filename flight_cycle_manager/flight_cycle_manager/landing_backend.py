@@ -39,6 +39,9 @@ class VehicleObservation:
     flying: Optional[bool]
     mode: Optional[int]
     landed_at: float
+    # Flight-controller yaw (MAVLink ATTITUDE.yaw) in NED convention, i.e.
+    # clockwise positive. Optional because attitude telemetry may be missing.
+    heading_rad: Optional[float] = None
 
 
 @dataclass(frozen=True)

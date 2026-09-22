@@ -103,3 +103,30 @@ def test_config_rejects_non_finite_and_invalid_values():
             PIDConfig(**values)
     with pytest.raises(ValueError, match="min_dt_s"):
         PIDConfig(**dict(config().__dict__, min_dt_s=1.0, max_dt_s=1.0))
+
+
+def test_live_gain_change_ramps_without_resetting_controller():
+    controller = PID(config())
+    controller.update(0.1, now=1.0)
+    controller.reconfigure(config(kp=3.0))
+    first = controller.update(0.1, now=1.05)
+    assert 0.1 < first < 0.3
+    for step in range(2, 12):
+        result = controller.update(0.1, now=1.0 + step * 0.05)
+    assert result == pytest.approx(0.3)
+
+
+def test_enabling_integral_does_not_release_hidden_accumulation():
+    controller = PID(config(kp=0.0, ki=0.0))
+    for step in range(20):
+        controller.update(1.0, now=step * 0.1)
+    controller.reconfigure(config(kp=0.0, ki=1.0))
+    assert controller.update(0.0, now=2.0) == 0.0
+
+
+def test_external_saturation_prevents_integral_windup():
+    controller = PID(config(kp=1.0, ki=1.0, output_limit=2.0))
+    for step in range(20):
+        controller.update(0.5, now=step * 0.1)
+        controller.track_applied_output(0.1)
+    assert controller.update(0.0, now=2.0) == pytest.approx(0.0)

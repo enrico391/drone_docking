@@ -148,8 +148,9 @@ def _zero_body_command() -> VelocityCommand:
 class PidLandingController:
     """Pure landing controller; callers supply all time and observations."""
 
-    def __init__(self, config: PidLandingConfig):
+    def __init__(self, config: PidLandingConfig, *, align_only: bool = False):
         self._config = config
+        self._align_only = align_only
         self._x_pid = PID(config.x_pid)
         self._y_pid = PID(config.y_pid)
         self._z_pid = PID(config.z_pid)
@@ -162,6 +163,7 @@ class PidLandingController:
         self._central_loss_started_at: Optional[float] = None
         self._distance_setpoint_m: Optional[float] = None
         self._descent_last_updated_at: Optional[float] = None
+        self._descent_paused = False
         self._recovery_attempts = 0
         self._recovery_target_altitude_m: Optional[float] = None
         self._dock_stable_started_at: Optional[float] = None
@@ -173,6 +175,8 @@ class PidLandingController:
         self._active_disarm_request_id: Optional[int] = None
         self._failure_reason = ""
         self._target_loss_started_at: Optional[float] = None
+        self._touchdown_reference_enu_m: Optional[Tuple[float, float]] = None
+        self._touchdown_reference_heading_rad: Optional[float] = None
 
     def start_after_acquisition(self, now: float) -> None:
         """Begin at PID alignment after the shared search acquired the dock."""
@@ -190,6 +194,8 @@ class PidLandingController:
         self._recovery_target_altitude_m = None
         self._dock_stable_started_at = None
         self._target_loss_started_at = None
+        self._touchdown_reference_enu_m = None
+        self._touchdown_reference_heading_rad = None
         self._landed_stable_started_at = None
         self._disarm_request_in_flight = False
         self._disarm_acknowledged = False
@@ -282,17 +288,33 @@ class PidLandingController:
             return
         self._disarm_next_retry_at = now + self._config.disarm_retry_period_s
 
+    # ---------------------------- State update methods ----------------------------
     def _update_pid_align(
         self, now: float, dock: Optional[DockObservation],
         vehicle: VehicleObservation,
     ) -> PidLandingDecision:
+        """
+        Update the PID_ALIGN state, which is the first state after acquisition.
+        The goal is to align the vehicle with the dock before descending.
+        """
         usable, reason = self._usable_dock(dock)
         if not usable:
+            if self._align_only:
+                self._alignment_stable_started_at = None
+                self._target_loss_started_at = None
+                self._reset_pids()
+                return PidLandingDecision(
+                    self._state,
+                    _zero_body_command(),
+                    reason=f"holding for dock target: {reason}",
+                )
             return self._handle_target_loss(now, vehicle, reason)
         self._target_loss_started_at = None
 
         tolerance = self._tolerance_for(dock.distance_m)
         command = self._visual_command(now, dock, z_enabled=False)
+        if self._align_only:
+            return PidLandingDecision(self._state, command)
         if not self._alignment_is_stable(now, dock, tolerance):
             return PidLandingDecision(self._state, command)
 
@@ -308,6 +330,11 @@ class PidLandingController:
         self, now: float, dock: Optional[DockObservation],
         vehicle: VehicleObservation,
     ) -> PidLandingDecision:
+        """
+        Update the DESCEND_OUTER state, which is the state where the vehicle
+        descends towards the dock while maintaining alignment. If the dock is
+        lost or the vehicle is not aligned, it will enter recovery or reacquire the dock.
+        """
         usable, reason = self._usable_dock(dock)
         if not usable:
             return self._handle_target_loss(now, vehicle, reason)
@@ -334,7 +361,7 @@ class PidLandingController:
             self._visual_command(
                 now,
                 dock,
-                z_enabled=True,
+                z_enabled=not self._descent_paused,
                 vertical_limit_m_s=self._config.outer_descent_speed_m_s,
             ),
         )
@@ -342,6 +369,10 @@ class PidLandingController:
     def _handle_target_loss(
         self, now: float, vehicle: VehicleObservation, reason: str,
     ) -> PidLandingDecision:
+        """
+        Handle the case where the dock target is lost. If the target has been lost for longer 
+        than the grace period, enter recovery. Otherwise, hold position and wait for reacquisition.
+        """
         if self._target_loss_started_at is None:
             self._target_loss_started_at = now
         # An observation gap breaks all visual dwell and PID history. Rebase
@@ -362,6 +393,10 @@ class PidLandingController:
         self, now: float, dock: Optional[DockObservation],
         vehicle: VehicleObservation,
     ) -> PidLandingDecision:
+        """
+        Update the REACQUIRE_DOCK state, which is the state where the vehicle attempts to reacquire 
+        the dock after losing it. If the dock is usable and stable, it will transition to PID_ALIGN.
+        """
         usable, _ = self._usable_dock(dock)
         if not usable:
             self._dock_stable_started_at = None
@@ -423,6 +458,9 @@ class PidLandingController:
             and fine_alignment_stable
         ):
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
+            # The tag is about to fill the camera, so the last aligned
+            # observation becomes the aperture reference for touchdown.
+            self._latch_touchdown_reference(dock, vehicle)
             return PidLandingDecision(self._state, _zero_body_command())
 
         self._advance_distance_setpoint(
@@ -437,7 +475,7 @@ class PidLandingController:
             self._visual_command(
                 now,
                 dock,
-                z_enabled=True,
+                z_enabled=not self._descent_paused,
                 vertical_limit_m_s=self._config.central_descent_speed_m_s,
             ),
         )
@@ -464,13 +502,107 @@ class PidLandingController:
 
         return PidLandingDecision(
             self._state,
-            VelocityCommand(
-                VelocityFrame.BODY_FLU,
-                0.0,
-                0.0,
-                -self._config.touchdown_speed_m_s,
-            ),
+            self._touchdown_descent_command(now, vehicle),
         )
+
+    def _latch_touchdown_reference(
+        self, dock: DockObservation, vehicle: VehicleObservation,
+    ) -> None:
+        """Freeze the last aligned tag observation as the touchdown reference.
+
+        Literally treating the *tag* as the reference keeps the vehicle on the
+        cube aperture axis instead of wherever the residual alignment offset
+        left it at commit.
+        """
+        position_east_m, position_north_m, _ = self._finite_position(vehicle)
+        heading_rad = self._finite_heading(vehicle)
+        if heading_rad is None:
+            # Without attitude the tag offset cannot be rotated into the local
+            # frame, so the sampled position is the best available reference.
+            self._touchdown_reference_enu_m = (
+                position_east_m, position_north_m,
+            )
+            self._touchdown_reference_heading_rad = None
+            return
+        offset_east_m = (
+            dock.forward_m * math.sin(heading_rad)
+            - dock.left_m * math.cos(heading_rad)
+        )
+        offset_north_m = (
+            dock.forward_m * math.cos(heading_rad)
+            + dock.left_m * math.sin(heading_rad)
+        )
+        self._touchdown_reference_enu_m = (
+            position_east_m + offset_east_m,
+            position_north_m + offset_north_m,
+        )
+        # DockObservation.yaw_error_rad is counter-clockwise positive while the
+        # attitude yaw is NED clockwise positive, so aligning subtracts it.
+        self._touchdown_reference_heading_rad = heading_rad - self._wrap_yaw(
+            dock.yaw_error_rad
+        )
+
+    def _touchdown_descent_command(
+        self, now: float, vehicle: VehicleObservation,
+    ) -> VelocityCommand:
+        """Descend while holding the latched aperture position and orientation.
+
+        The X, Y and yaw PIDs run exactly as in the visual states, only against
+        the latched reference instead of the camera, so ground effect and wall
+        torque cannot push the vehicle off the entry axis. Missing attitude
+        telemetry falls back to the previous passive descent.
+        """
+        position_east_m, position_north_m, _ = self._finite_position(vehicle)
+        heading_rad = self._finite_heading(vehicle)
+        velocity_x = 0.0
+        velocity_y = 0.0
+        yaw_rate = 0.0
+        if heading_rad is not None:
+            reference_enu_m = self._touchdown_reference_enu_m
+            if reference_enu_m is None:
+                reference_enu_m = (position_east_m, position_north_m)
+                self._touchdown_reference_enu_m = reference_enu_m
+            error_east_m = reference_enu_m[0] - position_east_m
+            error_north_m = reference_enu_m[1] - position_north_m
+            # NED yaw is clockwise positive, so the forward axis is
+            # (sin, cos) and the left axis is (-cos, sin) in East/North.
+            velocity_x = self._x_pid.update(
+                error_east_m * math.sin(heading_rad)
+                + error_north_m * math.cos(heading_rad),
+                now,
+            )
+            velocity_y = self._y_pid.update(
+                -error_east_m * math.cos(heading_rad)
+                + error_north_m * math.sin(heading_rad),
+                now,
+            )
+            velocity_x, velocity_y = self._limit_horizontal(
+                velocity_x, velocity_y
+            )
+            if self._touchdown_reference_heading_rad is not None:
+                yaw_rate = self._limit_symmetric(
+                    self._yaw_pid.update(
+                        self._wrap_yaw(
+                            heading_rad - self._touchdown_reference_heading_rad
+                        ),
+                        now,
+                    ),
+                    self._config.max_yaw_rate_rad_s,
+                )
+        return VelocityCommand(
+            VelocityFrame.BODY_FLU,
+            velocity_x,
+            velocity_y,
+            -self._config.touchdown_speed_m_s,
+            yaw_rate,
+        )
+
+    @staticmethod
+    def _finite_heading(vehicle: VehicleObservation) -> Optional[float]:
+        heading_rad = vehicle.heading_rad
+        if heading_rad is None or not math.isfinite(heading_rad):
+            return None
+        return heading_rad
 
     def _update_disarm(
         self, now: float, vehicle: VehicleObservation,
@@ -483,12 +615,7 @@ class PidLandingController:
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
             return PidLandingDecision(
                 self._state,
-                VelocityCommand(
-                    VelocityFrame.BODY_FLU,
-                    0.0,
-                    0.0,
-                    -self._config.touchdown_speed_m_s,
-                ),
+                self._touchdown_descent_command(now, vehicle),
             )
 
         if vehicle.armed is False:
@@ -587,12 +714,14 @@ class PidLandingController:
         if z_enabled:
             assert self._distance_setpoint_m is not None
             velocity_z = self._z_pid.update(
-                self._distance_setpoint_m - dock.distance_m, now
+                self._distance_setpoint_m - dock.distance_m,
+                now,
             )
             if vertical_limit_m_s is not None:
                 velocity_z = self._limit_symmetric(
                     velocity_z, vertical_limit_m_s
                 )
+            self._z_pid.track_applied_output(velocity_z)
         return VelocityCommand(
             VelocityFrame.BODY_FLU,
             velocity_x,
@@ -609,6 +738,20 @@ class PidLandingController:
         horizontal_tolerance_m: float,
         yaw_tolerance_rad: float,
     ) -> None:
+        # Pause immediately at the existing tolerance; resume inside 80% of
+        # it. Rebase while paused so an old height error cannot keep descending.
+        resume_scale = 0.8 if self._descent_paused else 1.0
+        aligned = self._is_aligned(
+            dock, horizontal_tolerance_m * resume_scale,
+            yaw_tolerance_rad * resume_scale,
+        )
+        was_paused = self._descent_paused
+        self._descent_paused = not aligned
+        if self._descent_paused or was_paused:
+            self._distance_setpoint_m = dock.distance_m
+            self._descent_last_updated_at = now
+            self._z_pid.reset()
+            return
         if self._distance_setpoint_m is None:
             self._distance_setpoint_m = dock.distance_m
             self._descent_last_updated_at = now
@@ -687,6 +830,7 @@ class PidLandingController:
         self._central_stable_started_at = None
         self._distance_setpoint_m = None
         self._descent_last_updated_at = None
+        self._descent_paused = False
         self._central_loss_started_at = None
         self._target_loss_started_at = None
         self._dock_stable_started_at = None
@@ -766,8 +910,25 @@ class PidLandingController:
         speed = math.hypot(velocity_x, velocity_y)
         if speed > self._config.max_horizontal_speed_m_s:
             scale = self._config.max_horizontal_speed_m_s / speed
-            return velocity_x * scale, velocity_y * scale
+            velocity_x, velocity_y = velocity_x * scale, velocity_y * scale
+        self._x_pid.track_applied_output(velocity_x)
+        self._y_pid.track_applied_output(velocity_y)
         return velocity_x, velocity_y
+
+    def reconfigure_pids(self, configs: Tuple[PIDConfig, ...]) -> None:
+        for pid, config in zip(self._pids(), configs):
+            pid.reconfigure(config)
+
+    def _pids(self) -> Tuple[PID, ...]:
+        return self._x_pid, self._y_pid, self._z_pid, self._yaw_pid
+
+    def diagnostics(self) -> dict:
+        return {
+            "descent_paused": self._descent_paused,
+            "distance_setpoint_m": self._distance_setpoint_m,
+            "axes": {axis: pid.diagnostics()
+                     for axis, pid in zip(("x", "y", "z", "yaw"), self._pids())},
+        }
 
     @staticmethod
     def _limit_symmetric(value: float, limit: float) -> float:
