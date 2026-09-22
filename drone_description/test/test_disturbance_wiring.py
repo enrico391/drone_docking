@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import yaml
 from launch import LaunchContext
@@ -51,7 +52,7 @@ def test_bridge_routes_wrench_and_clear_commands_to_gazebo():
     by_ros_topic = {mapping["ros_topic_name"]: mapping for mapping in mappings}
 
     wrench = by_ros_topic["disturbance/wrench"]
-    assert wrench["gz_topic_name"] == "/world/{{ world_name }}/wrench/persistent"
+    assert wrench["gz_topic_name"] == "/world/{{ world_name }}/wrench"
     assert wrench["ros_type_name"] == "ros_gz_interfaces/msg/EntityWrench"
     assert wrench["direction"] == "ROS_TO_GZ"
 
@@ -59,3 +60,17 @@ def test_bridge_routes_wrench_and_clear_commands_to_gazebo():
     assert clear["gz_topic_name"] == "/world/{{ world_name }}/wrench/clear"
     assert clear["ros_type_name"] == "ros_gz_interfaces/msg/Entity"
     assert clear["direction"] == "ROS_TO_GZ"
+
+
+def test_disturbance_rate_matches_every_simulation_physics_step():
+    """Break caught: instantaneous wrench is absent between publish ticks."""
+    config_path = REPOSITORY / "drone_description/config/disturbances.yaml"
+    world_path = REPOSITORY / "drone_description/worlds/docking_world.sdf"
+    parameters = yaml.safe_load(config_path.read_text(encoding="utf-8"))[
+        "/**"
+    ]["ros__parameters"]
+    max_step_size = float(
+        ET.parse(world_path).getroot().findtext("world/physics/max_step_size")
+    )
+
+    assert parameters["update_rate"] == 1.0 / max_step_size

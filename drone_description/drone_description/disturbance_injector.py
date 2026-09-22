@@ -26,13 +26,13 @@ def _vector(values: Iterable[float]) -> Tuple[float, float, float]:
 
 
 class DisturbanceInjector(Node):
-    """Generate a wrench and continuously update Gazebo's persistent value."""
+    """Generate one bounded external wrench per Gazebo physics step."""
 
     def __init__(self, **kwargs) -> None:
         super().__init__("disturbance_injector", **kwargs)
         self.declare_parameter("enabled", True)
         self.declare_parameter("target_model", "x500")
-        self.declare_parameter("update_rate", 50.0)
+        self.declare_parameter("update_rate", 1000.0)
         self.declare_parameter("frame", "world")
         self.declare_parameter("random_seed", 0)
         self.declare_parameter("constant.force", [0.0, 0.0, 0.0])
@@ -143,7 +143,7 @@ class DisturbanceInjector(Node):
         self._wrench_publisher.publish(self._message(wrench))
 
     def clear_disturbance(self) -> None:
-        """Remove the persistent Gazebo wrench for this model."""
+        """Stop output and clear any legacy persistent wrench for this model."""
         self._timer.cancel()
         self._publish_clear()
 
