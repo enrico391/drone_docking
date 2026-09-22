@@ -83,11 +83,23 @@ From the workspace root:
 
 ```bash
 source /opt/ros/humble/setup.bash
-colcon build --symlink-install \
-  --packages-select flight_cycle_manager dock_apriltag_localizer \
-  drone_description drone_bringup
+python3 -m venv --system-site-packages apriltag_venv
+touch apriltag_venv/COLCON_IGNORE
+source apriltag_venv/bin/activate
+python -m pip install -r \
+  src/drone_docking/dock_apriltag_localizer/requirements.txt
+
+# Required when rebuilding the upstream ardupilot_sitl colcon package.
+export PATH="$PWD/.worktrees/Micro-XRCE-DDS-Gen/scripts:$PATH"
+
+python -m colcon build --symlink-install \
+  --packages-up-to drone_bringup flight_cycle_manager
 source install/setup.bash
 ```
+
+Activate `apriltag_venv` before building and running the localizer. Using
+`python -m colcon` ensures its installed entry points use the virtual
+environment interpreter.
 
 ## Run
 
@@ -99,8 +111,12 @@ ros2 launch drone_description gazebo_docking.launch.py
 ```
 
 ```bash
-ros2 launch drone_bringup docking_sim.launch.py
+ros2 launch drone_bringup docking_sim.launch.py use_mavproxy:=true
 ```
+
+`use_mavproxy:=true` keeps SITL's TCP serial endpoint connected for a
+standalone simulation. Leave it false when `flight_cycle_manager` or the
+direct pymavlink dock-pose bridge owns `tcp:127.0.0.1:5760`.
 
 Set `use_gz_sim_gui:=false` for a server-only run. Set `spawn_robot:=false`
 to inspect only the docking world and station without starting SITL. Select
@@ -145,6 +161,16 @@ ros2 topic echo /camera/camera_info --once
 The image is 640x480, the target update rate is 30 Hz, and both messages use
 `camera_optical_frame`. Use `/camera/image_raw` and `/camera/camera_info` as the inputs to
 `dock_apriltag_localizer`.
+
+Start the localizer in a second terminal after activating its environment and
+sourcing the workspace:
+
+```bash
+source /opt/ros/humble/setup.bash
+source apriltag_venv/bin/activate
+source install/setup.bash
+ros2 launch dock_apriltag_localizer dock_localizer.launch.py
+```
 
 ## Arm, take off, and land
 

@@ -18,10 +18,19 @@ ROS packages:
 sudo apt install ros-$ROS_DISTRO-cv-bridge python3-opencv
 ```
 
-Python AprilTag detector (install in the Python environment used by ROS):
+Create a workspace-local Python environment that can also import the ROS 2
+packages installed by apt:
 ```bash
-python3 -m pip install pupil-apriltags pyyaml
+cd /home/ubuntu/drone_ws
+python3 -m venv --system-site-packages apriltag_venv
+touch apriltag_venv/COLCON_IGNORE
+source apriltag_venv/bin/activate
+python -m pip install -r \
+  src/drone_docking/dock_apriltag_localizer/requirements.txt
 ```
+
+`COLCON_IGNORE` prevents colcon from interpreting package metadata inside the
+virtual environment as workspace packages.
 
 ## Build
 ```bash

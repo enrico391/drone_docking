@@ -328,6 +328,7 @@ class PidLandingController:
             self._config.coarse_horizontal_tolerance_m,
             self._config.coarse_yaw_tolerance_rad,
         )
+        # update with PID command to align with the dock while descending
         return PidLandingDecision(
             self._state,
             self._visual_command(
@@ -423,6 +424,7 @@ class PidLandingController:
         ):
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
             return PidLandingDecision(self._state, _zero_body_command())
+
         self._advance_distance_setpoint(
             now,
             dock,
@@ -532,6 +534,10 @@ class PidLandingController:
             self._config.recovery_climb_m / self._config.recovery_speed_m_s
             + self._config.central_acquire_timeout_s
         )
+
+        # TEMPORAL FIX
+        climb_timeout_s = max(climb_timeout_s, 10.0)
+
         if now - self._state_started_at >= climb_timeout_s:
             return self._fail(now, "recovery climb timed out")
         return PidLandingDecision(

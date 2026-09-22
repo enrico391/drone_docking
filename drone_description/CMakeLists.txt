@@ -17,15 +17,29 @@ if(NOT _firmware_git_result EQUAL 0 OR
   NOT _firmware_commit STREQUAL "1511f27194f1dcc3728270883047bdf022b3fd53")
   message(FATAL_ERROR "ARDUPILOT47_ROOT must point to verified commit 1511f271")
 endif()
-if(NOT EXISTS "${ARDUPILOT47_ROOT}/build/sitl/bin/arducopter")
+set(_firmware_binary "${ARDUPILOT47_ROOT}/build/sitl/bin/arducopter")
+if(NOT EXISTS "${_firmware_binary}")
   message(FATAL_ERROR "Build ArduCopter 4.7.0 SITL in ${ARDUPILOT47_ROOT} first")
 endif()
-file(SHA256 "${ARDUPILOT47_ROOT}/build/sitl/bin/arducopter" _firmware_sha256)
-if(NOT _firmware_sha256 STREQUAL
-  "f40655c42537293d800ddc9d85b566468352a6844557cbe35379d6b6caa0badb")
-  message(FATAL_ERROR "ArduCopter binary does not match the verified 4.7.0 DDS build")
+
+# SITL embeds absolute source paths, so its whole-file checksum changes across
+# otherwise equivalent workspaces. Verify the firmware identity and that DDS
+# was actually linked instead.
+file(STRINGS "${_firmware_binary}" _firmware_version
+  REGEX "ArduCopter V4\\.7\\.0 \\(1511f271\\)")
+if(NOT _firmware_version)
+  message(FATAL_ERROR "ArduCopter binary is not version 4.7.0 at commit 1511f271")
 endif()
-install(PROGRAMS "${ARDUPILOT47_ROOT}/build/sitl/bin/arducopter"
+
+execute_process(COMMAND "${CMAKE_NM}" -C "${_firmware_binary}"
+  OUTPUT_VARIABLE _firmware_symbols RESULT_VARIABLE _firmware_nm_result)
+string(FIND "${_firmware_symbols}" "AP_DDS_Client::start()" _firmware_dds_symbol)
+if(NOT _firmware_nm_result EQUAL 0 OR _firmware_dds_symbol EQUAL -1)
+  message(FATAL_ERROR
+    "ArduCopter 4.7.0 is missing DDS; configure with --enable-DDS and rebuild")
+endif()
+
+install(PROGRAMS "${_firmware_binary}"
   DESTINATION lib/${PROJECT_NAME} RENAME arducopter-4.7.0)
 install(FILES "${ARDUPILOT47_ROOT}/Tools/autotest/default_params/copter.parm"
   DESTINATION share/${PROJECT_NAME}/config RENAME copter-4.7.parm)

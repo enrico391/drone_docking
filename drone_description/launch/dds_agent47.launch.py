@@ -20,9 +20,11 @@ def generate_launch_description():
         DeclareLaunchArgument("micro_ros_agent_ns", default_value=""),
         DeclareLaunchArgument("transport", default_value="udp4"),
         DeclareLaunchArgument("port", default_value="2019"),
+        DeclareLaunchArgument("verbosity", default_value="4"),
         ExecuteProcess(
             cmd=[str(executable), LaunchConfiguration("transport"), "-p",
-                 LaunchConfiguration("port"), "-v", "6"],
+                 LaunchConfiguration("port"), "-v",
+                 LaunchConfiguration("verbosity")],
             additional_env={"FASTRTPS_DEFAULT_PROFILES_FILE": str(profile)},
             output="both",
         ),

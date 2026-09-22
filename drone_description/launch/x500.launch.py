@@ -10,13 +10,12 @@ from launch import LaunchContext, LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.actions import OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration
 
 
 def create_robot_actions(context: LaunchContext) -> List[IncludeLaunchDescription]:
     """Create the generic ArduPilot robot launch with X500 resources."""
     description_share = get_package_share_directory("drone_description")
-    ardupilot_bringup_share = get_package_share_directory("ardupilot_gz_bringup")
 
     source_sdf = os.path.join(
         description_share, "models", "x500_with_ardupilot", "model.sdf"
@@ -70,16 +69,7 @@ def create_robot_actions(context: LaunchContext) -> List[IncludeLaunchDescriptio
 
     robot = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            [
-                PathJoinSubstitution(
-                    [
-                        ardupilot_bringup_share,
-                        "launch",
-                        "robots",
-                        "robot.launch.py",
-                    ]
-                )
-            ]
+            os.path.join(description_share, "launch", "robot47.launch.py")
         ),
         launch_arguments={
             "namespace": LaunchConfiguration("namespace"),

@@ -5,7 +5,6 @@ import xml.etree.ElementTree as ET
 
 from launch import LaunchContext
 from launch.actions import IncludeLaunchDescription
-from launch.utilities import perform_substitutions
 
 
 def test_default_robot_uses_real_profile_and_matching_motor_endpoints():
@@ -20,6 +19,11 @@ def test_default_robot_uses_real_profile_and_matching_motor_endpoints():
         use_gz_tf='true', x='0', y='0', z='-0.032', yaw='0'))
     actions = module.create_robot_actions(context)
     robot = next(a for a in actions if isinstance(a, IncludeLaunchDescription))
+    robot.launch_description_source.get_launch_description(context)
+    source = robot.launch_description_source.location
+    assert source.endswith(
+        'drone_description/launch/robot47.launch.py'
+    ), 'The upstream robot launcher ignores the pinned 4.7 launch files'
     arguments = dict(robot.launch_arguments)
     assert 'sitl_launch_file' in arguments, 'Must bypass the incompatible 4.8 launcher'
     assert str(arguments['sitl_launch_file']).endswith('sitl47.launch.py')
