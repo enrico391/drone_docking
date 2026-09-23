@@ -16,6 +16,8 @@ flight_cycle_manager:
     mission_landing_location_tolerance_m: 2.0
     mission_download_timeout_s: 10.0
     mavlink_operation_timeout_s: 10.0
+    # Extra GUIDED requests after an ACKed command is not confirmed by heartbeat.
+    guided_handoff_retry_attempts: 1
     mission_start_confirmation_timeout_s: 5.0
     mavlink_heartbeat_timeout_s: 10.0 # 2.5 default
     pose_timeout_s: 1.0
@@ -36,7 +38,7 @@ flight_cycle_manager:
     landing_target_warmup_s: 1.0
     landing_target_camera_forward_m: 0.0
     landing_target_camera_right_m: 0.0
-    landing_target_camera_down_m: 0.19
+    landing_target_camera_down_m: 0.19 # used because the camera is mounted above the vehicle's center of mass by 0.19 m 
     landing_touchdown_warn_after_s: 30.0
     landing_disarm_warn_after_s: 20.0
     landing_attempt_log_enabled: false

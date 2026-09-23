@@ -259,6 +259,8 @@ class FlightCycleManager(Node):
         self._validated_mission_id: Optional[int] = None
         self._dock_request_queued = False
         self._dock_request_acknowledged = False
+        self._guided_handoff_retry_count = 0
+        self._guided_handoff_origin_mode: Optional[int] = None
         self._guided_search_telemetry_deadline: Optional[float] = None
         self._search_controller: Optional[Any] = None
         self._landing_controller: Optional[Any] = None
@@ -359,6 +361,7 @@ class FlightCycleManager(Node):
             "mission_landing_location_tolerance_m": 2.0,
             "mission_download_timeout_s": 10.0,
             "mavlink_operation_timeout_s": 10.0,
+            "guided_handoff_retry_attempts": 1,
             "mission_start_confirmation_timeout_s": 5.0,
             "mavlink_heartbeat_timeout_s": 2.5,
             "pose_timeout_s": 1.0,
@@ -615,11 +618,7 @@ class FlightCycleManager(Node):
             if self._guided_search_telemetry_deadline is not None:
                 self._advance_guided_search_start(now)
                 return
-            self._begin_operation(
-                "handoff_guided",
-                self._vehicle.set_mode_async(GUIDED_MODE, now),
-                now,
-            )
+            self._begin_guided_handoff(now, reset_retries=True)
             return
         if self._state is CycleState.SEARCH_DOCK:
             self._advance_search(now)
@@ -668,11 +667,7 @@ class FlightCycleManager(Node):
                     "fresh airborne telemetry received; requesting GUIDED "
                     "for PID alignment",
                 )
-                self._begin_operation(
-                    "handoff_guided",
-                    self._vehicle.set_mode_async(GUIDED_MODE, now),
-                    now,
-                )
+                self._begin_guided_handoff(now, reset_retries=True)
                 return True
             if state.mode != LAND_MODE:
                 self._debug_land_trigger_armed = True
@@ -683,11 +678,7 @@ class FlightCycleManager(Node):
                     CycleState.GUIDED_TAKEOVER,
                     "airborne LAND trigger received; requesting GUIDED for PID docking",
                 )
-                self._begin_operation(
-                    "handoff_guided",
-                    self._vehicle.set_mode_async(GUIDED_MODE, now),
-                    now,
-                )
+                self._begin_guided_handoff(now, reset_retries=True)
             return True
 
         if self._state in {
@@ -943,6 +934,10 @@ class FlightCycleManager(Node):
 
     def _operation_failed(self, name: str, message: str, now: float) -> None:
         reason = f"{name.replace('_', ' ')} failed: {message or 'rejected'}"
+        if name == "handoff_guided" and self._retry_guided_handoff_if_safe(
+            message, now
+        ):
+            return
         if (
             self._operation_mode == "pid_align_debug"
             and name == "handoff_guided"
@@ -1174,11 +1169,46 @@ class FlightCycleManager(Node):
             CycleState.GUIDED_TAKEOVER,
             "landing handoff reached; requesting GUIDED takeover",
         )
+        self._begin_guided_handoff(now, reset_retries=True)
+
+    def _begin_guided_handoff(self, now: float, *, reset_retries: bool) -> None:
+        """Request GUIDED and retain the pre-handoff mode for safe retries."""
+        if reset_retries:
+            self._guided_handoff_retry_count = 0
+            self._guided_handoff_origin_mode = self._vehicle.state.mode
         self._begin_operation(
             "handoff_guided",
             self._vehicle.set_mode_async(GUIDED_MODE, now),
             now,
         )
+
+    def _retry_guided_handoff_if_safe(self, message: str, now: float) -> bool:
+        """Retry only an ACKed GUIDED command whose mode confirmation timed out."""
+        if not message.startswith(
+            "MAVLink mode change acknowledged but timed out waiting for mode "
+        ):
+            return False
+        retry_limit = self._nonnegative_integer_parameter(
+            "guided_handoff_retry_attempts"
+        )
+        state = self._vehicle.state
+        if (
+            self._guided_handoff_retry_count >= retry_limit
+            or self._guided_handoff_origin_mode is None
+            or state.mode != self._guided_handoff_origin_mode
+            or not self._fresh_airborne_telemetry(now)
+            or not self._fresh_landed_state(now, state)
+        ):
+            return False
+        self._guided_handoff_retry_count += 1
+        self._transition(
+            CycleState.GUIDED_TAKEOVER,
+            "GUIDED handoff mode confirmation timed out after acknowledgement; "
+            f"retrying GUIDED ({self._guided_handoff_retry_count}/{retry_limit})",
+            force=True,
+        )
+        self._begin_guided_handoff(now, reset_retries=False)
+        return True
 
     def _start_shared_search(self, now: float, result: Any) -> None:
         command = self._command_result(result)
@@ -1219,8 +1249,9 @@ class FlightCycleManager(Node):
             if now >= deadline:
                 self._guided_search_telemetry_deadline = None
                 self._route_failure(
-                    "fresh heartbeat, position, and landed state telemetry "
-                    "did not arrive before the shared dock search timeout",
+                    "guided handoff telemetry readiness timed out before shared "
+                    "dock search: "
+                    + self._guided_search_telemetry_timeout_reason(now),
                     grounded_state=CycleState.FAILED_DISARMED,
                     now=now,
                 )
@@ -1735,21 +1766,61 @@ class FlightCycleManager(Node):
 
     def _fresh_guided_search_telemetry(self, now: float) -> bool:
         state = self._vehicle.state
+        freshness = self._guided_search_telemetry_freshness(now)
         return (
-            self._vehicle.ready(
-                now,
-                heartbeat_timeout_s=self._positive_parameter(
-                    "mavlink_heartbeat_timeout_s"
-                ),
-            )
+            freshness["heartbeat"]
             and state.armed is True
             and state.flying is True
             and state.mode == GUIDED_MODE
             and state.position_enu_m is not None
             and state.velocity_enu_m_s is not None
-            and self._fresh_position(now, state)
-            and self._fresh_landed_state(now, state)
+            and freshness["position"]
+            and freshness["landed_state"]
         )
+
+    def _guided_search_telemetry_freshness(self, now: float) -> dict[str, bool]:
+        """Return the individual telemetry freshness gates for GUIDED handoff."""
+        state = self._vehicle.state
+        return {
+            "heartbeat": self._vehicle.ready(
+                now,
+                heartbeat_timeout_s=self._positive_parameter(
+                    "mavlink_heartbeat_timeout_s"
+                ),
+            ),
+            "position": self._fresh_position(now, state),
+            "landed_state": self._fresh_landed_state(now, state),
+        }
+
+    def _guided_search_telemetry_timeout_reason(self, now: float) -> str:
+        """Describe every failed GUIDED-handoff telemetry readiness gate."""
+        state = self._vehicle.state
+        freshness = self._guided_search_telemetry_freshness(now)
+        limits = {
+            "heartbeat": self._positive_parameter("mavlink_heartbeat_timeout_s"),
+            "position": self._positive_parameter("pose_timeout_s"),
+            "landed_state": self._positive_parameter("landed_state_timeout_s"),
+        }
+        received_at = {
+            "heartbeat": state.heartbeat_at,
+            "position": state.position_at,
+            "landed_state": state.landed_at,
+        }
+        details = []
+        for name in ("heartbeat", "position", "landed_state"):
+            age = max(0.0, now - received_at[name])
+            status = "OK" if freshness[name] else "STALE"
+            details.append(
+                f"{name}={status} age={age:.2f}s limit={limits[name]:.2f}s"
+            )
+        details.append(
+            f"connected={state.connected!r} system_status={state.system_status!r} "
+            f"armed={state.armed!r} flying={state.flying!r} "
+            f"mode={self._flight_mode_name(state.mode)} "
+            f"position_value={state.position_enu_m is not None} "
+            f"velocity_value={state.velocity_enu_m_s is not None}"
+        )
+        return "; ".join(details)
 
     def _fresh_landing_backend_telemetry(self, now: float) -> bool:
         state = self._vehicle.state
@@ -2126,6 +2197,12 @@ class FlightCycleManager(Node):
         pending_mode = self._pending_mode()
         if pending_mode is not None and state.mode == pending_mode:
             return None
+        if (
+            self._pending is not None
+            and self._pending.name == "handoff_guided"
+            and state.mode == self._guided_handoff_origin_mode
+        ):
+            return None
         if state.mode in allowed_modes:
             return None
         if self._state is CycleState.WAIT_FOR_HANDOFF:
@@ -2376,6 +2453,8 @@ class FlightCycleManager(Node):
     def _reset_active_guidance(self) -> None:
         self._dock_request_queued = False
         self._dock_request_acknowledged = False
+        self._guided_handoff_retry_count = 0
+        self._guided_handoff_origin_mode = None
         self._guided_search_telemetry_deadline = None
         self._search_controller = None
         self._landing_controller = None
@@ -2598,6 +2677,12 @@ class FlightCycleManager(Node):
             comparator = "non-negative" if allow_zero else "positive"
             raise ValueError(f"{name} must be finite and {comparator}")
         return value
+
+    def _nonnegative_integer_parameter(self, name: str) -> int:
+        value = self.get_parameter(name).value
+        if isinstance(value, bool) or int(value) != value or int(value) < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+        return int(value)
 
     @staticmethod
     def _command_result(result: Any) -> VehicleCommandResult:

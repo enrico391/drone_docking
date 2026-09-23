@@ -29,6 +29,13 @@ from test_manager_start import airborne_state, ground_state
 LOITER_MODE = 5
 
 
+def acknowledged_guided_confirmation_timeout(observed_mode: int = LAND_MODE) -> str:
+    return (
+        "MAVLink mode change acknowledged but timed out waiting for mode "
+        f"{GUIDED_MODE}; observed mode {observed_mode}"
+    )
+
+
 @pytest.fixture(scope="module", autouse=True)
 def ros_context():
     rclpy.init()
@@ -225,6 +232,56 @@ def test_mode_change_cancels_active_attempt_and_later_land_edge_restarts():
         manager.tick(2.4)
         assert manager.state is CycleState.GUIDED_TAKEOVER
         assert vehicle.set_mode_calls == [GUIDED_MODE, GUIDED_MODE]
+    finally:
+        manager.close()
+
+
+def test_debug_guided_handoff_retries_acknowledged_confirmation_timeout():
+    """Break caught: PID debug cancels instead of retrying an ACKed LAND handoff."""
+    vehicle = FakeVehicle(airborne_state(2.0, mode=LOITER_MODE))
+    manager = make_debug_manager(vehicle)
+    try:
+        manager.tick(2.0)
+        vehicle.state = airborne_state(2.1, mode=LAND_MODE)
+        manager.tick(2.1)
+        vehicle.finish_command(
+            success=False, message=acknowledged_guided_confirmation_timeout()
+        )
+
+        manager.tick(2.2)
+
+        assert manager.state is CycleState.GUIDED_TAKEOVER
+        assert "retrying GUIDED (1/1)" in manager.reason
+        assert vehicle.set_mode_calls == [GUIDED_MODE, GUIDED_MODE]
+
+        vehicle.state = airborne_state(2.3, mode=GUIDED_MODE)
+        vehicle.finish_command()
+        manager.tick(2.3)
+
+        assert manager.state is CycleState.SEARCH_DOCK
+    finally:
+        manager.close()
+
+
+def test_debug_guided_handoff_does_not_retry_after_mode_change():
+    """Break caught: a pilot mode change is retried as if the mode remained LAND."""
+    vehicle = FakeVehicle(airborne_state(2.0, mode=LOITER_MODE))
+    manager = make_debug_manager(vehicle)
+    try:
+        manager.tick(2.0)
+        vehicle.state = airborne_state(2.1, mode=LAND_MODE)
+        manager.tick(2.1)
+        vehicle.state = airborne_state(2.2, mode=LOITER_MODE)
+        vehicle.finish_command(
+            success=False,
+            message=acknowledged_guided_confirmation_timeout(observed_mode=LOITER_MODE)
+        )
+
+        manager.tick(2.2)
+
+        assert manager.state is CycleState.WAITING_LAND_TRIGGER
+        assert vehicle.set_mode_calls == [GUIDED_MODE]
+        assert vehicle.land_calls == 0
     finally:
         manager.close()
 

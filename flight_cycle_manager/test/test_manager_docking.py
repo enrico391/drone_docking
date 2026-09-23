@@ -260,6 +260,101 @@ def backend_manager(*, backend_name: str = "pid", **parameters: object):
     return manager, vehicle
 
 
+def acknowledged_guided_confirmation_timeout() -> str:
+    return (
+        "MAVLink mode change acknowledged but timed out waiting for mode "
+        f"{GUIDED_MODE}; observed mode {AUTO_MODE}"
+    )
+
+
+@pytest.mark.parametrize("backend_name", ("pid", "precise_landing"))
+def test_guided_handoff_retries_after_acknowledged_confirmation_timeout(
+    backend_name: str,
+):
+    """Break caught: either landing backend gives up after an ACKed GUIDED timeout."""
+    manager, vehicle = backend_manager(backend_name=backend_name)
+    try:
+        handoff_at = 10.0
+        vehicle.state = auto_active_state(
+            handoff_at, seq=manager.contract.handoff_seq
+        )
+        manager.tick(now=handoff_at)
+        vehicle.finish_command(
+            success=False, message=acknowledged_guided_confirmation_timeout()
+        )
+
+        manager.tick(now=10.1)
+
+        assert manager.state is CycleState.GUIDED_TAKEOVER
+        assert "retrying GUIDED (1/1)" in manager.reason
+        assert vehicle.set_mode_calls[-2:] == [GUIDED_MODE, GUIDED_MODE]
+
+        vehicle.state = guided_state(10.2, seq=manager.contract.handoff_seq)
+        vehicle.finish_command()
+        manager.tick(now=10.2)
+
+        assert manager.state is CycleState.SEARCH_DOCK
+        assert vehicle.land_calls == 0
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("backend_name", ("pid", "precise_landing"))
+def test_guided_handoff_retry_exhaustion_uses_existing_failure_path(
+    backend_name: str,
+):
+    """Break caught: exhausted GUIDED confirmation retries leave flight in AUTO."""
+    manager, vehicle = backend_manager(backend_name=backend_name)
+    try:
+        handoff_at = 10.0
+        vehicle.state = auto_active_state(
+            handoff_at, seq=manager.contract.handoff_seq
+        )
+        manager.tick(now=handoff_at)
+        vehicle.finish_command(
+            success=False, message=acknowledged_guided_confirmation_timeout()
+        )
+        manager.tick(now=10.1)
+
+        vehicle.state = auto_active_state(10.2, seq=manager.contract.handoff_seq)
+        vehicle.finish_command(
+            success=False, message=acknowledged_guided_confirmation_timeout()
+        )
+        manager.tick(now=10.2)
+
+        assert vehicle.set_mode_calls[-2:] == [GUIDED_MODE, GUIDED_MODE]
+        assert vehicle.land_calls == 1
+        assert "handoff guided failed" in manager.reason
+    finally:
+        manager.close()
+
+
+def test_guided_handoff_does_not_retry_without_fresh_airborne_telemetry():
+    """Break caught: stale airborne telemetry is trusted for another GUIDED request."""
+    manager, vehicle = backend_manager()
+    try:
+        handoff_at = 10.0
+        vehicle.state = auto_active_state(
+            handoff_at, seq=manager.contract.handoff_seq
+        )
+        manager.tick(now=handoff_at)
+        vehicle.state = replace(
+            auto_active_state(10.1, seq=manager.contract.handoff_seq),
+            position_at=8.9,
+        )
+        vehicle.finish_command(
+            success=False, message=acknowledged_guided_confirmation_timeout()
+        )
+
+        manager.tick(now=10.1)
+
+        assert vehicle.set_mode_calls[-1:] == [GUIDED_MODE]
+        assert vehicle.land_calls == 1
+        assert "handoff guided failed" in manager.reason
+    finally:
+        manager.close()
+
+
 def test_request_dock_is_rejected_outside_auto_mission():
     """Break caught: request_dock can start from any non-AUTO lifecycle state."""
     vehicle = FakeVehicle()
@@ -436,6 +531,94 @@ def test_handoff_sequence_switches_to_guided_and_starts_search_from_fresh_pose()
 
         assert manager.state is CycleState.SEARCH_DOCK
         assert manager.search_controller.center_enu_m == pytest.approx(fresh_center)
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize(
+    ("stale_field", "expected_detail"),
+    [
+        ("heartbeat_at", "heartbeat=STALE age=2.60s limit=2.50s"),
+        ("position_at", "position=STALE age=1.10s limit=1.00s"),
+        ("landed_at", "landed_state=STALE age=1.10s limit=1.00s"),
+    ],
+)
+def test_guided_handoff_timeout_reason_identifies_each_stale_telemetry_stream(
+    stale_field: str,
+    expected_detail: str,
+):
+    """Break caught: GUIDED-handoff timeout hides which telemetry stream failed."""
+    manager, vehicle = backend_manager()
+    try:
+        now = 12.0
+        state = guided_state(now, seq=manager.contract.handoff_seq)
+        stale_at = now - (2.6 if stale_field == "heartbeat_at" else 1.1)
+        vehicle.state = replace(state, **{stale_field: stale_at})
+
+        reason = manager._guided_search_telemetry_timeout_reason(now)
+
+        assert expected_detail in reason
+        assert "heartbeat=" in reason
+        assert "position=" in reason
+        assert "landed_state=" in reason
+    finally:
+        manager.close()
+
+
+def test_guided_handoff_timeout_reason_reports_non_stream_readiness_gates():
+    """Break caught: a mode or value gap is misreported as a stale stream."""
+    manager, vehicle = backend_manager()
+    try:
+        vehicle.state = replace(
+            guided_state(12.0, seq=manager.contract.handoff_seq),
+            mode=LAND_MODE,
+            velocity_enu_m_s=None,
+        )
+
+        reason = manager._guided_search_telemetry_timeout_reason(12.0)
+
+        assert "heartbeat=OK age=0.00s limit=2.50s" in reason
+        assert "position=OK age=0.00s limit=1.00s" in reason
+        assert "landed_state=OK age=0.00s limit=1.00s" in reason
+        assert "mode=LAND" in reason
+        assert "velocity_value=False" in reason
+    finally:
+        manager.close()
+
+
+def test_guided_handoff_timeout_uses_per_stream_telemetry_diagnostics():
+    """Break caught: the fallback reason omits the stale GUIDED handoff stream."""
+    manager, vehicle = backend_manager()
+    try:
+        handoff_at = 10.0
+        guided_at = 10.1
+        vehicle.state = auto_active_state(
+            handoff_at,
+            seq=manager.contract.handoff_seq,
+        )
+        manager.tick(now=handoff_at)
+        vehicle.finish_command()
+        vehicle.state = replace(
+            guided_state(guided_at, seq=manager.contract.handoff_seq),
+            position_at=guided_at - 1.1,
+        )
+        manager.tick(now=guided_at)
+
+        assert manager.state is CycleState.GUIDED_TAKEOVER
+        assert "waiting for fresh telemetry" in manager.reason
+
+        vehicle.state = replace(
+            guided_state(11.1, seq=manager.contract.handoff_seq),
+            position_at=10.0,
+        )
+        manager.tick(now=11.1)
+
+        assert manager.state is CycleState.FC_FALLBACK_LAND
+        assert "guided handoff telemetry readiness timed out" in manager.reason
+        assert "heartbeat=OK age=0.00s limit=2.50s" in manager.reason
+        assert "position=STALE age=1.10s limit=1.00s" in manager.reason
+        assert "landed_state=OK age=0.00s limit=1.00s" in manager.reason
+        assert vehicle.land_calls == 1
     finally:
         manager.close()
 
