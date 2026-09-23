@@ -34,8 +34,8 @@ flight_cycle_manager:
     pid_y_kd: 0.20
     pid_y_integral_limit: 0.5
     pid_y_derivative_filter_time_constant_s: 0.1
-    pid_z_kp: 0.7
-    pid_z_ki: 0.05
+    pid_z_kp: 0.5
+    pid_z_ki: 0.02
     pid_z_kd: 0.05
     pid_z_integral_limit: 0.5
     pid_z_derivative_filter_time_constant_s: 0.1
