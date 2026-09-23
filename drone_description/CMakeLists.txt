@@ -49,7 +49,7 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
-install(PROGRAMS scripts/disturbance_injector
+install(PROGRAMS scripts/disturbance_injector scripts/disturbance_tuner
   DESTINATION lib/${PROJECT_NAME})
 
 install(
@@ -81,6 +81,8 @@ if(BUILD_TESTING)
   ament_add_pytest_test(disturbance_wiring_test
     test/test_disturbance_wiring.py TIMEOUT 30
     ENV "ROS_HOME=/tmp/ground_disturbances_ros_home")
+  ament_add_pytest_test(disturbance_tuner_test
+    test/test_disturbance_tuner.py TIMEOUT 30)
 endif()
 
 ament_package()

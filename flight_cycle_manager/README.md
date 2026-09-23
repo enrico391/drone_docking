@@ -355,6 +355,17 @@ ros2 param set /disturbance_injector enabled true
 ros2 param set /disturbance_injector enabled false
 ```
 
+For a local dashboard that edits all disturbance parameters while the injector
+runs, start this in another terminal and open `http://127.0.0.1:8766`:
+
+```bash
+ros2 run drone_description disturbance_tuner
+```
+
+The dashboard also has an enable/disable button. Changes take effect immediately;
+use **Download YAML** to save a profile for a later launch. For a namespaced
+injector, pass `--ros-args -p target_node:=/namespace/disturbance_injector`.
+
 With a namespace, use `/namespace/disturbance_injector`. Disabling immediately
 publishes a zero wrench and clears Gazebo's persistent wrench. Set
 `ground_effect.surface_z` to the surface under the vehicle (`0.0` for the ground

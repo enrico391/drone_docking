@@ -266,3 +266,57 @@ def test_enabled_parameter_clears_and_reenables_wrench_generation():
         injector.destroy_node()
         executor.shutdown()
         context.shutdown()
+
+
+def test_runtime_force_change_reaches_published_wrench():
+    context = Context()
+    rclpy.init(context=context)
+    injector = DisturbanceInjector(
+        context=context,
+        parameter_overrides=[
+            Parameter("update_rate", value=100.0),
+            Parameter("constant.force", value=[0.1, 0.0, 0.0]),
+        ],
+    )
+    observer = rclpy.create_node("runtime_disturbance_observer", context=context)
+    received = []
+    observer.create_subscription(EntityWrench, "disturbance/wrench", received.append, 10)
+    executor = SingleThreadedExecutor(context=context)
+    executor.add_node(injector)
+    executor.add_node(observer)
+    try:
+        result = injector.set_parameters_atomically(
+            [Parameter("constant.force", value=[0.4, -0.1, 0.0])]
+        )
+        assert result.successful, result.reason
+        deadline = time.monotonic() + 1.0
+        while not received and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.05)
+        assert received
+        assert received[-1].wrench.force.x == 0.4
+        assert received[-1].wrench.force.y == -0.1
+    finally:
+        executor.remove_node(observer)
+        executor.remove_node(injector)
+        observer.destroy_node()
+        injector.destroy_node()
+        executor.shutdown()
+        context.shutdown()
+
+
+def test_invalid_runtime_settings_are_rejected_without_changing_output():
+    context = Context()
+    rclpy.init(context=context)
+    injector = DisturbanceInjector(context=context)
+    try:
+        result = injector.set_parameters_atomically([
+            Parameter("gust.enabled", value=True),
+            Parameter("gust.duration", value=2.0),
+            Parameter("gust.interval", value=1.0),
+        ])
+        assert not result.successful
+        assert injector.get_parameter("gust.enabled").value is False
+        assert injector._model.settings.gust_enabled is False
+    finally:
+        injector.destroy_node()
+        context.shutdown()

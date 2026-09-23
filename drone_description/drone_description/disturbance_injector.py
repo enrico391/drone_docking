@@ -1,6 +1,7 @@
 """ROS 2 node that publishes configurable external wrenches for Gazebo."""
 
 import signal
+import math
 from typing import Iterable, Tuple
 
 import rclpy
@@ -20,8 +21,8 @@ from .disturbance_model import (
 
 def _vector(values: Iterable[float]) -> Tuple[float, float, float]:
     vector = tuple(float(value) for value in values)
-    if len(vector) != 3:
-        raise ValueError("wrench vectors must contain exactly three values")
+    if len(vector) != 3 or not all(math.isfinite(value) for value in vector):
+        raise ValueError("wrench vectors must contain three finite values")
     return vector  # type: ignore[return-value]
 
 
@@ -59,57 +60,14 @@ class DisturbanceInjector(Node):
         self._enabled = bool(self.get_parameter("enabled").value)
         self._target_model = self.get_parameter("target_model").value
         self._surface_z = float(self.get_parameter("ground_effect.surface_z").value)
-        self._rotor_plane_offset = float(
-            self.get_parameter("ground_effect.rotor_plane_offset").value
-        )
+        self._rotor_plane_offset = float(self.get_parameter("ground_effect.rotor_plane_offset").value)
         self._orientation_xyzw = (0.0, 0.0, 0.0, 1.0)
         self._rotor_height = None
         update_rate = float(self.get_parameter("update_rate").value)
         if update_rate <= 0.0:
             raise ValueError("update rate must be positive")
         self._period = 1.0 / update_rate
-        self._model = DisturbanceModel(
-            DisturbanceSettings(
-                frame=str(self.get_parameter("frame").value),
-                constant_force=_vector(self.get_parameter("constant.force").value),
-                constant_torque=_vector(self.get_parameter("constant.torque").value),
-                random_seed=int(self.get_parameter("random_seed").value),
-                turbulence_enabled=bool(
-                    self.get_parameter("turbulence.enabled").value
-                ),
-                turbulence_force_stddev=_vector(
-                    self.get_parameter("turbulence.force_stddev").value
-                ),
-                turbulence_torque_stddev=_vector(
-                    self.get_parameter("turbulence.torque_stddev").value
-                ),
-                turbulence_correlation_time=float(
-                    self.get_parameter("turbulence.correlation_time").value
-                ),
-                gust_enabled=bool(self.get_parameter("gust.enabled").value),
-                gust_force=_vector(self.get_parameter("gust.force").value),
-                gust_torque=_vector(self.get_parameter("gust.torque").value),
-                gust_duration=float(self.get_parameter("gust.duration").value),
-                gust_interval=float(self.get_parameter("gust.interval").value),
-                ground_effect_enabled=bool(
-                    self.get_parameter("ground_effect.enabled").value
-                ),
-                ground_effect_min_height=float(
-                    self.get_parameter("ground_effect.minimum_height").value
-                ),
-                ground_effect_max_height=float(
-                    self.get_parameter("ground_effect.maximum_height").value
-                ),
-                ground_effect_max_force=float(
-                    self.get_parameter("ground_effect.maximum_upward_force").value
-                ),
-                ground_effect_turbulence_gain=float(
-                    self.get_parameter("ground_effect.turbulence_gain").value
-                ),
-                force_limits=_vector(self.get_parameter("limits.force").value),
-                torque_limits=_vector(self.get_parameter("limits.torque").value),
-            )
-        )
+        self._model = self._build_model({})
         self._wrench_publisher = self.create_publisher(
             EntityWrench, "disturbance/wrench", 10
         )
@@ -121,6 +79,48 @@ class DisturbanceInjector(Node):
         )
         self._timer = self.create_timer(self._period, self._publish_wrench)
         self.add_on_set_parameters_callback(self._parameters_changed)
+
+    def _build_model(self, changes) -> DisturbanceModel:
+        def value(name):
+            return changes.get(name, self.get_parameter(name).value)
+
+        def finite(name):
+            number = float(value(name))
+            if not math.isfinite(number):
+                raise ValueError(f"{name} must be finite")
+            return number
+
+        settings = DisturbanceSettings(
+            frame=str(value("frame")),
+            constant_force=_vector(value("constant.force")),
+            constant_torque=_vector(value("constant.torque")),
+            random_seed=int(value("random_seed")),
+            turbulence_enabled=bool(value("turbulence.enabled")),
+            turbulence_force_stddev=_vector(value("turbulence.force_stddev")),
+            turbulence_torque_stddev=_vector(value("turbulence.torque_stddev")),
+            turbulence_correlation_time=finite("turbulence.correlation_time"),
+            gust_enabled=bool(value("gust.enabled")),
+            gust_force=_vector(value("gust.force")),
+            gust_torque=_vector(value("gust.torque")),
+            gust_duration=finite("gust.duration"),
+            gust_interval=finite("gust.interval"),
+            ground_effect_enabled=bool(value("ground_effect.enabled")),
+            ground_effect_min_height=finite("ground_effect.minimum_height"),
+            ground_effect_max_height=finite("ground_effect.maximum_height"),
+            ground_effect_max_force=finite("ground_effect.maximum_upward_force"),
+            ground_effect_turbulence_gain=finite("ground_effect.turbulence_gain"),
+            force_limits=_vector(value("limits.force")),
+            torque_limits=_vector(value("limits.torque")),
+        )
+        if settings.turbulence_enabled and settings.turbulence_correlation_time <= 0:
+            raise ValueError("turbulence correlation time must be positive")
+        if any(x < 0 for x in settings.turbulence_force_stddev + settings.turbulence_torque_stddev):
+            raise ValueError("turbulence standard deviations must be non-negative")
+        if settings.ground_effect_enabled and settings.ground_effect_max_height <= settings.ground_effect_min_height:
+            raise ValueError("ground-effect maximum height must exceed minimum height")
+        if settings.ground_effect_max_force < 0:
+            raise ValueError("ground-effect maximum force must be non-negative")
+        return DisturbanceModel(settings)
 
     def _publish_wrench(self) -> None:
         if not self._enabled:
@@ -155,19 +155,38 @@ class DisturbanceInjector(Node):
         self._clear_publisher.publish(entity)
 
     def _parameters_changed(self, parameters) -> SetParametersResult:
-        for parameter in parameters:
-            if parameter.name != "enabled":
-                continue
-            requested = bool(parameter.value)
-            if requested == self._enabled:
-                continue
-            self._enabled = requested
+        changes = {parameter.name: parameter.value for parameter in parameters}
+        try:
+            model = self._build_model(changes)
+            rate = float(changes.get("update_rate", self.get_parameter("update_rate").value))
+            if not math.isfinite(rate) or rate <= 0:
+                raise ValueError("update_rate must be positive and finite")
+            target = str(changes.get("target_model", self._target_model))
+            if not target:
+                raise ValueError("target_model must not be empty")
+            surface = float(changes.get("ground_effect.surface_z", self._surface_z))
+            offset = float(changes.get("ground_effect.rotor_plane_offset", self._rotor_plane_offset))
+            if not math.isfinite(surface) or not math.isfinite(offset):
+                raise ValueError("surface height and rotor offset must be finite")
+        except (ValueError, TypeError) as exc:
+            return SetParametersResult(successful=False, reason=str(exc))
+        requested = bool(changes.get("enabled", self._enabled))
+        if (self._enabled and not requested) or target != self._target_model:
+            self._publish_clear()
+        self._model = model
+        self._target_model = target
+        self._surface_z = surface
+        self._rotor_plane_offset = offset
+        if rate != 1.0 / self._period:
+            self.destroy_timer(self._timer)
+            self._period = 1.0 / rate
+            self._timer = self.create_timer(self._period, self._publish_wrench)
+        if requested != self._enabled:
             now = self.get_clock().now()
             self._last_update_time = now
             if requested:
                 self._start_time = now
-            else:
-                self._publish_clear()
+        self._enabled = requested
         return SetParametersResult(successful=True)
 
     def _pose_callback(self, message: TFMessage) -> None:
