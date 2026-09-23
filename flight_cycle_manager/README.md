@@ -225,8 +225,13 @@ as fresh telemetry is available, run:
 
 ```bash
 ros2 launch flight_cycle_manager pid_align_debug.launch.py \
-  pid_align_auto_start:=true
+  pid_align_auto_start:=true start_pid_tuner:=true
 ```
+
+`start_pid_tuner:=true` starts the PID gain dashboard alongside the manager;
+open `http://127.0.0.1:8765` on the launch host. The dashboard is disabled by
+default (`start_pid_tuner:=false`), in which case you can run
+`ros2 run flight_cycle_manager pid_tuner` separately instead.
 
 The controller aligns X, Y, and yaw, and holds the first observed dock distance
 with the Z PID. It bypasses dock search and remains in `PID_ALIGN`, even after
@@ -241,8 +246,8 @@ For manual engagement, leave `pid_align_auto_start:=false` (the default) and
 select `LAND` once while airborne. As in landing debug mode, changing away from
 manager-owned `GUIDED` cancels the attempt.
 
-Run `ros2 run flight_cycle_manager pid_tuner` in another terminal to modify the
-active gains and inspect `/flight_cycle_manager/pid_debug`.
+Use the dashboard to modify the active gains and inspect
+`/flight_cycle_manager/pid_debug`.
 
 ### Live PID tuning
 

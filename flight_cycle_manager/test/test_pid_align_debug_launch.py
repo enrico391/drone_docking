@@ -50,19 +50,41 @@ def test_launch_wires_configurable_alignment_only_manager(monkeypatch):
     monkeypatch.setattr(
         module, "get_package_share_directory", fake_share_directory
     )
-    captured = {}
+    captured = []
 
     def record_node(**kwargs):
-        captured.update(kwargs)
+        captured.append(kwargs)
         return {"node": kwargs}
 
     monkeypatch.setattr(module, "Node", record_node)
     context = configured_context(module, pid_align_auto_start="true")
 
     actions = module._launch_setup(context, ROOT)
-    overrides = captured["parameters"][2]
+    overrides = captured[0]["parameters"][2]
 
-    assert actions == [{"node": captured}]
+    assert actions == [{"node": captured[0]}, {"node": captured[1]}]
     assert overrides["operation_mode"] == "pid_align_debug"
     assert overrides["landing_backend"] == "pid"
     assert overrides["pid_align_auto_start"].evaluate(context) is True
+    assert captured[1]["executable"] == "pid_tuner"
+    assert captured[1]["condition"].evaluate(context) is False
+
+
+def test_pid_tuner_launch_argument_enables_dashboard(monkeypatch):
+    module = load_launch_module()
+    monkeypatch.setattr(
+        module,
+        "get_package_share_directory",
+        lambda package: str(ROOT if package == "flight_cycle_manager"
+                            else ROOT.parent / "dock_apriltag_localizer"),
+    )
+    monkeypatch.setattr(module, "Node", lambda **kwargs: kwargs)
+
+    context = configured_context(module, start_pid_tuner="true")
+    manager, tuner = module._launch_setup(context, ROOT)
+
+    assert manager["executable"] == "flight_cycle_manager"
+    assert tuner["package"] == "flight_cycle_manager"
+    assert tuner["executable"] == "pid_tuner"
+    assert tuner["name"] == "pid_tuner"
+    assert tuner["condition"].evaluate(context) is True
