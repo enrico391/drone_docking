@@ -3,7 +3,9 @@ import math
 
 import pytest
 
-from flight_cycle_manager.pid_tuner import TelemetryStore, parse_gain_request
+from flight_cycle_manager.pid_tuner import (
+    TelemetryStore, parse_distance_request, parse_gain_request,
+)
 
 
 def test_gain_request_accepts_one_complete_axis_update():
@@ -32,3 +34,12 @@ def test_telemetry_store_keeps_last_valid_message():
         "connected": True,
         "telemetry": {"state": "PID_ALIGN", "error": {"x": 0.1}},
     }
+
+
+def test_distance_request_validates_dock_distance():
+    assert parse_distance_request({"distance_m": 2}) == 2.0
+    for payload in ({}, {"distance_m": True}, {"distance_m": "2"},
+                    {"distance_m": 0.2}, {"distance_m": 21},
+                    {"distance_m": math.nan}):
+        with pytest.raises(ValueError):
+            parse_distance_request(payload)

@@ -1,4 +1,4 @@
-"""Launch contract for horizontal-only PID alignment tuning."""
+"""Launch contract for alignment-only XYZ and yaw PID tuning."""
 
 from __future__ import annotations
 

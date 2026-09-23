@@ -228,11 +228,14 @@ ros2 launch flight_cycle_manager pid_align_debug.launch.py \
   pid_align_auto_start:=true
 ```
 
-The controller uses the dock pose to drive X, Y, and yaw error toward zero but
-always commands zero vertical velocity. It bypasses dock search and remains in
-`PID_ALIGN`, even after the alignment tolerance has been held. If the dock tag
-is lost, it commands zero velocity and waits for a fresh target without
-climbing or landing.
+The controller aligns X, Y, and yaw, and holds the first observed dock distance
+with the Z PID. It bypasses dock search and remains in `PID_ALIGN`, even after
+alignment tolerance is held. In the PID tuner dashboard, select **Z** and apply
+a **Dock distance setpoint (m)**: a larger distance commands a climb, and a
+smaller one a descent. Z speed is limited by `search_max_vertical_speed_m_s`.
+The dashboard shows measured distance, target, error, and commanded Z speed.
+Keep the setpoint safely above the dock; alignment debug does not land or disarm.
+If the tag is lost, all velocity commands stop until it is reacquired.
 
 For manual engagement, leave `pid_align_auto_start:=false` (the default) and
 select `LAND` once while airborne. As in landing debug mode, changing away from

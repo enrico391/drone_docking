@@ -40,6 +40,9 @@ class PidLandingBackend:
     def diagnostics(self) -> dict:
         return self._controller.diagnostics()
 
+    def set_align_distance_setpoint(self, distance_m: float) -> None:
+        self._controller.set_align_distance_setpoint(distance_m)
+
     def start(
         self,
         *,

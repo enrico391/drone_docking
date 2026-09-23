@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -11,6 +12,7 @@ from vehicle_fakes import FakeVehicle, install_ros_fakes
 install_ros_fakes()
 
 import rclpy
+from rclpy.parameter import Parameter
 from std_srvs.srv import Trigger
 
 from flight_cycle_manager.manager import (
@@ -110,6 +112,47 @@ def test_align_debug_starts_backend_without_shared_search():
         assert manager.state is CycleState.LANDING_BACKEND
         assert manager.search_controller is None
         assert manager.backend is not None
+    finally:
+        manager.close()
+
+
+def test_align_debug_dashboard_setpoint_commands_z_and_reports_error(monkeypatch):
+    from test_pid_landing_backend import dock_observation
+
+    vehicle = FakeVehicle(airborne_state(2.0, mode=LOITER_MODE))
+    manager = make_align_manager(vehicle, auto_start=True)
+    published = []
+    try:
+        manager.tick(2.0)
+        vehicle.finish_command(current_mode=GUIDED_MODE)
+        vehicle.state = airborne_state(2.1, mode=GUIDED_MODE)
+        manager.tick(2.1)
+        assert not manager.set_parameters_atomically([
+            Parameter("pid_align_distance_setpoint_m", value=2.5)
+        ]).successful
+
+        monkeypatch.setattr(manager, "_dock_observation", lambda now: dock_observation(now))
+        monkeypatch.setattr(manager._pid_debug_publisher, "publish",
+                            lambda message: published.append(json.loads(message.data)))
+        vehicle.state = airborne_state(2.2, mode=GUIDED_MODE)
+        manager.tick(2.2)
+        assert vehicle.velocity_calls[-1][3] == pytest.approx(0.0)
+        assert published[-1]["distance_setpoint_m"] == pytest.approx(2.0)
+        assert published[-1]["dock_distance_m"] == pytest.approx(2.0)
+
+        assert manager.set_parameters_atomically([
+            Parameter("pid_align_distance_setpoint_m", value=2.5)
+        ]).successful
+        vehicle.state = airborne_state(2.3, mode=GUIDED_MODE)
+        manager.tick(2.3)
+        assert vehicle.velocity_calls[-1][3] > 0.0
+        assert published[-1]["error"]["z"] == pytest.approx(0.5)
+        assert published[-1]["alignment_only"] is True
+        for value in (float("nan"), 0.0, 25.0):
+            assert not manager.set_parameters_atomically([
+                Parameter("pid_align_distance_setpoint_m", value=value)
+            ]).successful
+        assert manager.get_parameter("pid_align_distance_setpoint_m").value == 2.5
     finally:
         manager.close()
 

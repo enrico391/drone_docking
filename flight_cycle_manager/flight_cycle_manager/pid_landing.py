@@ -162,6 +162,8 @@ class PidLandingController:
         self._central_stable_started_at: Optional[float] = None
         self._central_loss_started_at: Optional[float] = None
         self._distance_setpoint_m: Optional[float] = None
+        self._align_distance_setpoint_m: Optional[float] = None
+        self._align_dock_visible = False
         self._descent_last_updated_at: Optional[float] = None
         self._descent_paused = False
         self._recovery_attempts = 0
@@ -189,6 +191,8 @@ class PidLandingController:
         self._central_stable_started_at = None
         self._central_loss_started_at = None
         self._distance_setpoint_m = None
+        self._align_distance_setpoint_m = None
+        self._align_dock_visible = False
         self._descent_last_updated_at = None
         self._recovery_attempts = 0
         self._recovery_target_altitude_m = None
@@ -208,6 +212,18 @@ class PidLandingController:
     def recovery_attempts(self) -> int:
         """Number of recovery climbs used by the current landing attempt."""
         return min(self._recovery_attempts, self._config.max_recovery_attempts)
+
+    def set_align_distance_setpoint(self, distance_m: float) -> None:
+        """Set the dock-distance target for an active alignment-only attempt."""
+        if (not self._align_only or not self._started or not self._align_dock_visible
+                or self._align_distance_setpoint_m is None):
+            raise ValueError("alignment needs a fresh dock observation before setting Z")
+        if isinstance(distance_m, bool) or not isinstance(distance_m, (int, float)) or not math.isfinite(distance_m):
+            raise ValueError("dock distance setpoint must be finite")
+        if not 0.3 <= distance_m <= 20.0:
+            raise ValueError("dock distance setpoint must be between 0.3 and 20 m")
+        self._align_distance_setpoint_m = float(distance_m)
+        self._z_pid.reset()
 
     def update(
         self,
@@ -300,6 +316,7 @@ class PidLandingController:
         usable, reason = self._usable_dock(dock)
         if not usable:
             if self._align_only:
+                self._align_dock_visible = False
                 self._alignment_stable_started_at = None
                 self._target_loss_started_at = None
                 self._reset_pids()
@@ -312,9 +329,22 @@ class PidLandingController:
         self._target_loss_started_at = None
 
         tolerance = self._tolerance_for(dock.distance_m)
-        command = self._visual_command(now, dock, z_enabled=False)
         if self._align_only:
-            return PidLandingDecision(self._state, command)
+            self._align_dock_visible = True
+            if self._align_distance_setpoint_m is None:
+                self._align_distance_setpoint_m = dock.distance_m
+                self._z_pid.reset()
+            command = self._visual_command(now, dock, z_enabled=False)
+            velocity_z = self._z_pid.update(
+                self._align_distance_setpoint_m - dock.distance_m, now
+            )
+            self._z_pid.track_applied_output(velocity_z)
+            return PidLandingDecision(
+                self._state,
+                VelocityCommand(command.frame, command.velocity_x, command.velocity_y,
+                                velocity_z, command.yaw_rate_rad_s),
+            )
+        command = self._visual_command(now, dock, z_enabled=False)
         if not self._alignment_is_stable(now, dock, tolerance):
             return PidLandingDecision(self._state, command)
 
@@ -925,7 +955,12 @@ class PidLandingController:
     def diagnostics(self) -> dict:
         return {
             "descent_paused": self._descent_paused,
-            "distance_setpoint_m": self._distance_setpoint_m,
+            "distance_setpoint_m": (
+                self._align_distance_setpoint_m if self._align_only
+                else self._distance_setpoint_m
+            ),
+            "alignment_only": self._align_only,
+            "align_dock_visible": self._align_dock_visible,
             "axes": {axis: pid.diagnostics()
                      for axis, pid in zip(("x", "y", "z", "yaw"), self._pids())},
         }

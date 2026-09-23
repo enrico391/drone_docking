@@ -348,6 +348,8 @@ class FlightCycleManager(Node):
         defaults = {
             "operation_mode": "flight_cycle",
             "pid_align_auto_start": False,
+            # Placeholder until the alignment controller captures its first dock pose.
+            "pid_align_distance_setpoint_m": 0.0,
             "simulation_mode": False,
             "auto_start": False,
             "landing_backend": "pid",
@@ -2036,9 +2038,28 @@ class FlightCycleManager(Node):
                    for axis in ("x", "y", "z", "yaw")
                    for suffix in tunable_suffixes)
         }
-        if not tuning_updates:
+        has_distance_update = "pid_align_distance_setpoint_m" in updates
+        distance_update = updates.get("pid_align_distance_setpoint_m")
+        if not tuning_updates and not has_distance_update:
             return SetParametersResult(successful=True)
         try:
+            backend = self._landing_controller
+            if has_distance_update:
+                if (self._operation_mode != "pid_align_debug"
+                        or self._state is not CycleState.LANDING_BACKEND
+                        or backend is None):
+                    raise ValueError("dock distance setpoint requires active PID alignment debug")
+                if (isinstance(distance_update, bool)
+                        or not isinstance(distance_update, (int, float))
+                        or not math.isfinite(distance_update)
+                        or not 0.3 <= distance_update <= 20.0):
+                    raise ValueError("dock distance setpoint must be between 0.3 and 20 m")
+                diagnostics = backend.diagnostics()
+                if not diagnostics["align_dock_visible"]:
+                    raise ValueError("wait for a fresh dock observation before setting Z")
+            if not tuning_updates:
+                backend.set_align_distance_setpoint(distance_update)
+                return SetParametersResult(successful=True)
             for name, value in tuning_updates.items():
                 numeric = float(value)
                 if not math.isfinite(numeric) or numeric < 0.0:
@@ -2051,10 +2072,11 @@ class FlightCycleManager(Node):
                 self._build_live_pid_axis_config(f"pid_{axis}", limit, tuning_updates)
                 for axis, limit in zip(("x", "y", "z", "yaw"), limits)
             )
-            backend = self._landing_controller
             reconfigure = getattr(backend, "reconfigure_pids", None)
             if callable(reconfigure):
                 reconfigure(configs)
+            if has_distance_update:
+                backend.set_align_distance_setpoint(distance_update)
         except (TypeError, ValueError) as error:
             return SetParametersResult(successful=False, reason=str(error))
         return SetParametersResult(successful=True)
@@ -2088,6 +2110,7 @@ class FlightCycleManager(Node):
                                  command.velocity_z, command.yaw_rate_rad_s],
             "measured_velocity_enu": list(vehicle.velocity_enu_m_s),
         })
+        data["dock_distance_m"] = dock.distance_m if dock is not None else None
         heading = vehicle.heading_rad
         if heading is not None and math.isfinite(heading):
             east, north, up = vehicle.velocity_enu_m_s

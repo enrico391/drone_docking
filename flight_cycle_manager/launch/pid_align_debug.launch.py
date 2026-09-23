@@ -1,4 +1,4 @@
-"""Launch horizontal and yaw PID alignment without changing height."""
+"""Launch XYZ and yaw PID tuning with an operator-selected dock distance."""
 
 from pathlib import Path
 

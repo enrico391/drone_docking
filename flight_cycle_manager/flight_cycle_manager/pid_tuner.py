@@ -30,6 +30,16 @@ def parse_gain_request(payload: Any) -> tuple[str, float, float, float]:
     return payload["axis"], *values
 
 
+def parse_distance_request(payload: Any) -> float:
+    value = payload.get("distance_m") if isinstance(payload, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("dock distance must be a number in metres")
+    value = float(value)
+    if not math.isfinite(value) or not 0.3 <= value <= 20.0:
+        raise ValueError("dock distance must be between 0.3 and 20 m")
+    return value
+
+
 class TelemetryStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -54,7 +64,7 @@ class TelemetryStore:
 
 @dataclass
 class _GainWork:
-    gains: tuple[str, float, float, float]
+    parameters: dict[str, float]
     done: threading.Event
     result: dict[str, Any] | None = None
 
@@ -90,7 +100,7 @@ def _handler_for(app: _WebApp) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path != "/api/gains":
+            if self.path not in ("/api/gains", "/api/distance"):
                 self.send_error(404)
                 return
             try:
@@ -98,11 +108,16 @@ def _handler_for(app: _WebApp) -> type[BaseHTTPRequestHandler]:
                 if length <= 0 or length > 4096:
                     raise ValueError("invalid request size")
                 payload = json.loads(self.rfile.read(length))
-                gains = parse_gain_request(payload)
+                if self.path == "/api/gains":
+                    axis, kp, ki, kd = parse_gain_request(payload)
+                    parameters = {f"pid_{axis}_{name}": value for name, value in
+                                  zip(("kp", "ki", "kd"), (kp, ki, kd))}
+                else:
+                    parameters = {"pid_align_distance_setpoint_m": parse_distance_request(payload)}
             except (ValueError, TypeError) as exc:
                 self._json(400, {"ok": False, "message": str(exc)})
                 return
-            result = app.submit(gains)
+            result = app.submit(parameters)
             self._json(200 if result.get("ok") else 503, result)
 
         def log_message(self, _format: str, *_args: Any) -> None:
@@ -140,6 +155,13 @@ small{color:#9ca3af}#message{min-height:20px}
 <button class="apply" id="apply">Apply</button>
 <button id="undo">Undo</button><button id="ponly">P-only</button>
 </div><p id="message"></p></div>
+<div class="card" id="distance-card" hidden>
+<div class="row"><label>Dock distance setpoint (m)
+<input id="distance" type="number" min="0.3" max="20" step="0.05"></label>
+<button class="apply" id="apply-distance">Apply Z setpoint</button></div>
+<p id="distance-status">Waiting for dock distance</p>
+<small>Larger distance climbs; smaller distance descends. Available only during alignment debug.</small>
+</div>
 <div class="card"><canvas id="plot" width="720" height="230"></canvas>
 <small>error (blue) · command (orange), auto-scaled</small></div>
 <button id="download">Download YAML</button></main><script>
@@ -154,6 +176,7 @@ names.forEach(a=>{
 fields.forEach(n=>document.querySelector('#'+n).oninput=()=>dirty=true);
 function select(a){
   axis=a; dirty=false;
+  document.querySelector('#distance-card').hidden=a!=='z';
   document.querySelectorAll('.axis').forEach(
     b=>b.classList.toggle('on',b.id==='axis-'+a));
   fill();
@@ -186,6 +209,16 @@ document.querySelector('#ponly').onclick=()=>{
   document.querySelector('#ki').value=0;document.querySelector('#kd').value=0;
   dirty=true;
 };
+document.querySelector('#apply-distance').onclick=async()=>{
+  let m=document.querySelector('#message');
+  let v=Number(document.querySelector('#distance').value);
+  if(!Number.isFinite(v)||v<0.3||v>20){m.textContent='Dock distance must be between 0.3 and 20 m';return}
+  try{
+    let r=await fetch('/api/distance',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({distance_m:v})});
+    m.textContent=(await r.json()).message;
+  }catch(e){m.textContent=e.message}
+};
 function draw(){
   let c=document.querySelector('#plot'),g=c.getContext('2d'),h=history[axis];
   let all=h.e.concat(h.c),scale=Math.max(.001,...all.map(Math.abs));
@@ -212,6 +245,16 @@ async function poll(){
       let pause=document.querySelector('#pause');
       pause.textContent=latest.descent_paused?'DESCENT PAUSED':'descent active';
       pause.className='badge '+(latest.descent_paused?'bad':'');fill();
+      let card=document.querySelector('#distance-card');
+      card.hidden=axis!=='z';
+      let input=document.querySelector('#distance');
+      let enabled=latest.alignment_only&&latest.state==='PID_ALIGN'&&
+        Number.isFinite(latest.dock_distance_m)&&Number.isFinite(latest.distance_setpoint_m);
+      document.querySelector('#apply-distance').disabled=!enabled;
+      if(enabled&&!input.matches(':focus'))input.value=latest.distance_setpoint_m;
+      document.querySelector('#distance-status').textContent=enabled?
+        `Measured: ${latest.dock_distance_m.toFixed(2)} m · Target: ${latest.distance_setpoint_m.toFixed(2)} m · Error: ${(latest.error?.z??0).toFixed(2)} m · Command: ${(latest.command_body_flu?.[2]??0).toFixed(2)} m/s`:
+        'Waiting for alignment and a valid dock observation';
       let i=names.indexOf(axis),e=latest.error?.[axis];
       let c=latest.command_body_flu?.[i];
       if(Number.isFinite(e)&&Number.isFinite(c)){
@@ -258,8 +301,8 @@ def main(args: list[str] | None = None) -> None:
             )
             self.create_timer(0.05, self._process_work)
 
-        def submit(self, gains: tuple[str, float, float, float]) -> dict[str, Any]:
-            work = _GainWork(gains, threading.Event())
+        def submit(self, parameters: dict[str, float]) -> dict[str, Any]:
+            work = _GainWork(parameters, threading.Event())
             self._works.put(work)
             if not work.done.wait(3.0):
                 return {"ok": False, "message": "parameter update timed out"}
@@ -274,7 +317,7 @@ def main(args: list[str] | None = None) -> None:
                     outcome = future.result().result
                     work.result = {
                         "ok": bool(outcome.successful),
-                        "message": "gains applied" if outcome.successful else outcome.reason,
+                        "message": "parameters applied" if outcome.successful else outcome.reason,
                     }
                 except Exception as exc:  # service transport failure
                     work.result = {"ok": False, "message": str(exc)}
@@ -288,11 +331,10 @@ def main(args: list[str] | None = None) -> None:
                 work.result = {"ok": False, "message": "flight_cycle_manager is unavailable"}
                 work.done.set()
                 return
-            axis, kp, ki, kd = work.gains
             request = SetParametersAtomically.Request()
             request.parameters = [
-                Parameter(f"pid_{axis}_{name}", value=value).to_parameter_msg()
-                for name, value in zip(("kp", "ki", "kd"), (kp, ki, kd))
+                Parameter(name, value=value).to_parameter_msg()
+                for name, value in work.parameters.items()
             ]
             self._active = work, self._client.call_async(request)
 

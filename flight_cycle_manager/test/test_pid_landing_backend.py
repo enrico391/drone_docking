@@ -202,7 +202,7 @@ def test_pid_backend_starts_at_alignment_after_shared_search():
     assert decision.outcome is LandingBackendOutcome.RUNNING
 
 
-def test_alignment_only_backend_never_advances_or_commands_height():
+def test_alignment_only_backend_holds_initial_distance_and_accepts_z_setpoint():
     """Break caught: tuning resumes landing after stable alignment."""
     backend = PidLandingBackend(pid_config(), align_only=True)
     backend.start(
@@ -227,6 +227,53 @@ def test_alignment_only_backend_never_advances_or_commands_height():
     assert decision.velocity is not None
     assert decision.velocity.velocity_z == 0.0
     assert decision.velocity.velocity_x != 0.0
+    assert backend.diagnostics()["distance_setpoint_m"] == pytest.approx(2.0)
+
+    backend.set_align_distance_setpoint(2.5)
+    climb = backend.update(now=2.1, dock=dock_observation(2.1),
+                           vehicle=vehicle_observation())
+    assert climb.substate == "PID_ALIGN"
+    assert climb.velocity.velocity_z == pytest.approx(0.5)
+    backend.set_align_distance_setpoint(1.5)
+    descend = backend.update(now=2.2, dock=dock_observation(2.2),
+                             vehicle=vehicle_observation())
+    assert descend.velocity.velocity_z == pytest.approx(-0.5)
+    assert backend.diagnostics()["axes"]["z"]["p"] == pytest.approx(-0.5)
+
+
+def test_alignment_setpoint_requires_observation_and_valid_distance():
+    backend = PidLandingBackend(pid_config(), align_only=True)
+    backend.start(now=0.0, dock=None, vehicle=vehicle_observation())
+    with pytest.raises(ValueError):
+        backend.set_align_distance_setpoint(2.0)
+    backend.update(now=0.1, dock=dock_observation(0.1),
+                   vehicle=vehicle_observation())
+    for bad in (float("nan"), float("inf"), True, 0.2, 21.0):
+        with pytest.raises(ValueError):
+            backend.set_align_distance_setpoint(bad)
+    normal_backend = PidLandingBackend(pid_config())
+    normal_backend.start(now=0.0, dock=dock_observation(0.0),
+                         vehicle=vehicle_observation())
+    with pytest.raises(ValueError):
+        normal_backend.set_align_distance_setpoint(2.0)
+
+
+def test_alignment_target_loss_stops_vertical_motion_and_resumes_setpoint():
+    backend = PidLandingBackend(pid_config(), align_only=True)
+    backend.start(now=0.0, dock=None, vehicle=vehicle_observation())
+    backend.update(now=0.1, dock=dock_observation(0.1),
+                   vehicle=vehicle_observation())
+    backend.set_align_distance_setpoint(2.5)
+    assert backend.update(now=0.2, dock=dock_observation(0.2),
+                          vehicle=vehicle_observation()).velocity.velocity_z > 0
+    lost = backend.update(now=0.3, dock=None, vehicle=vehicle_observation())
+    assert lost.velocity == VelocityCommand(VelocityFrame.BODY_FLU, 0.0, 0.0, 0.0)
+    assert backend.diagnostics()["distance_setpoint_m"] == 2.5
+    with pytest.raises(ValueError):
+        backend.set_align_distance_setpoint(1.5)
+    recovered = backend.update(now=0.4, dock=dock_observation(0.4),
+                               vehicle=vehicle_observation())
+    assert recovered.velocity.velocity_z > 0
 
 
 def test_alignment_only_backend_waits_without_recovery_when_target_is_lost():
