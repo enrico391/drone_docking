@@ -284,7 +284,20 @@ ros2 run flight_cycle_manager pid_tuner
 Then open `http://127.0.0.1:8765`. Select one axis, change its gains, and press
 **Apply**. **Undo** restores the last applied values, **P-only** zeros Ki/Kd,
 and **Download YAML** saves all displayed gains. The page is local-only and
-uses atomic ROS parameter updates.
+uses atomic ROS parameter updates. A dock-relative 3D-style error surface
+sits to the right of the axis selection and tracking-error readouts, remains
+visible on every X/Y/Z/yaw tab, and highlights the selected axis. It uses a
+bounded history of fresh observations to interpolate Z error over X/Y error
+only near sampled locations; empty parts of the grid are unknown, not zero.
+The surface is an estimate, not a measured physical shape or drone trajectory.
+The current error marker and yaw arrow remain visible even with no mesh. Samples
+are cleared when the dock data is stale or the Z distance setpoint changes;
+during a changing descent setpoint the mesh may therefore stay empty. The left
+readouts show X/Y/Z errors in metres and yaw in degrees. Z is the distance-
+setpoint error, not altitude; when no setpoint is available it is marked
+unavailable.
+The display clears stale or missing dock data rather than showing an old
+observation as live.
 
 The same parameters can be changed from a terminal, for example:
 

@@ -9,6 +9,7 @@ import json
 import math
 import queue
 import threading
+import time
 from typing import Any
 
 
@@ -44,6 +45,7 @@ class TelemetryStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._telemetry: dict[str, Any] | None = None
+        self._received_at: float | None = None
 
     def update(self, raw: str) -> bool:
         try:
@@ -54,12 +56,15 @@ class TelemetryStore:
             return False
         with self._lock:
             self._telemetry = value
+            self._received_at = time.monotonic()
         return True
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             value = deepcopy(self._telemetry)
-        return {"connected": value is not None, "telemetry": value}
+            received_at = self._received_at
+        fresh = received_at is not None and time.monotonic() - received_at < 2.0
+        return {"connected": fresh, "telemetry": value if fresh else None}
 
 
 @dataclass
@@ -131,7 +136,10 @@ DASHBOARD_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width">
 <title>Landing PID tuner</title><style>
 body{font:15px system-ui;background:#111827;color:#e5e7eb;margin:0;padding:24px}
-main{max-width:760px;margin:auto}
+main{max-width:1320px;margin:auto}
+.dashboard{display:grid;grid-template-columns:minmax(320px,1fr) minmax(0,1.25fr);gap:16px;align-items:start}
+.dashboard .card{margin:0 0 16px}
+@media(max-width:850px){.dashboard{grid-template-columns:minmax(0,1fr)}}
 .card{background:#1f2937;border-radius:10px;padding:18px;margin:14px 0}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
 button,input{font:inherit;border-radius:6px;border:1px solid #4b5563;padding:8px}
@@ -140,6 +148,11 @@ button,input{background:#111827;color:#fff}button{cursor:pointer}
 .badge{padding:5px 9px;border-radius:12px;background:#374151}
 .bad{background:#b91c1c}.good{background:#047857}
 canvas{width:100%;height:230px;background:#0b1020;border-radius:6px}
+#position{height:auto;aspect-ratio:820/430;display:block}
+.readings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}
+.reading{min-width:0;padding:9px;background:#111827;border:1px solid #374151;border-radius:6px}
+.reading.on{border-color:#60a5fa;color:#bfdbfe}
+.reading strong{display:block;font-size:20px;font-variant-numeric:tabular-nums}
 small{color:#9ca3af}#message{min-height:20px}
 </style></head><body><main><h2>Landing PID tuner</h2>
 <div class="row">
@@ -147,7 +160,8 @@ small{color:#9ca3af}#message{min-height:20px}
 <span id="state" class="badge">state —</span>
 <span id="sat" class="badge">not saturated</span>
 <span id="pause" class="badge">descent active</span></div>
-<div class="card"><div class="row" id="axes"></div>
+<div class="dashboard"><div class="dashboard-left">
+<div class="card"><h3>Position selection and PID gains</h3><div class="row" id="axes"></div>
 <div class="row" style="margin-top:14px">
 <label>Kp<input id="kp" type="number" min="0" step="0.01"></label>
 <label>Ki<input id="ki" type="number" min="0" step="0.01"></label>
@@ -162,13 +176,30 @@ small{color:#9ca3af}#message{min-height:20px}
 <p id="distance-status">Waiting for dock distance</p>
 <small>Larger distance climbs; smaller distance descends. Available only during alignment debug.</small>
 </div>
-<div class="card"><canvas id="plot" width="720" height="230"></canvas>
-<small>error (blue) · command (orange), auto-scaled</small></div>
-<button id="download">Download YAML</button></main><script>
+<div class="card"><h3>Tracking errors</h3>
+<div id="readings" class="readings" aria-live="off"></div>
+<small>X forward · Y left · Z dock-distance setpoint minus measured distance (not height) · Yaw counter-clockwise.</small>
+</div>
+<div class="card"><h3>Selected-axis history</h3><canvas id="plot" width="720" height="230"></canvas>
+<small>Tracking error (blue) · command (orange), auto-scaled; yaw in radians and rad/s.</small></div>
+<button id="download">Download YAML</button>
+</div><div class="dashboard-right">
+<div class="card"><h3>Dock-relative error surface (estimated)</h3>
+<canvas id="position" width="820" height="430" role="img" aria-label="Estimated 3D wireframe of dock-relative errors with live error marker"></canvas>
+<small>X forward · Y left · Z distance-setpoint error (not height). Colored wireframe interpolates only between nearby sampled errors; blank areas are unknown. Marker is the current error, not an absolute drone position. Yaw is shown by the arrow.</small>
+</div></div></div></main><script>
 const names=['x','y','z','yaw'], fields=['kp','ki','kd'];
 let axis='x', latest=null, dirty=false, previous=null;
 const history={}; names.forEach(a=>history[a]={e:[],c:[]});
-const axes=document.querySelector('#axes');
+const surfaceSamples=[];
+let surfaceSetpoint=null, lastSurfaceTime=null;
+const axes=document.querySelector('#axes'), readings=document.querySelector('#readings');
+names.forEach(a=>{
+  const item=document.createElement('div');item.className='reading';item.id='reading-'+a;
+  const label=document.createElement('span');label.textContent=a.toUpperCase()+' error';
+  const value=document.createElement('strong');value.textContent='—';
+  item.append(label,value);readings.appendChild(item);
+});
 names.forEach(a=>{
   let b=document.createElement('button'); b.textContent=a.toUpperCase();
   b.className='axis'; b.onclick=()=>select(a); b.id='axis-'+a; axes.appendChild(b);
@@ -179,7 +210,7 @@ function select(a){
   document.querySelector('#distance-card').hidden=a!=='z';
   document.querySelectorAll('.axis').forEach(
     b=>b.classList.toggle('on',b.id==='axis-'+a));
-  fill();
+  fill();drawPosition();
 }
 function fill(){
   let d=latest?.axes?.[axis]; if(!d||dirty)return;
@@ -219,6 +250,150 @@ document.querySelector('#apply-distance').onclick=async()=>{
     m.textContent=(await r.json()).message;
   }catch(e){m.textContent=e.message}
 };
+// Keep only distinct, fresh observations under the same distance setpoint.
+// Z is a distance-setpoint error, not a measured vertical separation.
+function recordSurfaceSample(){
+  const e=latest?.error;
+  if(!e || !Number.isFinite(e.x) || !Number.isFinite(e.y) ||
+     !Number.isFinite(e.z) || !Number.isFinite(e.yaw) ||
+     !Number.isFinite(latest.dock_age_s) || latest.dock_age_s >= 1){
+    surfaceSamples.length=0;surfaceSetpoint=null;lastSurfaceTime=null;return;
+  }
+  const setpoint=latest.distance_setpoint_m;
+  if(!Number.isFinite(setpoint)){
+    surfaceSamples.length=0;surfaceSetpoint=null;lastSurfaceTime=null;return;
+  }
+  if(surfaceSetpoint!==setpoint){surfaceSamples.length=0;surfaceSetpoint=setpoint;lastSurfaceTime=null}
+  if(Number.isFinite(latest.time_s)){
+    if(lastSurfaceTime===latest.time_s)return;
+    if(lastSurfaceTime!==null && latest.time_s<lastSurfaceTime)surfaceSamples.length=0;
+    lastSurfaceTime=latest.time_s;
+  }
+  const previous=surfaceSamples[surfaceSamples.length-1];
+  if(previous && Math.hypot(e.x-previous.x,e.y-previous.y)<0.025 &&
+     Math.abs(e.z-previous.z)<0.025)return;
+  surfaceSamples.push({x:e.x,y:e.y,z:e.z});
+  if(surfaceSamples.length>160)surfaceSamples.shift();
+}
+// Interpolate only inside small triangles of observed XY locations; never extrapolate.
+function surfaceHeight(x,y,cell){
+  if(surfaceSamples.length<3)return null;
+  const nearby=surfaceSamples.map(p=>({p,d:Math.hypot(p.x-x,p.y-y)}))
+    .filter(v=>v.d<=cell*4).sort((a,b)=>a.d-b.d).slice(0,7);
+  let best=null,bestArea=Infinity;
+  for(let a=0;a<nearby.length;a++)for(let b=a+1;b<nearby.length;b++)
+    for(let c=b+1;c<nearby.length;c++){
+      const p=nearby[a].p,q=nearby[b].p,r=nearby[c].p;
+      if(Math.hypot(p.x-q.x,p.y-q.y)>cell*4 ||
+         Math.hypot(p.x-r.x,p.y-r.y)>cell*4 ||
+         Math.hypot(q.x-r.x,q.y-r.y)>cell*4)continue;
+      const cross=(q.y-r.y)*(p.x-r.x)+(r.x-q.x)*(p.y-r.y);
+      if(Math.abs(cross)<cell*cell*.06)continue;
+      const u=((q.y-r.y)*(x-r.x)+(r.x-q.x)*(y-r.y))/cross;
+      const v=((r.y-p.y)*(x-r.x)+(p.x-r.x)*(y-r.y))/cross;
+      const t=1-u-v;
+      if(u < -1e-8 || v < -1e-8 || t < -1e-8)continue;
+      const area=Math.abs(cross);
+      if(area<bestArea){bestArea=area;best=u*p.z+v*q.z+t*r.z}
+    }
+  return best;
+}
+// Isometric projection of BODY_FLU X (forward), Y (left), and Z error.
+function drawPosition(){
+  const canvas=document.querySelector('#position'), g=canvas.getContext('2d');
+  const w=canvas.width,h=canvas.height,origin=[w/2,h*.57];
+  g.clearRect(0,0,w,h);
+  const error=latest?.error;
+  const valid=error && Number.isFinite(error.x) && Number.isFinite(error.y) &&
+    Number.isFinite(error.yaw) && Number.isFinite(latest.dock_age_s) &&
+    latest.dock_age_s < 1;
+  const hasZ=valid && Number.isFinite(error.z);
+  names.forEach(a=>{
+    const item=document.querySelector('#reading-'+a);
+    item.classList.toggle('on',a===axis);
+    item.querySelector('strong').textContent=valid?
+      (a==='yaw'?(error.yaw*180/Math.PI).toFixed(1)+'°':
+        (a==='z'&&!hasZ?'—':error[a].toFixed(2)+' m')):'—';
+  });
+  const scale=Math.max(1,...surfaceSamples.flatMap(p=>[p.x,p.y,p.z].map(Math.abs)),
+    ...(valid?[error.x,error.y,hasZ?error.z:0].map(Math.abs):[]))*1.3;
+  function project(x,y,z){return [origin[0]+(x-y)*70/scale,
+    origin[1]+(x+y)*32/scale-z*80/scale]}
+  function line(a,b,color,width=2,dash=[]){
+    g.beginPath();g.setLineDash(dash);g.moveTo(...a);g.lineTo(...b);
+    g.strokeStyle=color;g.lineWidth=width;g.stroke();g.setLineDash([]);
+  }
+  const colors={x:'#60a5fa',y:'#34d399',z:'#fbbf24'};
+  // Base grid and box give the surface a stable reference even before samples arrive.
+  for(let i=-4;i<=4;i++){
+    const v=i*scale/4;
+    line(project(v,-scale,0),project(v,scale,0),'#334155',1);
+    line(project(-scale,v,0),project(scale,v,0),'#334155',1);
+  }
+  for(const x of [-scale,scale])for(const y of [-scale,scale])
+    line(project(x,y,-scale),project(x,y,scale),'#334155',1);
+  const n=16,cell=2*scale/n;
+  const grid=surfaceSamples.length<3?[]:
+    Array.from({length:n+1},(_,j)=>Array.from({length:n+1},(_,i)=>{
+      const x=-scale+i*cell,y=-scale+j*cell;
+      return {x,y,z:surfaceHeight(x,y,cell)};
+    }));
+  // Paint farther cells first. A cell needs all four supported corners.
+  const cells=[];
+  for(let j=0;j<grid.length-1;j++)for(let i=0;i<n;i++){
+    const corners=[grid[j][i],grid[j][i+1],grid[j+1][i+1],grid[j+1][i]];
+    if(corners.every(p=>p.z!==null))cells.push({corners,depth:i+j});
+  }
+  cells.sort((a,b)=>a.depth-b.depth);
+  for(const {corners} of cells){
+    const avg=corners.reduce((sum,p)=>sum+p.z,0)/4;
+    const hue=210-170*(avg/scale+1)/2;
+    g.beginPath();corners.forEach((p,i)=>{
+      const pt=project(p.x,p.y,p.z);
+      i?g.lineTo(...pt):g.moveTo(...pt);
+    });g.closePath();
+    g.fillStyle=`hsla(${hue},85%,50%,.72)`;g.fill();
+    g.strokeStyle='rgba(226,232,240,.65)';g.lineWidth=.8;g.stroke();
+  }
+  for(const a of ['x','y','z']){
+    const end=project(a==='x'?scale:0,a==='y'?scale:0,a==='z'?scale:0);
+    line(origin,end,colors[a],a===axis?3:1.5);
+    g.fillStyle=colors[a];g.font='bold 15px system-ui';g.fillText(a.toUpperCase(),end[0]+5,end[1]-5);
+  }
+  g.fillStyle='#e5e7eb';g.beginPath();g.arc(...origin,5,0,2*Math.PI);g.fill();
+  g.font='13px system-ui';g.fillText('dock / target',origin[0]+10,origin[1]+16);
+  g.fillStyle='#cbd5e1';g.font='12px system-ui';
+  g.fillText('estimated surface · '+surfaceSamples.length+' samples · '+cells.length+' mesh cells',12,h-30);
+  if(!valid){
+    g.textAlign='center';g.fillStyle='#fca5a5';g.font='16px system-ui';
+    g.fillText('Waiting for fresh X, Y and yaw errors',w/2,35);
+    g.textAlign='left';return;
+  }
+  const z=hasZ?error.z:0;
+  if(!hasZ){g.fillStyle=colors.z;g.fillText('Z error unavailable (no setpoint); marker at Z=0 for display',12,28)}
+  const point=project(error.x,error.y,z);
+  line(origin,point,'#e5e7eb',2,[5,4]);
+  for(const a of ['x','y','z']){
+    if(a==='z'&&!hasZ)continue;
+    const vec={x:[error.x,0,0],y:[0,error.y,0],z:[0,0,z]}[a];
+    line(origin,project(...vec),colors[a],a===axis?4:2);
+  }
+  g.fillStyle='#f8fafc';g.beginPath();g.arc(...point,9,0,2*Math.PI);g.fill();
+  g.strokeStyle=axis==='yaw'?'#fb7185':'#94a3b8';g.lineWidth=3;g.stroke();
+  // Yaw rotates the forward arrow toward body-left (counter-clockwise).
+  const tip=project(error.x+Math.cos(error.yaw)*scale*.27,
+    error.y+Math.sin(error.yaw)*scale*.27,z);
+  line(point,tip,'#fb7185',axis==='yaw'?4:3);
+  const angle=Math.atan2(tip[1]-point[1],tip[0]-point[0]);
+  for(const side of [-1,1]){
+    line(tip,[tip[0]-10*Math.cos(angle+side*.5),
+      tip[1]-10*Math.sin(angle+side*.5)],'#fb7185',3);
+  }
+  g.fillStyle='#f8fafc';g.font='bold 14px system-ui';
+  g.fillText('error'+(hasZ?'':' (Z unknown)'),point[0]+12,point[1]-12);
+  g.fillStyle='#9ca3af';g.font='12px system-ui';
+  g.fillText('scale: '+scale.toFixed(1)+' m per axis',12,h-12);
+}
 function draw(){
   let c=document.querySelector('#plot'),g=c.getContext('2d'),h=history[axis];
   let all=h.e.concat(h.c),scale=Math.max(.001,...all.map(Math.abs));
@@ -233,8 +408,8 @@ function draw(){
 }
 async function poll(){
   try{
-    let s=await(await fetch('/api/state')).json();latest=s.telemetry;
-    let ok=s.connected,link=document.querySelector('#link');
+    let s=await(await fetch('/api/state')).json();latest=s.connected?s.telemetry:null;
+    let ok=Boolean(latest),link=document.querySelector('#link');
     link.textContent=ok?'PID data live':'waiting for PID data';
     link.className='badge '+(ok?'good':'bad');
     if(ok){
@@ -257,12 +432,23 @@ async function poll(){
         'Waiting for alignment and a valid dock observation';
       let i=names.indexOf(axis),e=latest.error?.[axis];
       let c=latest.command_body_flu?.[i];
-      if(Number.isFinite(e)&&Number.isFinite(c)){
+      if(Number.isFinite(e)&&Number.isFinite(c)&&
+         Number.isFinite(latest.dock_age_s)&&latest.dock_age_s<1){
         let h=history[axis];h.e.push(e);h.c.push(c);
         if(h.e.length>120){h.e.shift();h.c.shift()}
       }draw();
+    }else{
+      document.querySelector('#state').textContent='state —';
+      document.querySelector('#sat').textContent='not saturated';
+      document.querySelector('#pause').textContent='descent unknown';
+      document.querySelector('#apply-distance').disabled=true;
+      document.querySelector('#distance-status').textContent='Waiting for alignment and a valid dock observation';
     }
-  }catch(e){}setTimeout(poll,200);
+    recordSurfaceSample();drawPosition();
+  }catch(e){
+    latest=null;document.querySelector('#link').textContent='waiting for PID data';
+    document.querySelector('#link').className='badge bad';recordSurfaceSample();drawPosition();
+  }setTimeout(poll,200);
 }
 document.querySelector('#download').onclick=()=>{
   if(!latest?.axes)return;
