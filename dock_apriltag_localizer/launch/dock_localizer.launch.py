@@ -26,6 +26,19 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'python_executable', default_value=default_python_executable
         ),
+        DeclareLaunchArgument('pose_filter_enabled', default_value='true'),
+        DeclareLaunchArgument(
+            'pose_filter_time_constant_s', default_value='0.12'
+        ),
+        DeclareLaunchArgument(
+            'pose_filter_max_translation_speed_m_s', default_value='2.0'
+        ),
+        DeclareLaunchArgument(
+            'pose_filter_max_position_jump_m', default_value='0.20'
+        ),
+        DeclareLaunchArgument(
+            'pose_filter_reacquire_frames', default_value='3'
+        ),
 
         Node(
             package='dock_apriltag_localizer',
@@ -62,18 +75,5 @@ def generate_launch_description():
                     value_type=int,
                 ),
             }]
-        ),
-        DeclareLaunchArgument('pose_filter_enabled', default_value='true'),
-        DeclareLaunchArgument(
-            'pose_filter_time_constant_s', default_value='0.12'
-        ),
-        DeclareLaunchArgument(
-            'pose_filter_max_translation_speed_m_s', default_value='2.0'
-        ),
-        DeclareLaunchArgument(
-            'pose_filter_max_position_jump_m', default_value='0.20'
-        ),
-        DeclareLaunchArgument(
-            'pose_filter_reacquire_frames', default_value='3'
         ),
     ])

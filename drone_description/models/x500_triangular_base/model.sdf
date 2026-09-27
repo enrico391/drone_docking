@@ -6,14 +6,14 @@
     <static>false</static>
     <link name="base_link">
       <inertial>
-        <mass>1.0</mass>
+        <mass>1.277</mass> 
         <inertia>
           <ixx>0.02166666666666667</ixx>
           <ixy>0</ixy>
           <ixz>0</ixz>
           <iyy>0.02166666666666667</iyy>
           <iyz>0</iyz>
-          <izz>0.04000000000000001</izz>
+          <izz>0.020</izz>
         </inertia>
       </inertial>
       <gravity>true</gravity>
@@ -185,7 +185,7 @@
       <inertial>
         <!-- Fusion 360 values converted from g/mm to kg/m SI units. -->
         <pose>-0.000011 0.000805 0.097709 0 0 0</pose>
-        <mass>0.990387</mass>
+        <mass>0.914</mass>
         <inertia>
           <ixx>0.006604</ixx>
           <ixy>-0.000000005161</ixy>
@@ -506,7 +506,7 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1000.0</maxRotVelocity>
-      <motorConstant>8.54858e-06</motorConstant>
+      <motorConstant>1.47e-05</motorConstant>
       <momentConstant>0.016</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <actuator_number>0</actuator_number>
@@ -522,7 +522,7 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1000.0</maxRotVelocity>
-      <motorConstant>8.54858e-06</motorConstant>
+      <motorConstant>1.47e-05</motorConstant>
       <momentConstant>0.016</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <actuator_number>1</actuator_number>
@@ -538,7 +538,7 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1000.0</maxRotVelocity>
-      <motorConstant>8.54858e-06</motorConstant>
+      <motorConstant>1.47e-05</motorConstant>
       <momentConstant>0.016</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <actuator_number>2</actuator_number>
@@ -554,7 +554,7 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1000.0</maxRotVelocity>
-      <motorConstant>8.54858e-06</motorConstant>
+      <motorConstant>1.47e-05</motorConstant>
       <momentConstant>0.016</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <actuator_number>3</actuator_number>

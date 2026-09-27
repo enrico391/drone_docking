@@ -15,9 +15,9 @@ detector:
 
 switching:
   # Central tag must be closer than this before it can take control.
-  central_switch_distance_m: 1.50
+  central_switch_distance_m: 1.90
   # Require consecutive valid detections to avoid a sudden one-frame switch.
-  central_stable_frames: 8
+  central_stable_frames: 4
   # Keep central mode through a few missed frames, then fall back to outer tags.
   central_dropout_frames: 5
 
@@ -32,33 +32,33 @@ tags:
     role: outer
     size_m: 0.30
     dock_to_tag:
-      xyz_m: [ 0.520,  0.520, 1.001]
+      xyz_m: [ 0.550,  0.550, 0.001]
       rpy_deg: [0.0, 0.0, 0.0]
 
   - id: 1
     role: outer
     size_m: 0.30
     dock_to_tag:
-      xyz_m: [-0.520,  0.520, 1.001]
+      xyz_m: [-0.550,  0.550, 0.001]
       rpy_deg: [0.0, 0.0, 0.0]
 
   - id: 2
     role: outer
     size_m: 0.30
     dock_to_tag:
-      xyz_m: [-0.520, -0.520, 1.001]
+      xyz_m: [-0.550, -0.550, 0.001]
       rpy_deg: [0.0, 0.0, 0.0]
 
   - id: 3
     role: outer
     size_m: 0.30
     dock_to_tag:
-      xyz_m: [ 0.520, -0.520, 1.001]
+      xyz_m: [ 0.550, -0.550, 0.001]
       rpy_deg: [0.0, 0.0, 0.0]
 
   - id: 4
     role: central
     size_m: 0.12
     dock_to_tag:
-      xyz_m: [0.0, 0.0, 0.881]
+      xyz_m: [0.0, 0.0, 0.001]
       rpy_deg: [0.0, 0.0, 0.0]

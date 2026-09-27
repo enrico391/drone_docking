@@ -1,0 +1,6 @@
+Rules to follow when building the package "dock_apriltag_localizer" in the ardu_ws workspace:
+- The package "dock_apriltag_localizer" must be built using the virtual "apriltag_venv" in ardu_ws folder with the following commands:
+python -m colcon build --symlink-install --packages-select dock_apriltag_localizer
+
+The ardupilot firware version 4.7.0 to match real drone firware.
+

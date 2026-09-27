@@ -5,12 +5,27 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 def generate_launch_description() -> LaunchDescription:
     description_share = get_package_share_directory("drone_description")
+
+    disturbance_injector = Node(
+        package="drone_description",
+        executable="disturbance_injector",
+        name="disturbance_injector",
+        namespace=LaunchConfiguration("namespace"),
+        output="screen",
+        parameters=[
+            LaunchConfiguration("disturbance_config"),
+            {"target_model": LaunchConfiguration("robot_name")},
+        ],
+        condition=IfCondition(LaunchConfiguration("use_disturbances")),
+    )
 
     simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -72,6 +87,19 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("use_gz_sim_server", default_value="true"),
             DeclareLaunchArgument("use_gz_sim_gui", default_value="true"),
             DeclareLaunchArgument("spawn_robot", default_value="true"),
+            DeclareLaunchArgument(
+                "use_disturbances",
+                default_value="false",
+                description="Apply configured external forces and torques.",
+            ),
+            DeclareLaunchArgument(
+                "disturbance_config",
+                default_value=str(
+                    Path(description_share) / "config" / "disturbances.yaml"
+                ),
+                description="ROS parameter file for disturbance generation.",
+            ),
             simulation,
+            disturbance_injector,
         ]
     )

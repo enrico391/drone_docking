@@ -69,7 +69,7 @@ def generate_launch_description() -> LaunchDescription:
         ),
         launch_arguments={
             "gz_args": [
-                "-v4 -s -r --physics-engine ",
+                "-v4 -s -r --headless-rendering --physics-engine ",
                 LaunchConfiguration("physics_engine"),
                 f" {world_path}",
             ]

@@ -18,10 +18,19 @@ ROS packages:
 sudo apt install ros-$ROS_DISTRO-cv-bridge python3-opencv
 ```
 
-Python AprilTag detector (install in the Python environment used by ROS):
+Create a workspace-local Python environment that can also import the ROS 2
+packages installed by apt:
 ```bash
-python3 -m pip install pupil-apriltags pyyaml
+cd /home/ubuntu/drone_ws
+python3 -m venv --system-site-packages apriltag_venv
+touch apriltag_venv/COLCON_IGNORE
+source apriltag_venv/bin/activate
+python -m pip install -r \
+  src/drone_docking/dock_apriltag_localizer/requirements.txt
 ```
+
+`COLCON_IGNORE` prevents colcon from interpreting package metadata inside the
+virtual environment as workspace packages.
 
 ## Build
 ```bash
@@ -175,8 +184,8 @@ ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py \
 ```
 
 Exactly one process should own the selected serial or TCP endpoint. Do not run
-this bridge at the same time as `drone_mission_manager`, which maintains its
-own direct pymavlink connection.
+this bridge at the same time as `flight_cycle_manager`, which maintains its own
+direct pymavlink connection unless its launch starts the localizer itself.
 
 ## Pose convention
 

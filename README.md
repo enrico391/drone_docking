@@ -10,8 +10,8 @@ the packages below it.
 - `drone_description`: Gazebo models, worlds, resource-path hooks, and the
   simulation launch file.
 - `dock_apriltag_localizer`: Existing camera-to-dock localization package.
-- `drone_mission_manager`: Typed, non-blocking missions with a shared staged
-  AprilTag precision-landing controller.
+- `flight_cycle_manager`: Typed, non-blocking takeoff-to-dock cycles that
+  validate a stored ArduPilot mission before each explicit start request.
 - `drone_bringup`: Top-level launch package for the project-owned stack.
 
 The grouping directory is deliberate. Upstream packages remain directly under
@@ -73,8 +73,9 @@ the bridge exposes `/camera/image_raw` and `/camera/camera_info` with
    to the airframe or sensor model.
 5. **Dock perception:** add dock tag visuals and validate detector output and
    camera-to-dock transforms independently of flight control.
-6. **Mission control:** enable the non-blocking mission manager only after the
-   preceding simulation and perception gates pass.
+6. **Mission control:** enable `flight_cycle_manager` only after the preceding
+   simulation and perception gates pass and ArduPilot already stores a valid
+   docking mission.
 
 ## Build
 
@@ -82,11 +83,23 @@ From the workspace root:
 
 ```bash
 source /opt/ros/humble/setup.bash
-colcon build --symlink-install \
-  --packages-select drone_description dock_apriltag_localizer \
-  drone_mission_manager drone_bringup
+python3 -m venv --system-site-packages apriltag_venv
+touch apriltag_venv/COLCON_IGNORE
+source apriltag_venv/bin/activate
+python -m pip install -r \
+  src/drone_docking/dock_apriltag_localizer/requirements.txt
+
+# Required when rebuilding the upstream ardupilot_sitl colcon package.
+export PATH="$PWD/.worktrees/Micro-XRCE-DDS-Gen/scripts:$PATH"
+
+python -m colcon build --symlink-install \
+  --packages-up-to drone_bringup flight_cycle_manager
 source install/setup.bash
 ```
+
+Activate `apriltag_venv` before building and running the localizer. Using
+`python -m colcon` ensures its installed entry points use the virtual
+environment interpreter.
 
 ## Run
 
@@ -98,8 +111,12 @@ ros2 launch drone_description gazebo_docking.launch.py
 ```
 
 ```bash
-ros2 launch drone_bringup docking_sim.launch.py
+ros2 launch drone_bringup docking_sim.launch.py use_mavproxy:=true
 ```
+
+`use_mavproxy:=true` keeps SITL's TCP serial endpoint connected for a
+standalone simulation. Leave it false when `flight_cycle_manager` or the
+direct pymavlink dock-pose bridge owns `tcp:127.0.0.1:5760`.
 
 Set `use_gz_sim_gui:=false` for a server-only run. Set `spawn_robot:=false`
 to inspect only the docking world and station without starting SITL. Select
@@ -120,6 +137,15 @@ SITL state is stored in the instance-specific directory (for instance `0/`)
 instead of reusing the workspace-root EEPROM. This keeps X500 parameters
 separate from existing Iris runs.
 
+When the simulator is up, start the canonical flight-cycle workflow from a
+second sourced terminal. ArduPilot must already hold a valid docking mission:
+
+```bash
+ros2 launch flight_cycle_manager flight_cycle.launch.py \
+  landing_backend:=pid simulation_mode:=true
+ros2 service call /flight_cycle_manager/start_cycle std_srvs/srv/Trigger "{}"
+```
+
 ## Downward camera
 
 The active vehicle publishes the simulated camera through the ROS-Gazebo
@@ -135,6 +161,16 @@ ros2 topic echo /camera/camera_info --once
 The image is 640x480, the target update rate is 30 Hz, and both messages use
 `camera_optical_frame`. Use `/camera/image_raw` and `/camera/camera_info` as the inputs to
 `dock_apriltag_localizer`.
+
+Start the localizer in a second terminal after activating its environment and
+sourcing the workspace:
+
+```bash
+source /opt/ros/humble/setup.bash
+source apriltag_venv/bin/activate
+source install/setup.bash
+ros2 launch dock_apriltag_localizer dock_localizer.launch.py
+```
 
 ## Arm, take off, and land
 

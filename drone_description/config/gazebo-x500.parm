@@ -15,7 +15,7 @@ PLND_TYPE        1
 PLND_EST_TYPE       0
 
 # change max distance to which the drone can discend
-PLND_XY_DIST_MAX    0.25
+PLND_XY_DIST_MAX    2
 
 # change max speed at which the drone can discend
 LAND_SPD_MS         0.25
