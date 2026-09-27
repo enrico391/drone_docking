@@ -101,6 +101,12 @@ EXPECTED_PID_PARAMETERS = {
     "pid_recovery_speed_m_s": 0.2,
     "pid_max_yaw_rate_rad_s": 0.35,
     "pid_target_loss_grace_s": 0.7,
+    "pid_gain_near_distance_m": 0.2,
+    "pid_gain_far_distance_m": 6.0,
+    **{f"pid_gain_{side}_{axis}_{gain}": -1.0
+       for side in ("near", "far")
+       for axis in ("x", "y", "z", "yaw")
+       for gain in ("kp", "ki", "kd")},
     "pid_x_kp": 0.60,
     "pid_x_ki": 0.0,
     "pid_x_kd": 0.0,
@@ -205,6 +211,19 @@ def test_common_and_pid_configuration_match_declared_manager_parameters():
         key.startswith("pid_search_") or "initial_search" in key
         for key in set(common) | set(pid)
     )
+
+
+def test_distance_gain_references_are_declared_and_inherit_base_gains():
+    pid = load_parameters(PID_CONFIG)
+    declared = manager_declared_parameters()
+    assert pid["pid_gain_near_distance_m"] == 0.2
+    assert pid["pid_gain_far_distance_m"] == 6.0
+    for side in ("near", "far"):
+        for axis in ("x", "y", "z", "yaw"):
+            for gain in ("kp", "ki", "kd"):
+                name = f"pid_gain_{side}_{axis}_{gain}"
+                assert pid[name] == -1.0
+                assert name in declared
 
 
 def test_launch_declares_operational_arguments(monkeypatch):

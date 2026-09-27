@@ -1,6 +1,6 @@
 """Pure state machine for guided PID landing after shared acquisition."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 import math
 from typing import Optional, Tuple
@@ -80,6 +80,10 @@ class PidLandingConfig:
     z_pid: PIDConfig
     yaw_pid: PIDConfig
     target_loss_grace_s: float
+    gain_near_distance_m: float = 0.2
+    gain_far_distance_m: float = 6.0
+    near_pids: Optional[Tuple[PIDConfig, ...]] = None
+    far_pids: Optional[Tuple[PIDConfig, ...]] = None
 
     def __post_init__(self) -> None:
         numeric_fields = (
@@ -139,6 +143,16 @@ class PidLandingConfig:
                 "fine_yaw_tolerance_rad must be smaller than "
                 "coarse_yaw_tolerance_rad"
             )
+        if (not math.isfinite(self.gain_near_distance_m)
+                or not math.isfinite(self.gain_far_distance_m)
+                or self.gain_near_distance_m <= 0
+                or self.gain_far_distance_m <= self.gain_near_distance_m):
+            raise ValueError("gain distances must be finite, positive and near < far")
+        for name in ("near_pids", "far_pids"):
+            configs = getattr(self, name)
+            if configs is not None and (len(configs) != 4 or not all(
+                    isinstance(config, PIDConfig) for config in configs)):
+                raise ValueError(f"{name} must contain X, Y, Z and yaw PIDConfig")
 
 
 def _zero_body_command() -> VelocityCommand:
@@ -155,6 +169,9 @@ class PidLandingController:
         self._y_pid = PID(config.y_pid)
         self._z_pid = PID(config.z_pid)
         self._yaw_pid = PID(config.yaw_pid)
+        self._near_pids = config.near_pids or self._base_pids()
+        self._far_pids = config.far_pids or self._base_pids()
+        self._gain_distance_m: Optional[float] = None
         self._started = False
         self._state = PidLandingState.PID_ALIGN
         self._state_started_at = 0.0
@@ -207,6 +224,10 @@ class PidLandingController:
         self._active_disarm_request_id = None
         self._failure_reason = ""
         self._reset_pids()
+        self._gain_distance_m = None
+        # A new attempt must not inherit the previous attempt's last tune.
+        for pid, config in zip(self._pids(), self._base_pids()):
+            pid.reconfigure(config)
 
     @property
     def recovery_attempts(self) -> int:
@@ -246,6 +267,14 @@ class PidLandingController:
             )
         ):
             return self._fail(now, "vehicle disarmed while mission was active")
+
+        # Select gains from a usable camera distance, not from the landing state.
+        # Touchdown retains the last selection because its pose is latched.
+        usable, _ = self._usable_dock(dock)
+        if usable and self._state not in (
+                PidLandingState.TOUCHDOWN_APPROACH, PidLandingState.DISARM,
+                PidLandingState.COMPLETE, PidLandingState.FAILED):
+            self._apply_distance_gains(dock.distance_m)
 
         if self._state is PidLandingState.PID_ALIGN:
             return self._update_pid_align(now, dock, vehicle)
@@ -433,6 +462,7 @@ class PidLandingController:
         else:
             if self._dock_stable_started_at is None:
                 self._dock_stable_started_at = now
+            # when the dock is reacquired, enter PID_ALIGN state
             if now - self._dock_stable_started_at >= self._config.tag_stable_time_s:
                 self._enter_state(PidLandingState.PID_ALIGN, now)
                 return PidLandingDecision(self._state, _zero_body_command())
@@ -677,6 +707,9 @@ class PidLandingController:
     def _update_recovery_climb(
         self, now: float, vehicle: VehicleObservation,
     ) -> PidLandingDecision:
+        """
+        Update the RECOVERY_CLIMB state, which is the state where the vehicle climbs to a safe altitude in order to reacquire the dock. 
+        """
         _, _, altitude_m = self._finite_position(vehicle)
         assert self._recovery_target_altitude_m is not None
         if altitude_m >= (
@@ -951,9 +984,54 @@ class PidLandingController:
         self._y_pid.track_applied_output(velocity_y)
         return velocity_x, velocity_y
 
-    def reconfigure_pids(self, configs: Tuple[PIDConfig, ...]) -> None:
-        for pid, config in zip(self._pids(), configs):
-            pid.reconfigure(config)
+    def _base_pids(self) -> Tuple[PIDConfig, ...]:
+        return (self._config.x_pid, self._config.y_pid,
+                self._config.z_pid, self._config.yaw_pid)
+
+    def _apply_distance_gains(self, distance_m: Optional[float]) -> None:
+        if distance_m is not None:
+            self._gain_distance_m = distance_m
+        distance_m = self._gain_distance_m
+        if distance_m is not None:
+            near = self._config.gain_near_distance_m
+            far = self._config.gain_far_distance_m
+            fraction = max(0.0, min(1.0, (distance_m - near) / (far - near)))
+            configs = tuple(replace(near_config, **{
+                gain: getattr(near_config, gain) + fraction * (
+                    getattr(far_config, gain) - getattr(near_config, gain))
+                for gain in ("kp", "ki", "kd")
+            }) for near_config, far_config in zip(self._near_pids, self._far_pids))
+            for pid, config in zip(self._pids(), configs):
+                pid.reconfigure(config)
+
+    def reconfigure_pids(
+        self, configs: Tuple[PIDConfig, ...],
+        near: Optional[Tuple[PIDConfig, ...]] = None,
+        far: Optional[Tuple[PIDConfig, ...]] = None,
+        near_distance_m: Optional[float] = None,
+        far_distance_m: Optional[float] = None,
+    ) -> None:
+        if len(configs) != 4 or any(group is not None and len(group) != 4
+                                     for group in (near, far)):
+            raise ValueError("PID gain groups must contain four axes")
+        near_distance_m = (self._config.gain_near_distance_m if near_distance_m is None
+                           else near_distance_m)
+        far_distance_m = (self._config.gain_far_distance_m if far_distance_m is None
+                          else far_distance_m)
+        if (not math.isfinite(near_distance_m) or not math.isfinite(far_distance_m)
+                or near_distance_m <= 0 or near_distance_m >= far_distance_m):
+            raise ValueError("gain distances must be finite, positive and near < far")
+        self._config = replace(self._config, x_pid=configs[0], y_pid=configs[1],
+                               z_pid=configs[2], yaw_pid=configs[3],
+                               gain_near_distance_m=near_distance_m,
+                               gain_far_distance_m=far_distance_m)
+        self._near_pids = near or configs
+        self._far_pids = far or configs
+        if self._gain_distance_m is None:
+            for pid, config in zip(self._pids(), configs):
+                pid.reconfigure(config)
+        else:
+            self._apply_distance_gains(None)
 
     def _pids(self) -> Tuple[PID, ...]:
         return self._x_pid, self._y_pid, self._z_pid, self._yaw_pid
@@ -967,6 +1045,9 @@ class PidLandingController:
             ),
             "alignment_only": self._align_only,
             "align_dock_visible": self._align_dock_visible,
+            "gain_distance_m": self._gain_distance_m,
+            "gain_near_distance_m": self._config.gain_near_distance_m,
+            "gain_far_distance_m": self._config.gain_far_distance_m,
             "axes": {axis: pid.diagnostics()
                      for axis, pid in zip(("x", "y", "z", "yaw"), self._pids())},
         }

@@ -140,6 +140,85 @@ def start_backend(config=None):
     return backend
 
 
+def test_gains_follow_dock_distance_independent_of_state_and_hold_on_loss():
+    base = controller_pid_config(output_limit=0.5)
+    near = replace(base, kp=0.5)
+    far = replace(base, kp=1.5)
+    config = pid_config(
+        gain_near_distance_m=0.3, gain_far_distance_m=2.3,
+        near_pids=(near,) * 4, far_pids=(far,) * 4,
+    )
+    backend = PidLandingBackend(config, align_only=True)
+    backend.start(now=0.0, dock=None, vehicle=vehicle_observation())
+    vehicle = vehicle_observation()
+
+    def sample(now, distance, mode=DockTargetMode.OUTER):
+        return backend.update(
+            now=now,
+            dock=dock_observation(now, distance_m=distance, mode=mode),
+            vehicle=vehicle,
+        )
+
+    sample(0.1, 3.0)
+    for step in range(1, 12):
+        far_command = sample(0.1 + 0.05 * step, 3.0)
+    assert backend.diagnostics()["axes"]["x"]["kp"] == pytest.approx(1.5)
+    assert far_command.velocity.velocity_x == pytest.approx(0.15)
+    assert backend.diagnostics()["alignment_only"]
+    sample(0.7, 1.3)
+    for step in range(1, 12):
+        middle_command = sample(0.7 + 0.05 * step, 1.3)
+    assert backend.diagnostics()["axes"]["x"]["kp"] == pytest.approx(1.0)
+    assert middle_command.velocity.velocity_x == pytest.approx(0.1)
+    sample(1.3, 0.2)
+    for step in range(1, 12):
+        near_command = sample(1.3 + 0.05 * step, 0.2)
+    assert backend.diagnostics()["axes"]["x"]["kp"] == pytest.approx(0.5)
+    assert near_command.velocity.velocity_x == pytest.approx(0.05)
+    last_distance = backend.diagnostics()["gain_distance_m"]
+    backend.update(now=1.9, dock=None, vehicle=vehicle)
+    assert backend.diagnostics()["gain_distance_m"] == last_distance
+    assert backend.diagnostics()["axes"]["x"]["kp"] == pytest.approx(0.5)
+
+
+def test_distance_gains_remain_latched_during_touchdown():
+    base = controller_pid_config(output_limit=0.5)
+    near = replace(base, kp=0.3)
+    far = replace(base, kp=0.9)
+    backend = start_backend(pid_config(
+        gain_near_distance_m=0.3, gain_far_distance_m=2.0,
+        near_pids=(near,) * 4, far_pids=(far,) * 4,
+    ))
+    enter_touchdown_commitment(backend)
+    distance = backend.diagnostics()["gain_distance_m"]
+    backend.update(now=3.0, dock=None, vehicle=vehicle_observation(heading_rad=0.0))
+    assert backend.diagnostics()["gain_distance_m"] == distance
+    assert backend.diagnostics()["axes"]["x"]["kp"] == pytest.approx(0.3)
+
+
+def test_central_descent_uses_dock_distance_not_state():
+    base = controller_pid_config(output_limit=0.5)
+    near = replace(base, kp=0.4)
+    far = replace(base, kp=1.4)
+    backend = start_backend(pid_config(
+        gain_near_distance_m=0.3, gain_far_distance_m=2.3,
+        near_pids=(near,) * 4, far_pids=(far,) * 4,
+    ))
+    assert enter_central_descent(backend).substate == "DESCEND_CENTRAL"
+    for step in range(1, 12):
+        now = 1.71 + step * 0.05
+        backend.update(now=now, dock=central_observation(now, distance_m=0.9),
+                       vehicle=vehicle_observation())
+    assert backend.diagnostics()["gain_distance_m"] == pytest.approx(0.9)
+    assert backend.diagnostics()["axes"]["x"]["kp"] == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize("near, far", [(0, 2), (2, 2), (2, 1), (math.nan, 2)])
+def test_invalid_gain_reference_distances_are_rejected(near, far):
+    with pytest.raises(ValueError, match="gain distances"):
+        pid_config(gain_near_distance_m=near, gain_far_distance_m=far)
+
+
 def enter_acquire_central(backend):
     low_outer = dock_observation(
         0.1,

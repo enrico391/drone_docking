@@ -76,3 +76,39 @@ def test_pid_diagnostics_match_command_and_body_velocity(monkeypatch):
         assert data["dock_age_s"] == 0.0
     finally:
         manager.close()
+
+
+def test_live_distance_schedule_updates_and_invalid_batches(monkeypatch):
+    manager, vehicle = manager_at_landing_boundary(monkeypatch)
+    try:
+        monkeypatch.setattr(
+            manager, "_dock_observation",
+            lambda now: dock_observation(now, distance_m=2.0),
+        )
+        vehicle.state = airborne_state(1.1)
+        manager.tick(1.1)
+        backend = manager.backend
+        result = manager.set_parameters_atomically([
+            Parameter("pid_gain_near_x_kp", value=0.4),
+            Parameter("pid_gain_far_x_kp", value=1.6),
+            Parameter("pid_gain_far_distance_m", value=2.0),
+        ])
+        assert result.successful
+        for step in range(1, 12):
+            now = 1.1 + step * 0.05
+            vehicle.state = airborne_state(now)
+            manager.tick(now)
+        assert manager.backend is backend
+        assert backend.diagnostics()["axes"]["x"]["kp"] == pytest.approx(1.6)
+        bad = manager.set_parameters_atomically([
+            Parameter("pid_gain_near_x_kp", value=0.8),
+            Parameter("pid_gain_far_distance_m", value=0.2),
+        ])
+        assert not bad.successful
+        assert manager.get_parameter("pid_gain_near_x_kp").value == 0.4
+        assert manager.get_parameter("pid_gain_far_distance_m").value == 2.0
+        assert not manager.set_parameters_atomically([
+            Parameter("pid_gain_far_x_ki", value=-0.5),
+        ]).successful
+    finally:
+        manager.close()

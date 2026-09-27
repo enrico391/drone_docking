@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import Any, Mapping, Optional
 
@@ -415,6 +415,8 @@ class FlightCycleManager(Node):
             "pid_recovery_speed_m_s": 0.2,
             "pid_max_yaw_rate_rad_s": 0.35,
             "pid_target_loss_grace_s" : 0.5,
+            "pid_gain_near_distance_m": 0.2,
+            "pid_gain_far_distance_m": 6.0,
             "pid_x_kp": 1.0,
             "pid_x_ki": 0.0,
             "pid_x_kd": 0.0,
@@ -442,6 +444,10 @@ class FlightCycleManager(Node):
             "mavlink_source_system": 254,
             "mavlink_source_component": 191,
         }
+        for side in ("near", "far"):
+            for axis in ("x", "y", "z", "yaw"):
+                for gain in ("kp", "ki", "kd"):
+                    defaults[f"pid_gain_{side}_{axis}_{gain}"] = -1.0
         for name, value in defaults.items():
             self.declare_parameter(name, value)
 
@@ -1939,6 +1945,12 @@ class FlightCycleManager(Node):
     def _build_pid_landing_config(self) -> PidLandingConfig:
         max_horizontal = self._positive_parameter("pid_max_horizontal_speed_m_s")
         max_yaw = self._positive_parameter("pid_max_yaw_rate_rad_s")
+        base_pids = tuple(self._build_pid_axis_config(f"pid_{axis}", limit)
+                          for axis, limit in zip(
+                              ("x", "y", "z", "yaw"),
+                              (max_horizontal, max_horizontal,
+                               self._positive_parameter("search_max_vertical_speed_m_s"),
+                               max_yaw)))
         return PidLandingConfig(
             tag_stable_time_s=self._positive_parameter("pid_tag_stable_time_s"),
             central_transition_distance_m=self._positive_parameter(
@@ -1997,17 +2009,33 @@ class FlightCycleManager(Node):
             ),
             recovery_speed_m_s=self._positive_parameter("pid_recovery_speed_m_s"),
             max_yaw_rate_rad_s=max_yaw,
-            x_pid=self._build_pid_axis_config("pid_x", max_horizontal),
-            y_pid=self._build_pid_axis_config("pid_y", max_horizontal),
-            z_pid=self._build_pid_axis_config(
-                "pid_z",
-                self._positive_parameter("search_max_vertical_speed_m_s"),
-            ),
-            yaw_pid=self._build_pid_axis_config("pid_yaw", max_yaw),
+            x_pid=base_pids[0], y_pid=base_pids[1],
+            z_pid=base_pids[2], yaw_pid=base_pids[3],
+            gain_near_distance_m=self._positive_parameter("pid_gain_near_distance_m"),
+            gain_far_distance_m=self._positive_parameter("pid_gain_far_distance_m"),
+            near_pids=self._build_distance_pid_configs("near", base_pids),
+            far_pids=self._build_distance_pid_configs("far", base_pids),
             target_loss_grace_s=self._positive_parameter(
                 "pid_target_loss_grace_s"
             ),
         )
+
+    def _build_distance_pid_configs(
+        self, side: str, base: tuple[PIDConfig, ...],
+        updates: Optional[Mapping[str, object]] = None,
+    ) -> tuple[PIDConfig, ...]:
+        updates = updates or {}
+        result = []
+        for axis, config in zip(("x", "y", "z", "yaw"), base):
+            gains = {}
+            for gain in ("kp", "ki", "kd"):
+                name = f"pid_gain_{side}_{axis}_{gain}"
+                value = float(updates.get(name, self.get_parameter(name).value))
+                if not math.isfinite(value) or (value < 0.0 and value != -1.0):
+                    raise ValueError(f"{name} must be -1 (inherit) or nonnegative")
+                gains[gain] = getattr(config, gain) if value == -1.0 else value
+            result.append(replace(config, **gains))
+        return tuple(result)
 
     def _build_pid_axis_config(self, prefix: str, output_limit: float) -> PIDConfig:
         return PIDConfig(
@@ -2040,7 +2068,15 @@ class FlightCycleManager(Node):
         }
         has_distance_update = "pid_align_distance_setpoint_m" in updates
         distance_update = updates.get("pid_align_distance_setpoint_m")
-        if not tuning_updates and not has_distance_update:
+        schedule_updates = {
+            name: value for name, value in updates.items()
+            if name in ("pid_gain_near_distance_m", "pid_gain_far_distance_m")
+            or any(name == f"pid_gain_{side}_{axis}_{gain}"
+                   for side in ("near", "far")
+                   for axis in ("x", "y", "z", "yaw")
+                   for gain in ("kp", "ki", "kd"))
+        }
+        if not tuning_updates and not schedule_updates and not has_distance_update:
             return SetParametersResult(successful=True)
         try:
             backend = self._landing_controller
@@ -2057,13 +2093,22 @@ class FlightCycleManager(Node):
                 diagnostics = backend.diagnostics()
                 if not diagnostics["align_dock_visible"]:
                     raise ValueError("wait for a fresh dock observation before setting Z")
-            if not tuning_updates:
+            if not tuning_updates and not schedule_updates:
                 backend.set_align_distance_setpoint(distance_update)
                 return SetParametersResult(successful=True)
             for name, value in tuning_updates.items():
                 numeric = float(value)
                 if not math.isfinite(numeric) or numeric < 0.0:
                     raise ValueError(f"{name} must be finite and nonnegative")
+            near_distance = float(updates.get(
+                "pid_gain_near_distance_m",
+                self.get_parameter("pid_gain_near_distance_m").value))
+            far_distance = float(updates.get(
+                "pid_gain_far_distance_m",
+                self.get_parameter("pid_gain_far_distance_m").value))
+            if (not math.isfinite(near_distance) or not math.isfinite(far_distance)
+                    or near_distance <= 0 or far_distance <= near_distance):
+                raise ValueError("gain distances must be finite, positive and near < far")
             max_horizontal = self._positive_parameter("pid_max_horizontal_speed_m_s")
             max_yaw = self._positive_parameter("pid_max_yaw_rate_rad_s")
             limits = (max_horizontal, max_horizontal,
@@ -2072,9 +2117,11 @@ class FlightCycleManager(Node):
                 self._build_live_pid_axis_config(f"pid_{axis}", limit, tuning_updates)
                 for axis, limit in zip(("x", "y", "z", "yaw"), limits)
             )
+            near = self._build_distance_pid_configs("near", configs, schedule_updates)
+            far = self._build_distance_pid_configs("far", configs, schedule_updates)
             reconfigure = getattr(backend, "reconfigure_pids", None)
             if callable(reconfigure):
-                reconfigure(configs)
+                reconfigure(configs, near, far, near_distance, far_distance)
             if has_distance_update:
                 backend.set_align_distance_setpoint(distance_update)
         except (TypeError, ValueError) as error:

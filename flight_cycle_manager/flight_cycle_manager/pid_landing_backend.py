@@ -34,8 +34,16 @@ class PidLandingBackend:
         self._controller = PidLandingController(config, align_only=align_only)
         self._touchdown_committed = False
 
-    def reconfigure_pids(self, configs: tuple[PIDConfig, ...]) -> None:
-        self._controller.reconfigure_pids(configs)
+    def reconfigure_pids(
+        self, configs: tuple[PIDConfig, ...],
+        near: tuple[PIDConfig, ...] | None = None,
+        far: tuple[PIDConfig, ...] | None = None,
+        near_distance_m: float | None = None,
+        far_distance_m: float | None = None,
+    ) -> None:
+        self._controller.reconfigure_pids(
+            configs, near, far, near_distance_m, far_distance_m,
+        )
 
     def diagnostics(self) -> dict:
         return self._controller.diagnostics()

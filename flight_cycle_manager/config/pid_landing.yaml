@@ -24,6 +24,45 @@ flight_cycle_manager:
     pid_recovery_speed_m_s: 0.20
     pid_max_yaw_rate_rad_s: 0.35
     pid_target_loss_grace_s : 4.0
+    # Gains interpolate between 0.3 m and 2.0 m; -1 inherits pid_<axis>_<gain>.
+    pid_gain_near_distance_m: 0.6 # min 
+    pid_gain_far_distance_m: 6.0 # max
+
+    # defult values for near to dock distance
+    pid_gain_near_x_kp: -1.0
+    pid_gain_near_x_ki: -1.0
+    pid_gain_near_x_kd: -1.0
+    pid_gain_near_y_kp: -1.0
+    pid_gain_near_y_ki: -1.0
+    pid_gain_near_y_kd: -1.0
+    
+    # for z I use -1 to inherit the default values
+    pid_gain_near_z_kp: -1.0
+    pid_gain_near_z_ki: -1.0
+    pid_gain_near_z_kd: -1.0
+    # for z I use -1 to inherit the default values
+    pid_gain_near_yaw_kp: -1.0
+    pid_gain_near_yaw_ki: -1.0
+    pid_gain_near_yaw_kd: -1.0
+
+    # at 6.0 m I use different gains for x and y to have stability
+    pid_gain_far_x_kp: 0.18
+    pid_gain_far_x_ki: 0.01
+    pid_gain_far_x_kd: 0.1
+    pid_gain_far_y_kp: 0.18
+    pid_gain_far_y_ki: 0.01
+    pid_gain_far_y_kd: 0.1
+
+    # for z I use -1 to inherit the default values
+    pid_gain_far_z_kp: -1.0
+    pid_gain_far_z_ki: -1.0
+    pid_gain_far_z_kd: -1.0
+    # for yaw I use -1 to inherit the default values
+    pid_gain_far_yaw_kp: -1.0
+    pid_gain_far_yaw_ki: -1.0
+    pid_gain_far_yaw_kd: -1.0
+
+    # Default PID gains
     pid_x_kp: 0.30
     pid_x_ki: 0.02
     pid_x_kd: 0.20

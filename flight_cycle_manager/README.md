@@ -256,6 +256,25 @@ atomically and ramped over 0.5 seconds to avoid a command step. The active
 controller keeps its derivative and integral history, while enabling or
 changing `Ki` avoids releasing an old hidden integral value.
 
+Distance-scheduled gains can be set in `config/pid_landing.yaml`. Set
+`pid_gain_near_distance_m` and `pid_gain_far_distance_m` (near must be smaller),
+then set `pid_gain_near_<axis>_<gain>` and `pid_gain_far_<axis>_<gain>` for
+`axis` = `x`, `y`, `z`, `yaw` and `gain` = `kp`, `ki`, `kd`. For example,
+`pid_gain_near_x_kp: 0.2` and `pid_gain_far_x_kp: 0.4`. Gains interpolate
+linearly with the **observed dock distance** between those references and
+clamp outside them, independent of landing state. A value of `-1.0` inherits
+the corresponding `pid_x_kp`-style base gain; all distance gains inherit by
+default, preserving the original tune. Missing targets hold the last gain
+selection; touchdown uses the last visible dock distance. PID debug telemetry
+includes `gain_distance_m` and the active gains. Reference gains and distances
+may also be changed using atomic ROS parameter updates. Speed limits and
+alignment tolerances are unchanged.
+
+The web tuner edits the base `pid_<axis>_<gain>` parameters. To tune a
+distance reference, use `ros2 param set /flight_cycle_manager
+pid_gain_near_x_kp 0.2` (and similarly for far). The dashboard's YAML download
+captures currently active gains, not both distance reference profiles.
+
 For a small visual tuner with live error/command plots, run:
 
 ```bash

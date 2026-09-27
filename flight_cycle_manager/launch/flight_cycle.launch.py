@@ -67,7 +67,14 @@ def _launch_setup(
             name="flight_cycle_manager",
             output="screen",
             parameters=parameters,
-        )
+        ),
+        Node(
+            package="flight_cycle_manager",
+            executable="pid_tuner",
+            name="pid_tuner",
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("start_pid_tuner")),
+        ),
     ]
 
 
@@ -108,6 +115,12 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="pid",
                 choices=["pid", "precise_landing"],
                 description="Select the docking backend.",
+            ),
+            DeclareLaunchArgument(
+                "start_pid_tuner",
+                default_value="false",
+                choices=["true", "false"],
+                description="Start the localhost PID gain dashboard on port 8765.",
             ),
             DeclareLaunchArgument(
                 "mavlink_connection",
