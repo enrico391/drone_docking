@@ -768,6 +768,12 @@ class PidLandingController:
         horizontal_tolerance_m: float,
         yaw_tolerance_rad: float,
     ) -> None:
+        """
+            Function used to advance the distance setpoint for the descent while
+            ensuring that the vehicle is aligned with the dock within the specified tolerances.
+            If the vehicle is not aligned, the descent is paused until alignment is regained.
+            This prevents the vehicle from descending too quickly and potentially losing alignment with the dock.
+        """
         # Pause immediately at the existing tolerance; resume inside 80% of
         # it. Rebase while paused so an old height error cannot keep descending.
         resume_scale = 0.8 if self._descent_paused else 1.0
