@@ -1,6 +1,7 @@
 flight_cycle_manager:
   ros__parameters:
     operation_mode: flight_cycle
+    pid_hold_at_state: none
     pid_align_auto_start: false
     simulation_mode: false
     auto_start: false

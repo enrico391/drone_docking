@@ -22,12 +22,24 @@ class PidLandingState(Enum):
     DESCEND_OUTER = auto()
     ACQUIRE_CENTRAL = auto()
     DESCEND_CENTRAL = auto()
+    HOLD_CENTRAL = auto()
     RECOVERY_CLIMB = auto()
     REACQUIRE_DOCK = auto()
     TOUCHDOWN_APPROACH = auto()
     DISARM = auto()
     COMPLETE = auto()
     FAILED = auto()
+
+
+# Debug holds are intentionally limited to pre-touchdown states. Recovery and
+# terminal states must retain their normal safety and completion behavior.
+PID_HOLD_STATES = frozenset({
+    PidLandingState.PID_ALIGN,
+    PidLandingState.DESCEND_OUTER,
+    PidLandingState.ACQUIRE_CENTRAL,
+    PidLandingState.DESCEND_CENTRAL,
+    PidLandingState.HOLD_CENTRAL,
+})
 
 
 class PidLandingOutcome(Enum):
@@ -162,9 +174,18 @@ def _zero_body_command() -> VelocityCommand:
 class PidLandingController:
     """Pure landing controller; callers supply all time and observations."""
 
-    def __init__(self, config: PidLandingConfig, *, align_only: bool = False):
+    def __init__(
+        self, config: PidLandingConfig, *, align_only: bool = False,
+        hold_at_state: Optional[PidLandingState] = None,
+    ):
+        if hold_at_state is not None and hold_at_state not in PID_HOLD_STATES:
+            raise ValueError("hold_at_state must be a supported pre-touchdown PID state")
+        if align_only and hold_at_state not in (None, PidLandingState.PID_ALIGN):
+            raise ValueError("alignment-only mode cannot hold at a later state")
         self._config = config
-        self._align_only = align_only
+        self._alignment_only_mode = align_only
+        self._align_only = align_only or hold_at_state is PidLandingState.PID_ALIGN
+        self._hold_at_state = hold_at_state
         self._x_pid = PID(config.x_pid)
         self._y_pid = PID(config.y_pid)
         self._z_pid = PID(config.z_pid)
@@ -246,6 +267,48 @@ class PidLandingController:
         self._align_distance_setpoint_m = float(distance_m)
         self._z_pid.reset()
 
+    def set_hold_at_state(self, state: Optional[PidLandingState]) -> None:
+        """Change the hold for this attempt without rewinding or bypassing safety."""
+        self.validate_hold_at_state(state)
+        if state is self._hold_at_state:
+            return
+        if self._started and state is self._state and state in (
+                PidLandingState.DESCEND_OUTER, PidLandingState.DESCEND_CENTRAL):
+            # Drop the advancing descent target; the next visual sample latches
+            # its measured distance instead of continuing the old descent.
+            self._distance_setpoint_m = None
+            self._descent_last_updated_at = None
+            self._z_pid.reset()
+        if self._started and self._hold_at_state is self._state and state is not self._state:
+            self._descent_last_updated_at = None
+            if self._state is not PidLandingState.HOLD_CENTRAL:
+                self._distance_setpoint_m = None
+            self._z_pid.reset()
+        if self._state is PidLandingState.HOLD_CENTRAL:
+            self._alignment_stable_started_at = None
+        self._hold_at_state = state
+        self._align_only = self._alignment_only_mode or state is PidLandingState.PID_ALIGN
+
+    def validate_hold_at_state(self, state: Optional[PidLandingState]) -> None:
+        """Check a proposed live hold before applying other parameter changes."""
+        if state is not None and state not in PID_HOLD_STATES:
+            raise ValueError("hold_at_state must be a supported pre-touchdown PID state")
+        if self._alignment_only_mode and state not in (None, PidLandingState.PID_ALIGN):
+            raise ValueError("alignment-only mode cannot hold at a later state")
+        if self._started:
+            if self._state in (PidLandingState.TOUCHDOWN_APPROACH, PidLandingState.DISARM,
+                               PidLandingState.COMPLETE, PidLandingState.FAILED):
+                raise ValueError("cannot change PID hold after touchdown commitment or completion")
+            stages = (PidLandingState.PID_ALIGN, PidLandingState.DESCEND_OUTER,
+                      PidLandingState.ACQUIRE_CENTRAL, PidLandingState.DESCEND_CENTRAL,
+                      PidLandingState.HOLD_CENTRAL)
+            if self._state is PidLandingState.HOLD_CENTRAL and state not in (
+                    None, PidLandingState.HOLD_CENTRAL):
+                raise ValueError("release HOLD_CENTRAL with none before selecting another hold")
+            if self._state in stages and state in stages and (
+                    stages.index(state) < stages.index(self._state)):
+                raise ValueError("PID hold state has already been passed")
+
     def update(
         self,
         now: float,
@@ -275,6 +338,12 @@ class PidLandingController:
                 PidLandingState.TOUCHDOWN_APPROACH, PidLandingState.DISARM,
                 PidLandingState.COMPLETE, PidLandingState.FAILED):
             self._apply_distance_gains(dock.distance_m)
+
+        if self._hold_at_state is self._state and self._state is not PidLandingState.PID_ALIGN:
+            return self._update_debug_hold(now, dock, vehicle)
+
+        if self._state is PidLandingState.HOLD_CENTRAL:
+            return self._release_final_central_hold(now, dock, vehicle)
 
         if self._state is PidLandingState.PID_ALIGN:
             return self._update_pid_align(now, dock, vehicle)
@@ -384,6 +453,57 @@ class PidLandingController:
         else:
             self._enter_state(PidLandingState.ACQUIRE_CENTRAL, now)
         return PidLandingDecision(self._state, _zero_body_command())
+
+    def _update_debug_hold(
+        self, now: float, dock: Optional[DockObservation],
+        vehicle: VehicleObservation,
+    ) -> PidLandingDecision:
+        """Latch at a reached state without advancing descent or disabling safety."""
+        usable, reason = self._usable_dock(dock)
+        if not usable or (
+            self._state in (PidLandingState.DESCEND_CENTRAL, PidLandingState.HOLD_CENTRAL)
+            and dock.mode is not DockTargetMode.CENTRAL
+        ):
+            missing = reason if not usable else "central tag required"
+            return self._handle_target_loss(now, vehicle, missing)
+        self._target_loss_started_at = None
+        if self._state is PidLandingState.ACQUIRE_CENTRAL:
+            return PidLandingDecision(self._state, _zero_body_command())
+        if self._distance_setpoint_m is None:
+            self._distance_setpoint_m = dock.distance_m
+            self._z_pid.reset()
+        return PidLandingDecision(
+            self._state,
+            self._visual_command(
+                now, dock, z_enabled=True,
+                vertical_limit_m_s=(
+                    self._config.outer_descent_speed_m_s
+                    if self._state is PidLandingState.DESCEND_OUTER
+                    else self._config.central_descent_speed_m_s
+                ),
+            ),
+        )
+
+    def _release_final_central_hold(
+        self, now: float, dock: Optional[DockObservation],
+        vehicle: VehicleObservation,
+    ) -> PidLandingDecision:
+        """Resume touchdown only on fresh central vision and stable fine alignment."""
+        usable, reason = self._usable_dock(dock)
+        if not usable or dock.mode is not DockTargetMode.CENTRAL:
+            return self._handle_target_loss(
+                now, vehicle, reason if not usable else "central tag required",
+            )
+        self._target_loss_started_at = None
+        if (dock.distance_m <= self._config.touchdown_commit_height_m
+                and self._alignment_is_stable(now, dock, (
+                    self._config.fine_horizontal_tolerance_m,
+                    self._config.fine_yaw_tolerance_rad,
+                ))):
+            self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
+            self._latch_touchdown_reference(dock, vehicle)
+            return PidLandingDecision(self._state, _zero_body_command())
+        return self._update_debug_hold(now, dock, vehicle)
 
     def _update_descend_outer(
         self, now: float, dock: Optional[DockObservation],
@@ -517,6 +637,15 @@ class PidLandingController:
             dock.distance_m <= self._config.touchdown_commit_height_m
             and fine_alignment_stable
         ):
+            # used only for debug hold, not for normal landing
+            if self._hold_at_state is PidLandingState.HOLD_CENTRAL:
+                # Latch the *measured* distance, not the moving descent setpoint.
+                # This is still pre-commit: retain vision and target-loss recovery.
+                self._enter_state(PidLandingState.HOLD_CENTRAL, now)
+                self._distance_setpoint_m = dock.distance_m
+                self._z_pid.reset()
+                return PidLandingDecision(self._state, _zero_body_command())
+
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
             # The tag is about to fill the camera, so the last aligned
             # observation becomes the aperture reference for touchdown.
@@ -1039,6 +1168,9 @@ class PidLandingController:
     def diagnostics(self) -> dict:
         return {
             "descent_paused": self._descent_paused,
+            "pid_hold_at_state": (
+                self._hold_at_state.name if self._hold_at_state is not None else "none"
+            ),
             "distance_setpoint_m": (
                 self._align_distance_setpoint_m if self._align_only
                 else self._distance_setpoint_m

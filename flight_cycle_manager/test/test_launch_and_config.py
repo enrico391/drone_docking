@@ -27,6 +27,7 @@ from vehicle_fakes import FakeVehicle, install_ros_fakes
 
 EXPECTED_COMMON_PARAMETERS = {
     "operation_mode": "flight_cycle",
+    "pid_hold_at_state": "none",
     "pid_align_auto_start": False,
     "simulation_mode": False,
     "auto_start": False,
@@ -240,6 +241,8 @@ def test_launch_declares_operational_arguments(monkeypatch):
 
     assert {
         "landing_backend",
+        "operation_mode",
+        "pid_hold_at_state",
         "mavlink_connection",
         "mavlink_baud",
         "simulation_mode",
@@ -288,6 +291,8 @@ def test_launch_setup_returns_exact_pid_manager_node(monkeypatch):
     assert captured["parameters"][0] == str(COMMON_CONFIG)
     assert captured["parameters"][1] == str(PID_CONFIG)
     assert overrides["landing_backend"].perform(context) == "pid"
+    assert overrides["operation_mode"].perform(context) == "flight_cycle"
+    assert overrides["pid_hold_at_state"].perform(context) == "none"
     assert overrides["simulation_mode"].evaluate(context) is True
     assert overrides["auto_start"].evaluate(context) is True
     assert overrides["mavlink_connection"].perform(context) == "serial:///dev/ttyAMA0"
@@ -358,6 +363,49 @@ def test_launch_setup_rejects_auto_start_outside_simulation_before_node_creation
     assert node_calls == []
 
 
+@pytest.mark.parametrize("values", [
+    {"operation_mode": "invalid"},
+    {"pid_hold_at_state": "DISARM"},
+    {"pid_hold_at_state": "RECOVERY_CLIMB"},
+    {"landing_backend": "precise_landing", "pid_hold_at_state": "PID_ALIGN"},
+    {"landing_backend": "precise_landing", "operation_mode": "pid_landing_debug"},
+    {"operation_mode": "pid_align_debug", "pid_hold_at_state": "DESCEND_OUTER"},
+])
+def test_unified_launch_rejects_invalid_mode_and_hold_combinations(monkeypatch, values):
+    module = load_launch_module()
+    patch_package_shares(monkeypatch, module)
+    monkeypatch.setattr(module, "Node", lambda **kwargs: pytest.fail("invalid launch created a node"))
+    context = configured_context_for_values(module, **values)
+    with pytest.raises(ValueError):
+        module._launch_setup(context, ROOT)
+
+
+def test_unified_launch_accepts_final_central_hold(monkeypatch):
+    module = load_launch_module()
+    patch_package_shares(monkeypatch, module)
+    captured = {}
+    monkeypatch.setattr(module, "Node", lambda **kwargs: captured.update(kwargs) or kwargs)
+    context = configured_context_for_values(module, pid_hold_at_state="HOLD_CENTRAL")
+    module._launch_setup(context, ROOT)
+    assert captured["parameters"][2]["pid_hold_at_state"].perform(context) == "HOLD_CENTRAL"
+
+
+def test_unified_launch_selects_single_localizer(monkeypatch):
+    module = load_launch_module()
+    patch_package_shares(monkeypatch, module)
+    includes = [entity for entity in module.generate_launch_description().entities
+                if isinstance(entity, IncludeLaunchDescription)]
+    assert len(includes) == 2
+    for start, camera, enabled in [("false", "false", []),
+                                   ("true", "false", [0]),
+                                   ("true", "true", [1])]:
+        context = configured_context_for_values(
+            module, start_localizer=start, publish_camera=camera,
+        )
+        assert [i for i, include in enumerate(includes)
+                if include.condition.evaluate(context)] == enabled
+
+
 def test_launch_description_includes_localizer_with_expected_wiring(monkeypatch):
     """Break caught: localizer include path or forwarded launch arguments drift."""
     module = load_launch_module()
@@ -374,11 +422,8 @@ def test_launch_description_includes_localizer_with_expected_wiring(monkeypatch)
         pose_filter_max_position_jump_m="0.11",
         pose_filter_reacquire_frames="6",
     )
-    include = next(
-        entity
-        for entity in module.generate_launch_description().entities
-        if isinstance(entity, IncludeLaunchDescription)
-    )
+    include = next(entity for entity in module.generate_launch_description().entities
+                   if isinstance(entity, IncludeLaunchDescription))
 
     wired_arguments = dict(include.launch_arguments)
 

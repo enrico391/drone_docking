@@ -1,11 +1,19 @@
 import json
 import math
+import threading
+from http.server import ThreadingHTTPServer
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 
 from flight_cycle_manager.pid_tuner import (
-    DASHBOARD_HTML, TelemetryStore, parse_distance_request, parse_gain_request,
+    DASHBOARD_HTML, TelemetryStore, _WebApp, _handler_for,
+    parse_distance_request, parse_gain_request, parse_hold_request,
 )
+from flight_cycle_manager.pid_landing import PidLandingState
+from flight_cycle_manager.pid_landing_backend import PidLandingBackend
+from test_pid_landing_backend import pid_config
 
 
 def test_gain_request_accepts_one_complete_axis_update():
@@ -43,6 +51,80 @@ def test_distance_request_validates_dock_distance():
                     {"distance_m": math.nan}):
         with pytest.raises(ValueError):
             parse_distance_request(payload)
+
+
+@pytest.mark.parametrize("hold", ["none", "PID_ALIGN", "DESCEND_OUTER",
+                                  "ACQUIRE_CENTRAL", "DESCEND_CENTRAL", "HOLD_CENTRAL"])
+def test_hold_request_accepts_supported_states(hold):
+    assert parse_hold_request({"pid_hold_at_state": hold}) == hold
+
+
+@pytest.mark.parametrize("payload", [{}, None, {"pid_hold_at_state": "DISARM"},
+                                     {"pid_hold_at_state": "TOUCHDOWN_APPROACH"},
+                                     {"pid_hold_at_state": 1},
+                                     {"pid_hold_at_state": "hold_central"}])
+def test_hold_request_rejects_invalid_states(payload):
+    with pytest.raises(ValueError, match="pid_hold_at_state"):
+        parse_hold_request(payload)
+
+
+def test_hold_endpoint_forwards_only_hold_parameter_and_reports_rejections():
+    received = []
+
+    def submit(parameters):
+        received.append(parameters)
+        return ({"ok": False, "message": "PID hold state has already been passed"}
+                if parameters["pid_hold_at_state"] == "PID_ALIGN"
+                else {"ok": True, "message": "parameters applied"})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0),
+                                 _handler_for(_WebApp(TelemetryStore(), submit)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        def post(payload):
+            request = Request(
+                f"http://127.0.0.1:{server.server_port}/api/hold",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            try:
+                response = urlopen(request, timeout=2)
+            except HTTPError as error:
+                response = error
+            with response:
+                return response.status, json.load(response)
+
+        assert post({"pid_hold_at_state": "HOLD_CENTRAL"}) == (
+            200, {"ok": True, "message": "parameters applied"})
+        assert post({"pid_hold_at_state": "PID_ALIGN"}) == (
+            503, {"ok": False, "message": "PID hold state has already been passed"})
+        status, result = post({"pid_hold_at_state": "DISARM"})
+        assert status == 400
+        assert not result["ok"]
+        assert received == [{"pid_hold_at_state": "HOLD_CENTRAL"},
+                            {"pid_hold_at_state": "PID_ALIGN"}]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_pid_diagnostics_expose_active_hold_for_dashboard():
+    backend = PidLandingBackend(pid_config(), hold_at_state=PidLandingState.HOLD_CENTRAL)
+    assert backend.diagnostics()["pid_hold_at_state"] == "HOLD_CENTRAL"
+    backend.set_hold_at_state(None)
+    assert backend.diagnostics()["pid_hold_at_state"] == "none"
+
+
+def test_dashboard_has_live_hold_selector_and_failure_feedback():
+    for hold in ("none", "PID_ALIGN", "DESCEND_OUTER", "ACQUIRE_CENTRAL",
+                 "DESCEND_CENTRAL", "HOLD_CENTRAL"):
+        assert f'<option value="{hold}">' in DASHBOARD_HTML
+    assert "fetch('/api/hold'" in DASHBOARD_HTML
+    assert 'id="hold-message" role="status"' in DASHBOARD_HTML
+    assert "latest.pid_hold_at_state" in DASHBOARD_HTML
+    assert "holdSelect.disabled=true" in DASHBOARD_HTML
 
 
 def test_stale_pid_messages_are_not_reported_as_live(monkeypatch):

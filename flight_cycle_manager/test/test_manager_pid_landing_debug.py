@@ -69,6 +69,55 @@ def make_align_manager(
     )
 
 
+@pytest.mark.parametrize("parameters", [
+    {"pid_hold_at_state": "DISARM"},
+    {"pid_hold_at_state": "RECOVERY_CLIMB"},
+    {"operation_mode": "pid_align_debug", "pid_hold_at_state": "DESCEND_OUTER"},
+    {"operation_mode": "flight_cycle", "landing_backend": "precise_landing",
+     "pid_hold_at_state": "PID_ALIGN"},
+])
+def test_invalid_pid_hold_configuration_fails_before_vehicle_activity(parameters):
+    vehicle = FakeVehicle(airborne_state(1.0, mode=LOITER_MODE))
+    with pytest.raises(ValueError):
+        make_debug_manager(vehicle, **parameters)
+    assert vehicle.set_mode_calls == []
+
+
+def test_final_central_hold_is_accepted_by_manager():
+    vehicle = FakeVehicle(airborne_state(1.0, mode=LOITER_MODE))
+    manager = make_debug_manager(vehicle, pid_hold_at_state="HOLD_CENTRAL")
+    try:
+        assert manager._pid_hold_at_state.name == "HOLD_CENTRAL"
+        assert vehicle.set_mode_calls == []
+    finally:
+        manager.close()
+
+
+def test_live_hold_parameter_updates_future_attempt_and_rejects_invalid_batch():
+    vehicle = FakeVehicle(airborne_state(1.0, mode=LOITER_MODE))
+    manager = make_debug_manager(vehicle)
+    try:
+        result = manager.set_parameters_atomically([
+            Parameter("pid_hold_at_state", value="HOLD_CENTRAL"),
+        ])
+        assert result.successful
+        assert manager._pid_hold_at_state.name == "HOLD_CENTRAL"
+        assert manager.get_parameter("pid_hold_at_state").value == "HOLD_CENTRAL"
+        rejected = manager.set_parameters_atomically([
+            Parameter("pid_hold_at_state", value="DISARM"),
+            Parameter("pid_x_kp", value=2.0),
+        ])
+        assert not rejected.successful
+        assert manager._pid_hold_at_state.name == "HOLD_CENTRAL"
+        assert manager.get_parameter("pid_x_kp").value == 1.0
+        assert manager.set_parameters_atomically([
+            Parameter("pid_hold_at_state", value="none"),
+        ]).successful
+        assert manager._pid_hold_at_state is None
+    finally:
+        manager.close()
+
+
 def test_align_debug_auto_start_requests_guided_without_land_trigger():
     """Break caught: auto-start alignment remains blocked on a LAND edge."""
     vehicle = FakeVehicle(airborne_state(1.0, mode=LOITER_MODE))
@@ -255,7 +304,7 @@ def test_only_a_fresh_airborne_land_edge_requests_guided():
 def test_mode_change_cancels_active_attempt_and_later_land_edge_restarts():
     """Break caught: cancelling once permanently latches debug docking passive."""
     vehicle = FakeVehicle(airborne_state(2.0, mode=LOITER_MODE))
-    manager = make_debug_manager(vehicle)
+    manager = make_debug_manager(vehicle, pid_hold_at_state="DESCEND_CENTRAL")
     try:
         manager.tick(2.0)
         vehicle.state = airborne_state(2.1, mode=LAND_MODE)

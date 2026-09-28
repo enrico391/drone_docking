@@ -44,7 +44,7 @@ from .mission_contract import (
     validate_docking_mission,
 )
 from .pid import PIDConfig
-from .pid_landing import PidLandingConfig
+from .pid_landing import PID_HOLD_STATES, PidLandingConfig, PidLandingState
 from .pid_landing_backend import PidLandingBackend
 from .precise_landing_backend import (
     PreciseLandingBackend,
@@ -173,6 +173,20 @@ class FlightCycleManager(Node):
         ):
             self.destroy_node()
             raise ValueError("PID debug modes require landing_backend=pid")
+        hold_name = str(self.get_parameter("pid_hold_at_state").value).strip().upper()
+        allowed_holds = {state.name for state in PID_HOLD_STATES}
+        if hold_name != "NONE" and hold_name not in allowed_holds:
+            self.destroy_node()
+            raise ValueError("pid_hold_at_state must be none or one of " + ", ".join(sorted(allowed_holds)))
+        if hold_name != "NONE" and self._landing_backend != "pid":
+            self.destroy_node()
+            raise ValueError("pid_hold_at_state requires landing_backend=pid")
+        if self._operation_mode == "pid_align_debug" and hold_name not in {"NONE", "PID_ALIGN"}:
+            self.destroy_node()
+            raise ValueError("pid_align_debug can only hold at PID_ALIGN")
+        self._pid_hold_at_state = (
+            None if hold_name == "NONE" else PidLandingState[hold_name]
+        )
         self._pid_align_auto_start = bool(
             self.get_parameter("pid_align_auto_start").value
         )
@@ -347,6 +361,7 @@ class FlightCycleManager(Node):
         """Declare lifecycle, shared-search, and landing backend defaults."""
         defaults = {
             "operation_mode": "flight_cycle",
+            "pid_hold_at_state": "none",
             "pid_align_auto_start": False,
             # Placeholder until the alignment controller captures its first dock pose.
             "pid_align_distance_setpoint_m": 0.0,
@@ -1937,9 +1952,11 @@ class FlightCycleManager(Node):
     def _build_landing_backend(self) -> Any:
         if self._landing_backend == "pid":
             config = self._build_pid_landing_config()
-            if self._operation_mode == "pid_align_debug":
-                return PidLandingBackend(config, align_only=True)
-            return PidLandingBackend(config)
+            return PidLandingBackend(
+                config,
+                align_only=self._operation_mode == "pid_align_debug",
+                hold_at_state=self._pid_hold_at_state,
+            )
         return PreciseLandingBackend(self._build_precise_landing_config())
 
     def _build_pid_landing_config(self) -> PidLandingConfig:
@@ -2076,10 +2093,26 @@ class FlightCycleManager(Node):
                    for axis in ("x", "y", "z", "yaw")
                    for gain in ("kp", "ki", "kd"))
         }
-        if not tuning_updates and not schedule_updates and not has_distance_update:
+        has_hold_update = "pid_hold_at_state" in updates
+        if not tuning_updates and not schedule_updates and not has_distance_update and not has_hold_update:
             return SetParametersResult(successful=True)
         try:
             backend = self._landing_controller
+            hold_state = None
+            if has_hold_update:
+                hold_value = updates["pid_hold_at_state"]
+                if not isinstance(hold_value, str):
+                    raise ValueError("pid_hold_at_state must be a string")
+                hold_name = hold_value.strip().upper()
+                if hold_name != "NONE" and hold_name not in {s.name for s in PID_HOLD_STATES}:
+                    raise ValueError("invalid pid_hold_at_state")
+                if hold_name != "NONE" and self._landing_backend != "pid":
+                    raise ValueError("pid_hold_at_state requires landing_backend=pid")
+                if self._operation_mode == "pid_align_debug" and hold_name not in {"NONE", "PID_ALIGN"}:
+                    raise ValueError("pid_align_debug can only hold at PID_ALIGN")
+                hold_state = None if hold_name == "NONE" else PidLandingState[hold_name]
+                if self._state is CycleState.LANDING_BACKEND and backend is not None:
+                    backend.validate_hold_at_state(hold_state)
             if has_distance_update:
                 if (self._operation_mode != "pid_align_debug"
                         or self._state is not CycleState.LANDING_BACKEND
@@ -2094,7 +2127,12 @@ class FlightCycleManager(Node):
                 if not diagnostics["align_dock_visible"]:
                     raise ValueError("wait for a fresh dock observation before setting Z")
             if not tuning_updates and not schedule_updates:
-                backend.set_align_distance_setpoint(distance_update)
+                if has_distance_update:
+                    backend.set_align_distance_setpoint(distance_update)
+                if has_hold_update:
+                    if self._state is CycleState.LANDING_BACKEND and backend is not None:
+                        backend.set_hold_at_state(hold_state)
+                    self._pid_hold_at_state = hold_state
                 return SetParametersResult(successful=True)
             for name, value in tuning_updates.items():
                 numeric = float(value)
@@ -2124,6 +2162,10 @@ class FlightCycleManager(Node):
                 reconfigure(configs, near, far, near_distance, far_distance)
             if has_distance_update:
                 backend.set_align_distance_setpoint(distance_update)
+            if has_hold_update:
+                if self._state is CycleState.LANDING_BACKEND and backend is not None:
+                    backend.set_hold_at_state(hold_state)
+                self._pid_hold_at_state = hold_state
         except (TypeError, ValueError) as error:
             return SetParametersResult(successful=False, reason=str(error))
         return SetParametersResult(successful=True)

@@ -14,6 +14,8 @@ from typing import Any
 
 
 AXES = ("x", "y", "z", "yaw")
+HOLD_STATES = ("none", "PID_ALIGN", "DESCEND_OUTER", "ACQUIRE_CENTRAL",
+               "DESCEND_CENTRAL", "HOLD_CENTRAL")
 
 
 def parse_gain_request(payload: Any) -> tuple[str, float, float, float]:
@@ -38,6 +40,13 @@ def parse_distance_request(payload: Any) -> float:
     value = float(value)
     if not math.isfinite(value) or not 0.3 <= value <= 20.0:
         raise ValueError("dock distance must be between 0.3 and 20 m")
+    return value
+
+
+def parse_hold_request(payload: Any) -> str:
+    value = payload.get("pid_hold_at_state") if isinstance(payload, dict) else None
+    if not isinstance(value, str) or value not in HOLD_STATES:
+        raise ValueError("pid_hold_at_state must be one of " + ", ".join(HOLD_STATES))
     return value
 
 
@@ -69,7 +78,7 @@ class TelemetryStore:
 
 @dataclass
 class _GainWork:
-    parameters: dict[str, float]
+    parameters: dict[str, float | str]
     done: threading.Event
     result: dict[str, Any] | None = None
 
@@ -105,7 +114,7 @@ def _handler_for(app: _WebApp) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path not in ("/api/gains", "/api/distance"):
+            if self.path not in ("/api/gains", "/api/distance", "/api/hold"):
                 self.send_error(404)
                 return
             try:
@@ -117,8 +126,10 @@ def _handler_for(app: _WebApp) -> type[BaseHTTPRequestHandler]:
                     axis, kp, ki, kd = parse_gain_request(payload)
                     parameters = {f"pid_{axis}_{name}": value for name, value in
                                   zip(("kp", "ki", "kd"), (kp, ki, kd))}
-                else:
+                elif self.path == "/api/distance":
                     parameters = {"pid_align_distance_setpoint_m": parse_distance_request(payload)}
+                else:
+                    parameters = {"pid_hold_at_state": parse_hold_request(payload)}
             except (ValueError, TypeError) as exc:
                 self._json(400, {"ok": False, "message": str(exc)})
                 return
@@ -142,8 +153,8 @@ main{max-width:1320px;margin:auto}
 @media(max-width:850px){.dashboard{grid-template-columns:minmax(0,1fr)}}
 .card{background:#1f2937;border-radius:10px;padding:18px;margin:14px 0}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
-button,input{font:inherit;border-radius:6px;border:1px solid #4b5563;padding:8px}
-button,input{background:#111827;color:#fff}button{cursor:pointer}
+button,input,select{font:inherit;border-radius:6px;border:1px solid #4b5563;padding:8px}
+button,input,select{background:#111827;color:#fff}button{cursor:pointer}
 .axis.on,.apply{background:#2563eb}label{display:grid;gap:5px}input{width:105px}
 .badge{padding:5px 9px;border-radius:12px;background:#374151}
 .bad{background:#b91c1c}.good{background:#047857}
@@ -169,6 +180,19 @@ small{color:#9ca3af}#message{min-height:20px}
 <button class="apply" id="apply">Apply</button>
 <button id="undo">Undo</button><button id="ponly">P-only</button>
 </div><p id="message"></p></div>
+<div class="card"><h3>Landing hold</h3>
+<div class="row"><label>Hold at state
+<select id="hold" disabled>
+<option value="none">none (continue landing)</option>
+<option value="PID_ALIGN">PID_ALIGN</option>
+<option value="DESCEND_OUTER">DESCEND_OUTER</option>
+<option value="ACQUIRE_CENTRAL">ACQUIRE_CENTRAL</option>
+<option value="DESCEND_CENTRAL">DESCEND_CENTRAL</option>
+<option value="HOLD_CENTRAL">HOLD_CENTRAL (before touchdown)</option>
+</select></label><button class="apply" id="apply-hold" disabled>Apply hold</button></div>
+<p id="hold-status">Waiting for live PID data</p><p id="hold-message" role="status"></p>
+<small>Changing a hold already passed or after touchdown commitment is rejected. Releasing HOLD_CENTRAL requires fresh central vision and stable alignment.</small>
+</div>
 <div class="card" id="distance-card" hidden>
 <div class="row"><label>Dock distance setpoint (m)
 <input id="distance" type="number" min="0.3" max="20" step="0.05"></label>
@@ -189,7 +213,7 @@ small{color:#9ca3af}#message{min-height:20px}
 <small>X forward · Y left · Z distance-setpoint error (not height). Colored wireframe interpolates only between nearby sampled errors; blank areas are unknown. Marker is the current error, not an absolute drone position. Yaw is shown by the arrow.</small>
 </div></div></div></main><script>
 const names=['x','y','z','yaw'], fields=['kp','ki','kd'];
-let axis='x', latest=null, dirty=false, previous=null;
+let axis='x', latest=null, dirty=false, previous=null, holdDirty=false;
 const history={}; names.forEach(a=>history[a]={e:[],c:[]});
 const surfaceSamples=[];
 let surfaceSetpoint=null, lastSurfaceTime=null;
@@ -249,6 +273,20 @@ document.querySelector('#apply-distance').onclick=async()=>{
       headers:{'Content-Type':'application/json'},body:JSON.stringify({distance_m:v})});
     m.textContent=(await r.json()).message;
   }catch(e){m.textContent=e.message}
+};
+const holdSelect=document.querySelector('#hold');
+holdSelect.onchange=()=>holdDirty=true;
+document.querySelector('#apply-hold').onclick=async()=>{
+  const button=document.querySelector('#apply-hold'),message=document.querySelector('#hold-message');
+  button.disabled=true;
+  try{
+    const r=await fetch('/api/hold',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({pid_hold_at_state:holdSelect.value})});
+    const result=await r.json();message.textContent=result.message;
+    if(result.ok && latest?.pid_hold_at_state===holdSelect.value)holdDirty=false;
+  }catch(e){message.textContent=e.message}
+  button.disabled=!latest;
 };
 // Keep only distinct, fresh observations under the same distance setpoint.
 // Z is a distance-setpoint error, not a measured vertical separation.
@@ -413,6 +451,13 @@ async function poll(){
     link.textContent=ok?'PID data live':'waiting for PID data';
     link.className='badge '+(ok?'good':'bad');
     if(ok){
+      holdSelect.disabled=false;
+      document.querySelector('#apply-hold').disabled=false;
+      if(holdDirty && latest.pid_hold_at_state===holdSelect.value)holdDirty=false;
+      if(!holdDirty && latest.pid_hold_at_state)
+        holdSelect.value=latest.pid_hold_at_state;
+      document.querySelector('#hold-status').textContent=
+        'Active hold: '+(latest.pid_hold_at_state??'unknown');
       document.querySelector('#state').textContent='state '+(latest.state??'—');
       let d=latest.axes?.[axis]||{},sat=document.querySelector('#sat');
       sat.textContent=d.saturated?'SATURATED':'not saturated';
@@ -438,6 +483,9 @@ async function poll(){
         if(h.e.length>120){h.e.shift();h.c.shift()}
       }draw();
     }else{
+      holdSelect.disabled=true;
+      document.querySelector('#apply-hold').disabled=true;
+      document.querySelector('#hold-status').textContent='Waiting for live PID data';
       document.querySelector('#state').textContent='state —';
       document.querySelector('#sat').textContent='not saturated';
       document.querySelector('#pause').textContent='descent unknown';
@@ -447,7 +495,10 @@ async function poll(){
     recordSurfaceSample();drawPosition();
   }catch(e){
     latest=null;document.querySelector('#link').textContent='waiting for PID data';
-    document.querySelector('#link').className='badge bad';recordSurfaceSample();drawPosition();
+    document.querySelector('#link').className='badge bad';
+    holdSelect.disabled=true;document.querySelector('#apply-hold').disabled=true;
+    document.querySelector('#hold-status').textContent='Waiting for live PID data';
+    recordSurfaceSample();drawPosition();
   }setTimeout(poll,200);
 }
 document.querySelector('#download').onclick=()=>{
@@ -487,7 +538,7 @@ def main(args: list[str] | None = None) -> None:
             )
             self.create_timer(0.05, self._process_work)
 
-        def submit(self, parameters: dict[str, float]) -> dict[str, Any]:
+        def submit(self, parameters: dict[str, float | str]) -> dict[str, Any]:
             work = _GainWork(parameters, threading.Event())
             self._works.put(work)
             if not work.done.wait(3.0):

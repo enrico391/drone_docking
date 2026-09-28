@@ -30,8 +30,13 @@ _COMMITTED_STATES = frozenset(
 class PidLandingBackend:
     """Map pure PID decisions into the shared landing-backend contract."""
 
-    def __init__(self, config: PidLandingConfig, *, align_only: bool = False):
-        self._controller = PidLandingController(config, align_only=align_only)
+    def __init__(
+        self, config: PidLandingConfig, *, align_only: bool = False,
+        hold_at_state: Optional[PidLandingState] = None,
+    ):
+        self._controller = PidLandingController(
+            config, align_only=align_only, hold_at_state=hold_at_state,
+        )
         self._touchdown_committed = False
 
     def reconfigure_pids(
@@ -50,6 +55,12 @@ class PidLandingBackend:
 
     def set_align_distance_setpoint(self, distance_m: float) -> None:
         self._controller.set_align_distance_setpoint(distance_m)
+
+    def set_hold_at_state(self, state: Optional[PidLandingState]) -> None:
+        self._controller.set_hold_at_state(state)
+
+    def validate_hold_at_state(self, state: Optional[PidLandingState]) -> None:
+        self._controller.validate_hold_at_state(state)
 
     def start(
         self,

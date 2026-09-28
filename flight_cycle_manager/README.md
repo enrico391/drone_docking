@@ -4,14 +4,13 @@
 does not upload missions, choose mission profiles, or repeat cycles on its own.
 ArduPilot must already hold a valid docking mission before startup.
 
-The separate `pid_landing_debug.launch.py` entry point is the exception: it
-skips the mission and takeoff lifecycle so an already-airborne vehicle can run
-only dock search and PID landing. It is intended for supervised PID tuning and
-debugging.
+Set `operation_mode:=pid_landing_debug` to skip the mission and takeoff
+lifecycle so an already-airborne vehicle can run dock search and PID landing.
+The older `pid_landing_debug.launch.py` entry point remains available.
 
-For gain tuning without landing, `pid_align_debug.launch.py` runs only the X/Y
-and yaw alignment PIDs. It never commands vertical motion and never advances
-to descent, recovery climb, touchdown, or disarm.
+For gain tuning without landing, use `operation_mode:=pid_align_debug` (or the
+older `pid_align_debug.launch.py`). It runs X/Y/yaw alignment and Z dock-distance
+control, without advancing to descent, touchdown, or disarm.
 
 ## Required onboard mission
 
@@ -174,6 +173,67 @@ ros2 topic echo /dock/pose
 
 ## Repeatable LAND-triggered PID debug
 
+The unified launch supports three startup paths via `operation_mode`:
+
+| Mode | Startup behavior |
+| --- | --- |
+| `flight_cycle` (default) | Validate and fly the onboard mission, then dock. |
+| `pid_landing_debug` | While airborne, switch to `LAND` to take over in `GUIDED`, search for the dock, and run PID landing. |
+| `pid_align_debug` | While airborne, go straight to alignment without search; `pid_align_auto_start:=true` bypasses the LAND trigger. |
+
+`pid_hold_at_state` is independent of the startup mode. By default it is
+`none`, so the normal landing continues through touchdown and disarm. Set it
+to `PID_ALIGN`, `DESCEND_OUTER`, `ACQUIRE_CENTRAL`, `DESCEND_CENTRAL`, or
+`HOLD_CENTRAL` to stop forward PID state progression. The first four hold when
+their named stage begins. `HOLD_CENTRAL` instead completes central descent and
+waits for the normal touchdown conditions (distance at or below
+`pid_touchdown_commit_height_m` and stable fine alignment), then holds at the
+measured central-tag distance *before* touchdown commitment. In a descent hold,
+the controller continues X/Y/yaw alignment and holds the observed dock distance
+with Z control instead of continuing its descent. `HOLD_CENTRAL` also keeps
+visual X/Y/yaw and Z control at that final measured distance. `ACQUIRE_CENTRAL` waits in
+place; `PID_ALIGN` aligns and holds dock distance. Safety checks remain active:
+a lost target stops visual commands and can trigger the normal recovery climb;
+loss of GUIDED authority or stale telemetry cancels a debug attempt. Do not use
+holds as a flight safety mechanism or leave an airborne vehicle unattended.
+Recovery, `TOUCHDOWN_APPROACH`, and disarm are not valid hold targets. With
+`pid_align_debug`, only `none` or `PID_ALIGN` is valid; both stay in alignment.
+Non-`none` holds require `landing_backend:=pid`.
+
+For example, to inspect central-tag acquisition without descending further:
+
+```bash
+ros2 launch flight_cycle_manager flight_cycle.launch.py \
+  operation_mode:=pid_landing_debug pid_hold_at_state:=ACQUIRE_CENTRAL \
+  publish_camera:=false
+```
+
+To inspect the hover immediately before touchdown (the vehicle remains airborne):
+
+```bash
+ros2 launch flight_cycle_manager flight_cycle.launch.py \
+  operation_mode:=pid_landing_debug pid_hold_at_state:=HOLD_CENTRAL
+```
+
+The existing `pid_landing_debug.launch.py` and `pid_align_debug.launch.py`
+commands below remain available as compatibility entry points and accept
+`pid_hold_at_state` too.
+
+Change the hold during a run using the manager's live ROS parameter service,
+just like PID gains:
+
+```bash
+ros2 param set /flight_cycle_manager pid_hold_at_state HOLD_CENTRAL
+ros2 param set /flight_cycle_manager pid_hold_at_state none
+```
+
+The update applies to the active PID backend and future attempts. Setting a
+hold for a stage already passed is rejected; selecting a later hold releases
+the current one, and `none` resumes the normal sequence. Releasing
+`HOLD_CENTRAL` requires a fresh central tag within the touchdown distance and
+stable fine alignment before touchdown resumes. Updates after touchdown
+commitment are rejected. `pid_align_debug` only permits `PID_ALIGN` or `none`.
+
 Start the landing-only debug node against a simulated or externally published
 camera with:
 
@@ -284,9 +344,16 @@ ros2 run flight_cycle_manager pid_tuner
 Then open `http://127.0.0.1:8765`. Select one axis, change its gains, and press
 **Apply**. **Undo** restores the last applied values, **P-only** zeros Ki/Kd,
 and **Download YAML** saves all displayed gains. The page is local-only and
-uses atomic ROS parameter updates. A dock-relative 3D-style error surface
-sits to the right of the axis selection and tracking-error readouts, remains
-visible on every X/Y/Z/yaw tab, and highlights the selected axis. It uses a
+uses atomic ROS parameter updates. The **Landing hold** selector shows the
+active hold from live PID telemetry.
+Choose `HOLD_CENTRAL` to pause before touchdown, or `none` to resume, then
+press **Apply hold**. The manager reports rejected selections (such as a stage
+already passed) beside the selector. Controls are disabled without fresh PID
+telemetry; the last selected hold remains in effect if the dashboard disconnects.
+
+A dock-relative 3D-style error surface sits to the right of the axis selection
+and tracking-error readouts. It remains visible on every X/Y/Z/yaw tab and
+highlights the selected axis. It uses a
 bounded history of fresh observations to interpolate Z error over X/Y error
 only near sampled locations; empty parts of the grid are unknown, not zero.
 The surface is an estimate, not a measured physical shape or drone trajectory.

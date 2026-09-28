@@ -14,6 +14,7 @@ from rclpy.parameter import Parameter  # noqa: E402
 from test_manager_pid_recovery import manager_at_landing_boundary  # noqa: E402
 from test_manager_start import airborne_state  # noqa: E402
 from test_pid_landing_backend import dock_observation  # noqa: E402
+from flight_cycle_manager.pid_landing import PidLandingState  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -49,6 +50,62 @@ def test_live_gains_change_active_output_and_reject_invalid_batch(monkeypatch):
         vehicle.state = airborne_state(1.7)
         manager.tick(1.7)
         assert vehicle.velocity_calls[-1][1] == pytest.approx(0.2)
+    finally:
+        manager.close()
+
+
+def test_live_hold_changes_active_backend_and_rejects_passed_stage(monkeypatch):
+    manager, vehicle = manager_at_landing_boundary(monkeypatch)
+    try:
+        backend = manager.backend
+        assert manager.set_parameters_atomically([
+            Parameter("pid_hold_at_state", value="PID_ALIGN"),
+        ]).successful
+        monkeypatch.setattr(manager, "_dock_observation", lambda now: dock_observation(now))
+        for now in (1.1, 2.2):
+            vehicle.state = airborne_state(now)
+            manager.tick(now)
+        assert manager.backend is backend
+        assert backend._controller._state is PidLandingState.PID_ALIGN
+
+        assert manager.set_parameters_atomically([
+            Parameter("pid_hold_at_state", value="HOLD_CENTRAL"),
+        ]).successful
+        for now in (2.3, 3.4):
+            vehicle.state = airborne_state(now)
+            manager.tick(now)
+        assert backend._controller._state is PidLandingState.DESCEND_OUTER
+        assert backend._controller._hold_at_state is PidLandingState.HOLD_CENTRAL
+
+        rejected = manager.set_parameters_atomically([
+            Parameter("pid_hold_at_state", value="PID_ALIGN"),
+            Parameter("pid_x_kp", value=2.0),
+        ])
+        assert not rejected.successful
+        assert manager.get_parameter("pid_hold_at_state").value == "HOLD_CENTRAL"
+        assert manager.get_parameter("pid_x_kp").value == 1.0
+        assert backend._controller._hold_at_state is PidLandingState.HOLD_CENTRAL
+        assert manager.set_parameters_atomically([
+            Parameter("pid_hold_at_state", value="none"),
+        ]).successful
+        assert backend._controller._hold_at_state is None
+        assert manager._pid_hold_at_state is None
+    finally:
+        manager.close()
+
+
+def test_live_hold_rejects_updates_after_touchdown_commitment(monkeypatch):
+    manager, vehicle = manager_at_landing_boundary(monkeypatch)
+    try:
+        controller = manager.backend._controller
+        controller._state = PidLandingState.TOUCHDOWN_APPROACH
+        rejected = manager.set_parameters_atomically([
+            Parameter("pid_hold_at_state", value="HOLD_CENTRAL"),
+        ])
+        assert not rejected.successful
+        assert "commitment" in rejected.reason
+        assert manager.get_parameter("pid_hold_at_state").value == "none"
+        assert controller._hold_at_state is None
     finally:
         manager.close()
 
