@@ -61,6 +61,12 @@ def test_bridge_routes_wrench_and_clear_commands_to_gazebo():
     assert clear["ros_type_name"] == "ros_gz_interfaces/msg/Entity"
     assert clear["direction"] == "ROS_TO_GZ"
 
+    world_pose = by_ros_topic["gz/world_pose"]
+    assert world_pose["gz_topic_name"] == "/world/{{ world_name }}/pose/info"
+    assert world_pose["ros_type_name"] == "tf2_msgs/msg/TFMessage"
+    assert world_pose["gz_type_name"] == "gz.msgs.Pose_V"
+    assert world_pose["direction"] == "GZ_TO_ROS"
+
 
 def test_disturbance_rate_matches_every_simulation_physics_step():
     """Break caught: instantaneous wrench is absent between publish ticks."""

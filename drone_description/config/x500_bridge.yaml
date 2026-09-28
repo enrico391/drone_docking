@@ -19,6 +19,11 @@
   ros_type_name: "tf2_msgs/msg/TFMessage"
   gz_type_name: "gz.msgs.Pose_V"
   direction: GZ_TO_ROS
+- ros_topic_name: "gz/world_pose"
+  gz_topic_name: "/world/{{ world_name }}/pose/info"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
+  direction: GZ_TO_ROS
 - ros_topic_name: "air_pressure"
   gz_topic_name: "/world/{{ world_name }}/model/{{ robot_name }}/link/base_link/sensor/air_pressure_sensor/air_pressure"
   ros_type_name: "sensor_msgs/msg/FluidPressure"

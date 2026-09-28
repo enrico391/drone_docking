@@ -27,9 +27,9 @@
     # Use 0.88 for the current dock top instead of the surrounding ground.
     ground_effect.enabled: true
     ground_effect.surface_z: 0.88
-    ground_effect.rotor_plane_offset: 0.2
-    ground_effect.minimum_height: 0.90
-    ground_effect.maximum_height: 1.4
+    ground_effect.rotor_plane_offset: 0.06
+    ground_effect.minimum_height: 0.28
+    ground_effect.maximum_height: 0.78
     ground_effect.maximum_upward_force: 0.7
     ground_effect.turbulence_gain: 1.5
 

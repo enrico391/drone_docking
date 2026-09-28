@@ -90,32 +90,97 @@ def test_injector_uses_vehicle_pose_for_surface_relative_ground_effect():
     observer = rclpy.create_node("ground_effect_observer", context=context)
     received = []
     observer.create_subscription(EntityWrench, "disturbance/wrench", received.append, 10)
-    pose_publisher = observer.create_publisher(TFMessage, "gz/tf", 10)
+    static_publisher = observer.create_publisher(TFMessage, "gz/tf_static", 10)
+    world_publisher = observer.create_publisher(TFMessage, "gz/world_pose", 10)
     executor = SingleThreadedExecutor(context=context)
     executor.add_node(injector)
     executor.add_node(observer)
 
-    pose = TransformStamped()
-    pose.child_frame_id = "test_x500::base_link"
-    pose.transform.translation.z = 1.0
-    pose.transform.rotation.w = 1.0
-    tf_message = TFMessage(transforms=[pose])
+    base = TransformStamped()
+    base.header.frame_id = "test_x500"
+    base.child_frame_id = "test_x500/base_link"
+    base.transform.translation.z = 0.24
+    base.transform.rotation.w = 1.0
+    base_message = TFMessage(transforms=[base])
+    model = TransformStamped()
+    model.child_frame_id = "test_x500"
+    model.transform.translation.z = 0.76
+    model.transform.rotation.w = 1.0
+    world_message = TFMessage(transforms=[model])
 
     try:
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
-            pose_publisher.publish(tf_message)
+            static_publisher.publish(base_message)
+            world_publisher.publish(world_message)
             executor.spin_once(timeout_sec=0.05)
             if any(abs(msg.wrench.force.z - 0.3) < 1e-9 for msg in received):
                 break
 
         assert any(abs(msg.wrench.force.z - 0.3) < 1e-9 for msg in received)
+        # Model world z=1.06 puts the rotor 0.8 m above the surface: no effect.
+        previous_count = len(received)
+        model.transform.translation.z = 1.06
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            world_publisher.publish(world_message)
+            executor.spin_once(timeout_sec=0.05)
+            if any(msg.wrench.force.z == 0.0 for msg in received[previous_count:]):
+                break
+        assert any(msg.wrench.force.z == 0.0 for msg in received[previous_count:])
     finally:
         executor.remove_node(observer)
         executor.remove_node(injector)
         observer.destroy_node()
         injector.destroy_node()
         executor.shutdown()
+        context.shutdown()
+
+
+def test_world_pose_uses_rotated_base_offset_and_resets_on_target_change():
+    context = Context()
+    rclpy.init(context=context)
+    injector = DisturbanceInjector(
+        context=context,
+        parameter_overrides=[
+            Parameter("target_model", value="test_x500"),
+            Parameter("ground_effect.enabled", value=True),
+            Parameter("ground_effect.surface_z", value=0.88),
+            Parameter("ground_effect.rotor_plane_offset", value=0.06),
+            Parameter("ground_effect.minimum_height", value=0.28),
+            Parameter("ground_effect.maximum_height", value=0.78),
+        ],
+    )
+    try:
+        base = TransformStamped()
+        base.header.frame_id = "test_x500"
+        base.child_frame_id = "test_x500/base_link"
+        base.transform.translation.z = 0.24
+        base.transform.rotation.w = 1.0
+        model = TransformStamped()
+        model.child_frame_id = "test_x500"
+        model.transform.translation.z = 1.38
+        model.transform.rotation.w = 1.0
+
+        injector._world_pose_callback(TFMessage(transforms=[model]))
+        assert injector._rotor_height is None
+        injector._static_pose_callback(TFMessage(transforms=[base]))
+        assert abs(injector._rotor_height - 0.80) < 1e-9
+
+        # A 90-degree model pitch rotates the 0.30 m model-to-rotor offset
+        # horizontally, leaving only the model's world z above the surface.
+        model.transform.rotation.y = 2 ** -0.5
+        model.transform.rotation.w = 2 ** -0.5
+        injector._world_pose_callback(TFMessage(transforms=[model]))
+        assert abs(injector._rotor_height - 0.50) < 1e-9
+
+        result = injector.set_parameters([Parameter("target_model", value="another_x500")])
+        assert result[0].successful
+        assert injector._rotor_height is None
+        injector._world_pose_callback(TFMessage(transforms=[model]))
+        assert injector._rotor_height is None
+    finally:
+        injector.destroy_node()
         context.shutdown()
 
 

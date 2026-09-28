@@ -63,6 +63,8 @@ class DisturbanceInjector(Node):
         self._rotor_plane_offset = float(self.get_parameter("ground_effect.rotor_plane_offset").value)
         self._orientation_xyzw = (0.0, 0.0, 0.0, 1.0)
         self._rotor_height = None
+        self._model_pose = None
+        self._base_pose = None
         update_rate = float(self.get_parameter("update_rate").value)
         if update_rate <= 0.0:
             raise ValueError("update rate must be positive")
@@ -74,8 +76,11 @@ class DisturbanceInjector(Node):
         self._clear_publisher = self.create_publisher(Entity, "disturbance/clear", 10)
         self._start_time = self.get_clock().now()
         self._last_update_time = self._start_time
-        self._pose_subscription = self.create_subscription(
-            TFMessage, "gz/tf", self._pose_callback, 10
+        self._static_pose_subscription = self.create_subscription(
+            TFMessage, "gz/tf_static", self._static_pose_callback, 10
+        )
+        self._world_pose_subscription = self.create_subscription(
+            TFMessage, "gz/world_pose", self._world_pose_callback, 10
         )
         self._timer = self.create_timer(self._period, self._publish_wrench)
         self.add_on_set_parameters_callback(self._parameters_changed)
@@ -174,9 +179,14 @@ class DisturbanceInjector(Node):
         if (self._enabled and not requested) or target != self._target_model:
             self._publish_clear()
         self._model = model
+        if target != self._target_model:
+            self._model_pose = None
+            self._base_pose = None
+            self._rotor_height = None
         self._target_model = target
         self._surface_z = surface
         self._rotor_plane_offset = offset
+        self._update_world_height()
         if rate != 1.0 / self._period:
             self.destroy_timer(self._timer)
             self._period = 1.0 / rate
@@ -189,31 +199,53 @@ class DisturbanceInjector(Node):
         self._enabled = requested
         return SetParametersResult(successful=True)
 
-    def _pose_callback(self, message: TFMessage) -> None:
-        suffixes = ("base_link", "::base_link", "/base_link")
-        candidates = [
-            transform
-            for transform in message.transforms
-            if transform.child_frame_id.endswith(suffixes)
-        ]
-        matching = [
-            transform
-            for transform in candidates
-            if str(self._target_model) in transform.child_frame_id
-        ]
-        if matching:
-            transform = matching[0]
-        elif len(candidates) == 1:
-            transform = candidates[0]
-        else:
+    def _static_pose_callback(self, message: TFMessage) -> None:
+        model = str(self._target_model)
+        for transform in message.transforms:
+            if (
+                transform.header.frame_id == model
+                and transform.child_frame_id in (f"{model}/base_link", f"{model}::base_link")
+            ):
+                self._base_pose = transform.transform
+                self._update_world_height()
+                return
+
+    def _world_pose_callback(self, message: TFMessage) -> None:
+        for transform in message.transforms:
+            if transform.child_frame_id == str(self._target_model):
+                self._model_pose = transform.transform
+                self._update_world_height()
+                return
+
+    def _update_world_height(self) -> None:
+        if self._model_pose is None or self._base_pose is None:
             return
-        rotation = transform.transform.rotation
-        self._orientation_xyzw = (rotation.x, rotation.y, rotation.z, rotation.w)
+        model_q = self._model_pose.rotation
+        base_q = self._base_pose.rotation
+        model_orientation = (model_q.x, model_q.y, model_q.z, model_q.w)
+        base_orientation = (base_q.x, base_q.y, base_q.z, base_q.w)
+        base_offset = self._base_pose.translation
+        rotor_offset = rotate_vector(
+            (0.0, 0.0, self._rotor_plane_offset), base_orientation
+        )
         offset_world = rotate_vector(
-            (0.0, 0.0, self._rotor_plane_offset), self._orientation_xyzw
+            (
+                base_offset.x + rotor_offset[0],
+                base_offset.y + rotor_offset[1],
+                base_offset.z + rotor_offset[2],
+            ),
+            model_orientation,
         )
         self._rotor_height = (
-            transform.transform.translation.z + offset_world[2] - self._surface_z
+            self._model_pose.translation.z + offset_world[2] - self._surface_z
+        )
+        x1, y1, z1, w1 = model_orientation
+        x2, y2, z2, w2 = base_orientation
+        self._orientation_xyzw = (
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
         )
 
     def _message(self, wrench: Wrench) -> EntityWrench:
