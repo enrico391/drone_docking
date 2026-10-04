@@ -28,6 +28,7 @@ from vehicle_fakes import FakeVehicle, install_ros_fakes
 EXPECTED_COMMON_PARAMETERS = {
     "operation_mode": "flight_cycle",
     "pid_hold_at_state": "none",
+    "pid_fixed_central_reference_mode": "off",
     "pid_align_auto_start": False,
     "simulation_mode": False,
     "auto_start": False,
@@ -243,6 +244,7 @@ def test_launch_declares_operational_arguments(monkeypatch):
         "landing_backend",
         "operation_mode",
         "pid_hold_at_state",
+        "pid_fixed_central_reference_mode",
         "mavlink_connection",
         "mavlink_baud",
         "simulation_mode",
@@ -293,10 +295,27 @@ def test_launch_setup_returns_exact_pid_manager_node(monkeypatch):
     assert overrides["landing_backend"].perform(context) == "pid"
     assert overrides["operation_mode"].perform(context) == "flight_cycle"
     assert overrides["pid_hold_at_state"].perform(context) == "none"
+    assert overrides["pid_fixed_central_reference_mode"].value_type is str
+    assert overrides["pid_fixed_central_reference_mode"].evaluate(context) == "off"
     assert overrides["simulation_mode"].evaluate(context) is True
     assert overrides["auto_start"].evaluate(context) is True
     assert overrides["mavlink_connection"].perform(context) == "serial:///dev/ttyAMA0"
     assert overrides["mavlink_baud"].evaluate(context) == 57600
+
+
+@pytest.mark.parametrize("mode", ["off", "descend_central", "hold_central"])
+def test_fixed_reference_launch_override_stays_a_string(monkeypatch, mode):
+    module = load_launch_module()
+    patch_package_shares(monkeypatch, module)
+    captured = {}
+    monkeypatch.setattr(module, "Node", lambda **kwargs: captured.update(kwargs) or kwargs)
+    context = configured_context_for_values(
+        module, pid_fixed_central_reference_mode=mode,
+    )
+    module._launch_setup(context, ROOT)
+    override = captured["parameters"][2]["pid_fixed_central_reference_mode"]
+    assert override.value_type is str
+    assert override.evaluate(context) == mode
 
 
 def test_launch_setup_returns_exact_precise_landing_manager_node(monkeypatch):

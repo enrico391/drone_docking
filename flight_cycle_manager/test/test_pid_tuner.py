@@ -10,6 +10,7 @@ import pytest
 from flight_cycle_manager.pid_tuner import (
     DASHBOARD_HTML, TelemetryStore, _WebApp, _handler_for,
     parse_distance_request, parse_gain_request, parse_hold_request,
+    parse_fixed_reference_request,
 )
 from flight_cycle_manager.pid_landing import PidLandingState
 from flight_cycle_manager.pid_landing_backend import PidLandingBackend
@@ -108,6 +109,67 @@ def test_hold_endpoint_forwards_only_hold_parameter_and_reports_rejections():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("mode", ["off", "descend_central", "hold_central"])
+def test_fixed_reference_request_accepts_modes(mode):
+    assert parse_fixed_reference_request({"pid_fixed_central_reference_mode": mode}) == mode
+
+
+@pytest.mark.parametrize("payload", [None, {},
+    {"pid_fixed_central_reference_mode": False},
+    {"pid_fixed_central_reference_mode": "HOLD_CENTRAL"},
+    {"pid_fixed_central_reference_mode": "both"}])
+def test_fixed_reference_request_rejects_invalid(payload):
+    with pytest.raises(ValueError, match="pid_fixed_central_reference_mode"):
+        parse_fixed_reference_request(payload)
+
+
+def test_fixed_reference_endpoint_forwards_parameter_and_rejection():
+    received = []
+
+    def submit(parameters):
+        received.append(parameters)
+        return ({"ok": False, "message": "cannot change after touchdown"}
+                if parameters["pid_fixed_central_reference_mode"] == "hold_central"
+                else {"ok": True, "message": "parameters applied"})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0),
+                                 _handler_for(_WebApp(TelemetryStore(), submit)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        def post(payload):
+            request = Request(
+                f"http://127.0.0.1:{server.server_port}/api/fixed-reference",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            try:
+                response = urlopen(request, timeout=2)
+            except HTTPError as error:
+                response = error
+            with response:
+                return response.status, json.load(response)
+
+        assert post({"pid_fixed_central_reference_mode": "off"})[0] == 200
+        assert post({"pid_fixed_central_reference_mode": "hold_central"})[0] == 503
+        assert post({"pid_fixed_central_reference_mode": True})[0] == 400
+        assert received == [
+            {"pid_fixed_central_reference_mode": "off"},
+            {"pid_fixed_central_reference_mode": "hold_central"},
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_dashboard_exposes_live_fixed_reference_control_next_to_hold():
+    assert DASHBOARD_HTML.index('id="hold"') < DASHBOARD_HTML.index('id="fixed-reference"')
+    for token in ('id="apply-fixed-reference"', '/api/fixed-reference',
+                  'fixed_reference_pending', 'fixed_central_reference_mode'):
+        assert token in DASHBOARD_HTML
 
 
 def test_pid_diagnostics_expose_active_hold_for_dashboard():

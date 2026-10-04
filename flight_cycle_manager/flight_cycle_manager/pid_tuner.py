@@ -16,6 +16,7 @@ from typing import Any
 AXES = ("x", "y", "z", "yaw")
 HOLD_STATES = ("none", "PID_ALIGN", "DESCEND_OUTER", "ACQUIRE_CENTRAL",
                "DESCEND_CENTRAL", "HOLD_CENTRAL")
+FIXED_REFERENCE_MODES = ("off", "descend_central", "hold_central")
 
 
 def parse_gain_request(payload: Any) -> tuple[str, float, float, float]:
@@ -47,6 +48,14 @@ def parse_hold_request(payload: Any) -> str:
     value = payload.get("pid_hold_at_state") if isinstance(payload, dict) else None
     if not isinstance(value, str) or value not in HOLD_STATES:
         raise ValueError("pid_hold_at_state must be one of " + ", ".join(HOLD_STATES))
+    return value
+
+
+def parse_fixed_reference_request(payload: Any) -> str:
+    value = payload.get("pid_fixed_central_reference_mode") if isinstance(payload, dict) else None
+    if not isinstance(value, str) or value not in FIXED_REFERENCE_MODES:
+        raise ValueError("pid_fixed_central_reference_mode must be one of " +
+                         ", ".join(FIXED_REFERENCE_MODES))
     return value
 
 
@@ -114,7 +123,7 @@ def _handler_for(app: _WebApp) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path not in ("/api/gains", "/api/distance", "/api/hold"):
+            if self.path not in ("/api/gains", "/api/distance", "/api/hold", "/api/fixed-reference"):
                 self.send_error(404)
                 return
             try:
@@ -128,8 +137,11 @@ def _handler_for(app: _WebApp) -> type[BaseHTTPRequestHandler]:
                                   zip(("kp", "ki", "kd"), (kp, ki, kd))}
                 elif self.path == "/api/distance":
                     parameters = {"pid_align_distance_setpoint_m": parse_distance_request(payload)}
-                else:
+                elif self.path == "/api/hold":
                     parameters = {"pid_hold_at_state": parse_hold_request(payload)}
+                else:
+                    parameters = {"pid_fixed_central_reference_mode":
+                                  parse_fixed_reference_request(payload)}
             except (ValueError, TypeError) as exc:
                 self._json(400, {"ok": False, "message": str(exc)})
                 return
@@ -193,6 +205,15 @@ small{color:#9ca3af}#message{min-height:20px}
 </select></label><button class="apply" id="apply-hold" disabled>Apply hold</button></div>
 <p id="hold-status">Waiting for live PID data</p><p id="hold-message" role="status"></p>
 <small>Changing a hold already passed or after touchdown commitment is rejected. Releasing HOLD_CENTRAL requires fresh central vision and stable alignment.</small>
+<div class="row"><label>Fixed central reference
+<select id="fixed-reference" disabled>
+<option value="off">off (live vision)</option>
+<option value="descend_central">latch at DESCEND_CENTRAL</option>
+<option value="hold_central">latch at HOLD_CENTRAL</option>
+</select></label><button class="apply" id="apply-fixed-reference" disabled>Apply reference</button></div>
+<p id="fixed-reference-status">Waiting for live PID data</p>
+<p id="fixed-reference-message" role="status"></p>
+<small>If selected after the latch state was reached, the target is re-latched from the next fresh central observation. Until then control stops. Off returns to live X/Y/yaw vision. No changes after touchdown commitment.</small>
 </div>
 <div class="card" id="distance-card" hidden>
 <div class="row"><label>Dock distance setpoint (m)
@@ -231,7 +252,7 @@ const plotRanges={x:{error:2,command:1,unit:'m',commandUnit:'m/s'},
   yaw:{error:180,command:60,unit:'°',commandUnit:'°/s'}};
 const defaultPlotRanges=JSON.parse(JSON.stringify(plotRanges));
 let surfaceScale=2; // Metres per axis; do not zoom as errors improve.
-let axis='x', latest=null, dirty=false, previous=null, holdDirty=false;
+let axis='x', latest=null, dirty=false, previous=null, holdDirty=false, fixedReferenceDirty=false;
 const history={}; names.forEach(a=>history[a]={e:[],c:[]});
 const surfaceSamples=[];
 let surfaceSetpoint=null, lastSurfaceTime=null;
@@ -345,6 +366,22 @@ document.querySelector('#apply-hold').onclick=async()=>{
       body:JSON.stringify({pid_hold_at_state:holdSelect.value})});
     const result=await r.json();message.textContent=result.message;
     if(result.ok && latest?.pid_hold_at_state===holdSelect.value)holdDirty=false;
+  }catch(e){message.textContent=e.message}
+  button.disabled=!latest;
+};
+const fixedReferenceSelect=document.querySelector('#fixed-reference');
+fixedReferenceSelect.onchange=()=>fixedReferenceDirty=true;
+document.querySelector('#apply-fixed-reference').onclick=async()=>{
+  const button=document.querySelector('#apply-fixed-reference');
+  const message=document.querySelector('#fixed-reference-message');
+  button.disabled=true;
+  try{
+    const r=await fetch('/api/fixed-reference',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({pid_fixed_central_reference_mode:fixedReferenceSelect.value})});
+    const result=await r.json();message.textContent=result.message;
+    if(result.ok && latest?.fixed_central_reference_mode===fixedReferenceSelect.value)
+      fixedReferenceDirty=false;
   }catch(e){message.textContent=e.message}
   button.disabled=!latest;
 };
@@ -549,6 +586,16 @@ async function poll(){
         holdSelect.value=latest.pid_hold_at_state;
       document.querySelector('#hold-status').textContent=
         'Active hold: '+(latest.pid_hold_at_state??'unknown');
+      fixedReferenceSelect.disabled=false;
+      document.querySelector('#apply-fixed-reference').disabled=false;
+      if(fixedReferenceDirty && latest.fixed_central_reference_mode===fixedReferenceSelect.value)
+        fixedReferenceDirty=false;
+      if(!fixedReferenceDirty && latest.fixed_central_reference_mode)
+        fixedReferenceSelect.value=latest.fixed_central_reference_mode;
+      document.querySelector('#fixed-reference-status').textContent=
+        'Active mode: '+(latest.fixed_central_reference_mode??'unknown')+
+        (latest.fixed_reference_pending?' · waiting to latch':
+         latest.fixed_reference_active?' · reference latched':' · live vision');
       document.querySelector('#state').textContent='state '+(latest.state??'—');
       let d=latest.axes?.[axis]||{},sat=document.querySelector('#sat');
       sat.textContent=d.saturated?'SATURATED':'not saturated';
@@ -577,6 +624,9 @@ async function poll(){
       holdSelect.disabled=true;
       document.querySelector('#apply-hold').disabled=true;
       document.querySelector('#hold-status').textContent='Waiting for live PID data';
+      fixedReferenceSelect.disabled=true;
+      document.querySelector('#apply-fixed-reference').disabled=true;
+      document.querySelector('#fixed-reference-status').textContent='Waiting for live PID data';
       document.querySelector('#state').textContent='state —';
       document.querySelector('#sat').textContent='not saturated';
       document.querySelector('#pause').textContent='descent unknown';
@@ -589,6 +639,8 @@ async function poll(){
     document.querySelector('#link').className='badge bad';
     holdSelect.disabled=true;document.querySelector('#apply-hold').disabled=true;
     document.querySelector('#hold-status').textContent='Waiting for live PID data';
+    fixedReferenceSelect.disabled=true;document.querySelector('#apply-fixed-reference').disabled=true;
+    document.querySelector('#fixed-reference-status').textContent='Waiting for live PID data';
     recordSurfaceSample();drawPosition();
   }setTimeout(poll,200);
 }

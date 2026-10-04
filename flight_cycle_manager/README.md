@@ -200,6 +200,43 @@ Recovery, `TOUCHDOWN_APPROACH`, and disarm are not valid hold targets. With
 `pid_align_debug`, only `none` or `PID_ALIGN` is valid; both stay in alignment.
 Non-`none` holds require `landing_backend:=pid`.
 
+### Fixed central reference for PID experiments
+
+Set `pid_fixed_central_reference_mode` to `off` (default), `descend_central`,
+or `hold_central`. This option latches the central tag's X/Y
+position and yaw in the flight controller's local frame at the selected state.
+It uses subsequent vehicle position and heading to compute X/Y/yaw PID errors;
+it does **not** freeze camera-relative errors. `descend_central` keeps the same
+reference through `HOLD_CENTRAL` and touchdown. `hold_central` uses live vision
+until `HOLD_CENTRAL` is reached, then latches it there; if descent is held at
+`DESCEND_CENTRAL`, the `hold_central` reference never activates.
+
+The PID tuner has a **Fixed central reference** selector beside **Hold at state**.
+It applies live to the current attempt and future attempts. Enabling a mode
+after its entry point has been reached waits for a fresh central observation,
+then latches a **new** target at that observation and resumes on the following
+update. `off` immediately restores live visual X/Y/yaw errors. Changing modes
+resets horizontal/yaw PID history and alignment dwell; changes after touchdown
+commitment are rejected. The status shows whether a latch is pending or active.
+
+To test horizontal/yaw tracking at a fixed height, start with:
+
+```bash
+ros2 launch flight_cycle_manager flight_cycle.launch.py \
+  operation_mode:=pid_landing_debug pid_hold_at_state:=DESCEND_CENTRAL \
+  pid_fixed_central_reference_mode:=descend_central
+```
+
+For a latch near touchdown, use `pid_hold_at_state:=HOLD_CENTRAL` and
+`pid_fixed_central_reference_mode:=hold_central`. Holds still use fresh central
+vision for **Z distance control and target-loss recovery**; the fixed reference
+only replaces the X/Y/yaw target. A usable vehicle heading is required: if it
+is missing, fixed-reference control stops and the existing target-loss handling
+applies. `/flight_cycle_manager/pid_debug` includes `fixed_reference_active`,
+`fixed_reference_enu_m`, `fixed_reference_heading_rad`, and `control_error`.
+Vehicle local-position drift and errors in the initial latch remain possible.
+Use SITL and a supervised hover first; the hold is not an emergency stop.
+
 For example, to inspect central-tag acquisition without descending further:
 
 ```bash

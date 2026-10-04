@@ -16,6 +16,7 @@ def generate_launch_description() -> LaunchDescription:
     forwarded = {
         "pid_align_auto_start": "false",
         "pid_hold_at_state": "none",
+        "pid_fixed_central_reference_mode": "off",
         "start_pid_tuner": "false",
         "publish_camera": "false",
         "mavlink_connection": "tcp:127.0.0.1:5760",

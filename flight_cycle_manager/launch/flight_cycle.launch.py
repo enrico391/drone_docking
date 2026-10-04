@@ -77,6 +77,9 @@ def _launch_setup(
             "landing_backend": LaunchConfiguration("landing_backend"),
             "operation_mode": LaunchConfiguration("operation_mode"),
             "pid_hold_at_state": LaunchConfiguration("pid_hold_at_state"),
+            "pid_fixed_central_reference_mode": ParameterValue(
+                LaunchConfiguration("pid_fixed_central_reference_mode"), value_type=str,
+            ),
             "pid_align_auto_start": ParameterValue(
                 LaunchConfiguration("pid_align_auto_start"), value_type=bool,
             ),
@@ -157,6 +160,11 @@ def generate_launch_description() -> LaunchDescription:
                 "pid_hold_at_state", default_value="none",
                 choices=["none", "PID_ALIGN", "DESCEND_OUTER", "ACQUIRE_CENTRAL", "DESCEND_CENTRAL", "HOLD_CENTRAL"],
                 description="Freeze PID forward progress when entering this state; none runs the full landing.",
+            ),
+            DeclareLaunchArgument(
+                "pid_fixed_central_reference_mode", default_value="off",
+                choices=["off", "descend_central", "hold_central"],
+                description="Latch central X/Y/yaw target on entry to selected state.",
             ),
             DeclareLaunchArgument("pid_align_auto_start", default_value="false", choices=["true", "false"]),
             DeclareLaunchArgument("landing_attempt_log_enabled", default_value="false", choices=["true", "false"]),

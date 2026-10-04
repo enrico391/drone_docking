@@ -31,7 +31,7 @@ def test_align_wrapper_includes_unified_launch(monkeypatch):
     ) == str(ROOT / "launch" / "flight_cycle.launch.py")
     arguments = dict(includes[0].launch_arguments)
     assert arguments["operation_mode"] == "pid_align_debug"
-    for name in ("pid_align_auto_start", "pid_hold_at_state", "start_pid_tuner",
+    for name in ("pid_align_auto_start", "pid_hold_at_state", "pid_fixed_central_reference_mode", "start_pid_tuner",
                  "publish_camera", "image_topic"):
         assert name in declarations
         assert name in arguments

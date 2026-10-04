@@ -21,6 +21,7 @@ def generate_launch_description() -> LaunchDescription:
         "landing_attempt_log_directory": "~/.ros/flight_cycle_manager/landing_attempts",
         "start_pid_tuner": "false",
         "pid_hold_at_state": "none",
+        "pid_fixed_central_reference_mode": "off",
         "config_file": str(localizer / "config" / "dock_tags.yaml"),
         "image_topic": "/camera/image_raw",
         "camera_info_topic": "/camera/camera_info",

@@ -62,6 +62,12 @@ class PidLandingBackend:
     def validate_hold_at_state(self, state: Optional[PidLandingState]) -> None:
         self._controller.validate_hold_at_state(state)
 
+    def validate_fixed_central_reference_mode(self, mode: str) -> None:
+        self._controller.validate_fixed_central_reference_mode(mode)
+
+    def set_fixed_central_reference_mode(self, mode: str) -> None:
+        self._controller.set_fixed_central_reference_mode(mode)
+
     def start(
         self,
         *,

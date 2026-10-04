@@ -92,12 +92,15 @@ class PidLandingConfig:
     z_pid: PIDConfig
     yaw_pid: PIDConfig
     target_loss_grace_s: float
+    fixed_central_reference_mode: str = "off"
     gain_near_distance_m: float = 0.2
     gain_far_distance_m: float = 6.0
     near_pids: Optional[Tuple[PIDConfig, ...]] = None
     far_pids: Optional[Tuple[PIDConfig, ...]] = None
 
     def __post_init__(self) -> None:
+        if self.fixed_central_reference_mode not in ("off", "descend_central", "hold_central"):
+            raise ValueError("fixed_central_reference_mode must be off, descend_central or hold_central")
         numeric_fields = (
             "tag_stable_time_s",
             "central_transition_distance_m",
@@ -217,6 +220,10 @@ class PidLandingController:
         self._target_loss_started_at: Optional[float] = None
         self._touchdown_reference_enu_m: Optional[Tuple[float, float]] = None
         self._touchdown_reference_heading_rad: Optional[float] = None
+        self._fixed_reference_enu_m: Optional[Tuple[float, float]] = None
+        self._fixed_reference_heading_rad: Optional[float] = None
+        self._fixed_reference_pending = False
+        self._control_error: Optional[dict] = None
 
     def start_after_acquisition(self, now: float) -> None:
         """Begin at PID alignment after the shared search acquired the dock."""
@@ -238,6 +245,10 @@ class PidLandingController:
         self._target_loss_started_at = None
         self._touchdown_reference_enu_m = None
         self._touchdown_reference_heading_rad = None
+        self._fixed_reference_enu_m = None
+        self._fixed_reference_heading_rad = None
+        self._fixed_reference_pending = False
+        self._control_error = None
         self._landed_stable_started_at = None
         self._disarm_request_in_flight = False
         self._disarm_acknowledged = False
@@ -309,6 +320,35 @@ class PidLandingController:
                     stages.index(state) < stages.index(self._state)):
                 raise ValueError("PID hold state has already been passed")
 
+    def validate_fixed_central_reference_mode(self, mode: str) -> None:
+        if not isinstance(mode, str) or mode not in (
+                "off", "descend_central", "hold_central"):
+            raise ValueError("invalid pid_fixed_central_reference_mode")
+        if self._started and self._state in (
+                PidLandingState.TOUCHDOWN_APPROACH, PidLandingState.DISARM,
+                PidLandingState.COMPLETE, PidLandingState.FAILED):
+            raise ValueError("cannot change fixed reference after touchdown commitment or completion")
+
+    def set_fixed_central_reference_mode(self, mode: str) -> None:
+        """Change the target source; latch at the next fresh central update if needed."""
+        self.validate_fixed_central_reference_mode(mode)
+        if mode == self._config.fixed_central_reference_mode:
+            return
+        self._config = replace(self._config, fixed_central_reference_mode=mode)
+        self._fixed_reference_enu_m = None
+        self._fixed_reference_heading_rad = None
+        self._fixed_reference_pending = (
+            self._started and mode != "off" and
+            (self._state is PidLandingState.HOLD_CENTRAL or
+             (self._state is PidLandingState.DESCEND_CENTRAL and
+              mode == "descend_central"))
+        )
+        self._alignment_stable_started_at = None
+        self._control_error = None
+        self._x_pid.reset()
+        self._y_pid.reset()
+        self._yaw_pid.reset()
+
     def update(
         self,
         now: float,
@@ -331,6 +371,24 @@ class PidLandingController:
         ):
             return self._fail(now, "vehicle disarmed while mission was active")
 
+        self._control_error = None
+        if self._fixed_reference_pending:
+            usable, reason = self._usable_dock(dock)
+            if not usable or dock.mode is not DockTargetMode.CENTRAL:
+                return self._handle_target_loss(
+                    now, vehicle, reason if not usable else "central tag required for fixed reference")
+            if not self._latch_fixed_reference(dock, vehicle):
+                return self._handle_target_loss(
+                    now, vehicle, "vehicle heading unavailable for fixed reference")
+            self._fixed_reference_pending = False
+            self._target_loss_started_at = None
+            # Latching and changing error source cannot satisfy an old alignment dwell.
+            self._alignment_stable_started_at = None
+            self._x_pid.reset()
+            self._y_pid.reset()
+            self._yaw_pid.reset()
+            return PidLandingDecision(self._state, _zero_body_command(),
+                                      reason="fixed central reference latched")
         # Select gains from a usable camera distance, not from the landing state.
         # Touchdown retains the last selection because its pose is latched.
         usable, _ = self._usable_dock(dock)
@@ -449,6 +507,8 @@ class PidLandingController:
         if dock.distance_m > self._config.central_transition_distance_m:
             self._enter_state(PidLandingState.DESCEND_OUTER, now)
         elif dock.mode is DockTargetMode.CENTRAL:
+            if not self._latch_fixed_reference_if_needed("descend_central", dock, vehicle):
+                return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
             self._enter_state(PidLandingState.DESCEND_CENTRAL, now)
         else:
             self._enter_state(PidLandingState.ACQUIRE_CENTRAL, now)
@@ -472,10 +532,13 @@ class PidLandingController:
         if self._distance_setpoint_m is None:
             self._distance_setpoint_m = dock.distance_m
             self._z_pid.reset()
+        control_dock = self._control_dock(dock, vehicle)
+        if control_dock is None:
+            return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
         return PidLandingDecision(
             self._state,
             self._visual_command(
-                now, dock, z_enabled=True,
+                now, control_dock, z_enabled=True,
                 vertical_limit_m_s=(
                     self._config.outer_descent_speed_m_s
                     if self._state is PidLandingState.DESCEND_OUTER
@@ -495,13 +558,16 @@ class PidLandingController:
                 now, vehicle, reason if not usable else "central tag required",
             )
         self._target_loss_started_at = None
+        control_dock = self._control_dock(dock, vehicle)
+        if control_dock is None:
+            return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
         if (dock.distance_m <= self._config.touchdown_commit_height_m
-                and self._alignment_is_stable(now, dock, (
+                and self._alignment_is_stable(now, control_dock, (
                     self._config.fine_horizontal_tolerance_m,
                     self._config.fine_yaw_tolerance_rad,
                 ))):
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
-            self._latch_touchdown_reference(dock, vehicle)
+            self._latch_touchdown_or_fixed_reference(dock, vehicle)
             return PidLandingDecision(self._state, _zero_body_command())
         return self._update_debug_hold(now, dock, vehicle)
 
@@ -522,6 +588,8 @@ class PidLandingController:
         central_is_stable = self._central_is_stable(now, dock)
         if dock.distance_m <= self._config.central_transition_distance_m:
             if central_is_stable:
+                if not self._latch_fixed_reference_if_needed("descend_central", dock, vehicle):
+                    return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
                 self._enter_state(PidLandingState.DESCEND_CENTRAL, now)
             else:
                 self._enter_state(PidLandingState.ACQUIRE_CENTRAL, now)
@@ -597,6 +665,8 @@ class PidLandingController:
         vehicle: VehicleObservation,
     ) -> PidLandingDecision:
         if self._central_is_stable(now, dock):
+            if not self._latch_fixed_reference_if_needed("descend_central", dock, vehicle):
+                return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
             self._enter_state(PidLandingState.DESCEND_CENTRAL, now)
             return PidLandingDecision(self._state, _zero_body_command())
         if now - self._state_started_at >= self._config.central_acquire_timeout_s:
@@ -625,9 +695,12 @@ class PidLandingController:
             return PidLandingDecision(self._state, _zero_body_command())
 
         self._central_loss_started_at = None
+        control_dock = self._control_dock(dock, vehicle)
+        if control_dock is None:
+            return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
         fine_alignment_stable = self._alignment_is_stable(
             now,
-            dock,
+            control_dock,
             (
                 self._config.fine_horizontal_tolerance_m,
                 self._config.fine_yaw_tolerance_rad,
@@ -641,6 +714,8 @@ class PidLandingController:
             if self._hold_at_state is PidLandingState.HOLD_CENTRAL:
                 # Latch the *measured* distance, not the moving descent setpoint.
                 # This is still pre-commit: retain vision and target-loss recovery.
+                if not self._latch_fixed_reference_if_needed("hold_central", dock, vehicle):
+                    return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
                 self._enter_state(PidLandingState.HOLD_CENTRAL, now)
                 self._distance_setpoint_m = dock.distance_m
                 self._z_pid.reset()
@@ -649,12 +724,12 @@ class PidLandingController:
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
             # The tag is about to fill the camera, so the last aligned
             # observation becomes the aperture reference for touchdown.
-            self._latch_touchdown_reference(dock, vehicle)
+            self._latch_touchdown_or_fixed_reference(dock, vehicle)
             return PidLandingDecision(self._state, _zero_body_command())
 
         self._advance_distance_setpoint(
             now,
-            dock,
+            control_dock,
             self._config.central_descent_speed_m_s,
             self._config.fine_horizontal_tolerance_m,
             self._config.fine_yaw_tolerance_rad,
@@ -663,7 +738,7 @@ class PidLandingController:
             self._state,
             self._visual_command(
                 now,
-                dock,
+                control_dock,
                 z_enabled=not self._descent_paused,
                 vertical_limit_m_s=self._config.central_descent_speed_m_s,
             ),
@@ -693,6 +768,55 @@ class PidLandingController:
             self._state,
             self._touchdown_descent_command(now, vehicle),
         )
+
+    def _latch_fixed_reference_if_needed(
+        self, stage: str, dock: DockObservation, vehicle: VehicleObservation,
+    ) -> bool:
+        if self._config.fixed_central_reference_mode != stage:
+            return True
+        return self._latch_fixed_reference(dock, vehicle)
+
+    def _latch_fixed_reference(
+        self, dock: DockObservation, vehicle: VehicleObservation,
+    ) -> bool:
+        heading = self._finite_heading(vehicle)
+        if heading is None:
+            return False
+        east, north, _ = self._finite_position(vehicle)
+        self._fixed_reference_enu_m = (
+            east + dock.forward_m * math.sin(heading) - dock.left_m * math.cos(heading),
+            north + dock.forward_m * math.cos(heading) + dock.left_m * math.sin(heading),
+        )
+        self._fixed_reference_heading_rad = heading - self._wrap_yaw(dock.yaw_error_rad)
+        return True
+
+    def _control_dock(
+        self, dock: DockObservation, vehicle: VehicleObservation,
+    ) -> Optional[DockObservation]:
+        reference = self._fixed_reference_enu_m
+        if reference is None:
+            return dock
+        heading = self._finite_heading(vehicle)
+        if heading is None:
+            return None
+        east, north, _ = self._finite_position(vehicle)
+        error_east = reference[0] - east
+        error_north = reference[1] - north
+        return replace(
+            dock,
+            forward_m=error_east * math.sin(heading) + error_north * math.cos(heading),
+            left_m=-error_east * math.cos(heading) + error_north * math.sin(heading),
+            yaw_error_rad=self._wrap_yaw(heading - self._fixed_reference_heading_rad),
+        )
+
+    def _latch_touchdown_or_fixed_reference(
+        self, dock: DockObservation, vehicle: VehicleObservation,
+    ) -> None:
+        if self._fixed_reference_enu_m is not None:
+            self._touchdown_reference_enu_m = self._fixed_reference_enu_m
+            self._touchdown_reference_heading_rad = self._fixed_reference_heading_rad
+        else:
+            self._latch_touchdown_reference(dock, vehicle)
 
     def _latch_touchdown_reference(
         self, dock: DockObservation, vehicle: VehicleObservation,
@@ -892,6 +1016,8 @@ class PidLandingController:
         z_enabled: bool,
         vertical_limit_m_s: Optional[float] = None,
     ) -> VelocityCommand:
+        self._control_error = {"x": dock.forward_m, "y": dock.left_m,
+                               "yaw": self._wrap_yaw(dock.yaw_error_rad)}
         velocity_x = self._x_pid.update(dock.forward_m, now)
         velocity_y = self._y_pid.update(dock.left_m, now)
         yaw_rate = self._yaw_pid.update(
@@ -1022,6 +1148,11 @@ class PidLandingController:
         )
 
     def _enter_state(self, state: PidLandingState, now: float) -> None:
+        if state not in (PidLandingState.DESCEND_CENTRAL, PidLandingState.HOLD_CENTRAL,
+                         PidLandingState.TOUCHDOWN_APPROACH, PidLandingState.DISARM):
+            self._fixed_reference_enu_m = None
+            self._fixed_reference_heading_rad = None
+            self._fixed_reference_pending = False
         self._state = state
         self._state_started_at = now
         self._alignment_stable_started_at = None
@@ -1168,6 +1299,12 @@ class PidLandingController:
     def diagnostics(self) -> dict:
         return {
             "descent_paused": self._descent_paused,
+            "fixed_central_reference_mode": self._config.fixed_central_reference_mode,
+            "fixed_reference_active": self._fixed_reference_enu_m is not None,
+            "fixed_reference_pending": self._fixed_reference_pending,
+            "fixed_reference_enu_m": self._fixed_reference_enu_m,
+            "fixed_reference_heading_rad": self._fixed_reference_heading_rad,
+            "control_error": self._control_error,
             "pid_hold_at_state": (
                 self._hold_at_state.name if self._hold_at_state is not None else "none"
             ),

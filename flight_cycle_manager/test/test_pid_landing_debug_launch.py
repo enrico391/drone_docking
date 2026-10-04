@@ -33,7 +33,7 @@ def test_landing_wrapper_includes_unified_launch(monkeypatch):
     assert arguments["operation_mode"] == "pid_landing_debug"
     assert declarations["landing_attempt_log_enabled"].default_value[0].text == "true"
     for name in ("landing_attempt_log_enabled", "landing_attempt_log_directory",
-                 "pid_hold_at_state", "start_pid_tuner", "publish_camera",
+                 "pid_hold_at_state", "pid_fixed_central_reference_mode", "start_pid_tuner", "publish_camera",
                  "camera_info_url"):
         assert name in declarations
         assert name in arguments

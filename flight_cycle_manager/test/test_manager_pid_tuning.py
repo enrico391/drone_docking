@@ -110,6 +110,33 @@ def test_live_hold_rejects_updates_after_touchdown_commitment(monkeypatch):
         manager.close()
 
 
+def test_live_fixed_reference_changes_active_backend_and_future_attempts(monkeypatch):
+    manager, vehicle = manager_at_landing_boundary(monkeypatch)
+    try:
+        backend = manager.backend
+        assert manager.set_parameters_atomically([
+            Parameter("pid_fixed_central_reference_mode", value="descend_central"),
+        ]).successful
+        assert backend.diagnostics()["fixed_central_reference_mode"] == "descend_central"
+        assert manager._build_pid_landing_config().fixed_central_reference_mode == "descend_central"
+        rejected = manager.set_parameters_atomically([
+            Parameter("pid_fixed_central_reference_mode", value="invalid"),
+            Parameter("pid_x_kp", value=3.0),
+        ])
+        assert not rejected.successful
+        assert manager.get_parameter("pid_fixed_central_reference_mode").value == "descend_central"
+        assert backend.diagnostics()["fixed_central_reference_mode"] == "descend_central"
+        backend._controller._state = PidLandingState.TOUCHDOWN_APPROACH
+        rejected = manager.set_parameters_atomically([
+            Parameter("pid_fixed_central_reference_mode", value="off"),
+        ])
+        assert not rejected.successful
+        assert "touchdown" in rejected.reason
+        assert backend.diagnostics()["fixed_central_reference_mode"] == "descend_central"
+    finally:
+        manager.close()
+
+
 def test_pid_diagnostics_match_command_and_body_velocity(monkeypatch):
     from dataclasses import replace
     manager, vehicle = manager_at_landing_boundary(monkeypatch)

@@ -184,6 +184,13 @@ class FlightCycleManager(Node):
         if self._operation_mode == "pid_align_debug" and hold_name not in {"NONE", "PID_ALIGN"}:
             self.destroy_node()
             raise ValueError("pid_align_debug can only hold at PID_ALIGN")
+        fixed_mode = str(self.get_parameter("pid_fixed_central_reference_mode").value).strip().lower()
+        if fixed_mode not in ("off", "descend_central", "hold_central"):
+            self.destroy_node()
+            raise ValueError("invalid pid_fixed_central_reference_mode")
+        if fixed_mode != "off" and self._landing_backend != "pid":
+            self.destroy_node()
+            raise ValueError("fixed central reference requires landing_backend=pid")
         self._pid_hold_at_state = (
             None if hold_name == "NONE" else PidLandingState[hold_name]
         )
@@ -362,6 +369,7 @@ class FlightCycleManager(Node):
         defaults = {
             "operation_mode": "flight_cycle",
             "pid_hold_at_state": "none",
+            "pid_fixed_central_reference_mode": "off",
             "pid_align_auto_start": False,
             # Placeholder until the alignment controller captures its first dock pose.
             "pid_align_distance_setpoint_m": 0.0,
@@ -2035,6 +2043,9 @@ class FlightCycleManager(Node):
             target_loss_grace_s=self._positive_parameter(
                 "pid_target_loss_grace_s"
             ),
+            fixed_central_reference_mode=str(
+                self.get_parameter("pid_fixed_central_reference_mode").value
+            ).strip().lower(),
         )
 
     def _build_distance_pid_configs(
@@ -2093,12 +2104,24 @@ class FlightCycleManager(Node):
                    for axis in ("x", "y", "z", "yaw")
                    for gain in ("kp", "ki", "kd"))
         }
+        has_fixed_mode_update = "pid_fixed_central_reference_mode" in updates
         has_hold_update = "pid_hold_at_state" in updates
-        if not tuning_updates and not schedule_updates and not has_distance_update and not has_hold_update:
+        if not (tuning_updates or schedule_updates or has_distance_update
+                or has_hold_update or has_fixed_mode_update):
             return SetParametersResult(successful=True)
         try:
             backend = self._landing_controller
             hold_state = None
+            fixed_mode = None
+            if has_fixed_mode_update:
+                fixed_mode = updates["pid_fixed_central_reference_mode"]
+                if not isinstance(fixed_mode, str) or fixed_mode not in (
+                        "off", "descend_central", "hold_central"):
+                    raise ValueError("invalid pid_fixed_central_reference_mode")
+                if self._landing_backend != "pid":
+                    raise ValueError("fixed central reference requires landing_backend=pid")
+                if self._state is CycleState.LANDING_BACKEND and backend is not None:
+                    backend.validate_fixed_central_reference_mode(fixed_mode)
             if has_hold_update:
                 hold_value = updates["pid_hold_at_state"]
                 if not isinstance(hold_value, str):
@@ -2133,6 +2156,8 @@ class FlightCycleManager(Node):
                     if self._state is CycleState.LANDING_BACKEND and backend is not None:
                         backend.set_hold_at_state(hold_state)
                     self._pid_hold_at_state = hold_state
+                if has_fixed_mode_update and self._state is CycleState.LANDING_BACKEND and backend is not None:
+                    backend.set_fixed_central_reference_mode(fixed_mode)
                 return SetParametersResult(successful=True)
             for name, value in tuning_updates.items():
                 numeric = float(value)
@@ -2166,6 +2191,8 @@ class FlightCycleManager(Node):
                 if self._state is CycleState.LANDING_BACKEND and backend is not None:
                     backend.set_hold_at_state(hold_state)
                 self._pid_hold_at_state = hold_state
+            if has_fixed_mode_update and self._state is CycleState.LANDING_BACKEND and backend is not None:
+                backend.set_fixed_central_reference_mode(fixed_mode)
         except (TypeError, ValueError) as error:
             return SetParametersResult(successful=False, reason=str(error))
         return SetParametersResult(successful=True)
@@ -2211,11 +2238,13 @@ class FlightCycleManager(Node):
         else:
             data["measured_velocity_body_flu"] = None
         if dock is not None:
+            control_error = data.get("control_error") or {}
             data["error"] = {
-                "x": dock.forward_m, "y": dock.left_m,
+                "x": control_error.get("x", dock.forward_m),
+                "y": control_error.get("y", dock.left_m),
                 "z": (data.get("distance_setpoint_m") - dock.distance_m)
                 if data.get("distance_setpoint_m") is not None else None,
-                "yaw": dock.yaw_error_rad,
+                "yaw": control_error.get("yaw", dock.yaw_error_rad),
             }
             data["dock_age_s"] = max(0.0, now - dock.received_at)
         message = String()
