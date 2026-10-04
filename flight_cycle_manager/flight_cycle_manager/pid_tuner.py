@@ -159,6 +159,7 @@ button,input,select{background:#111827;color:#fff}button{cursor:pointer}
 .badge{padding:5px 9px;border-radius:12px;background:#374151}
 .bad{background:#b91c1c}.good{background:#047857}
 canvas{width:100%;height:230px;background:#0b1020;border-radius:6px}
+#plot{height:auto;aspect-ratio:720/270;display:block;margin-top:8px}
 #position{height:auto;aspect-ratio:820/430;display:block}
 .readings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}
 .reading{min-width:0;padding:9px;background:#111827;border:1px solid #374151;border-radius:6px}
@@ -204,15 +205,32 @@ small{color:#9ca3af}#message{min-height:20px}
 <div id="readings" class="readings" aria-live="off"></div>
 <small>X forward · Y left · Z dock-distance setpoint minus measured distance (not height) · Yaw counter-clockwise.</small>
 </div>
-<div class="card"><h3>Selected-axis history</h3><canvas id="plot" width="720" height="230"></canvas>
-<small>Tracking error (blue) · command (orange), auto-scaled; yaw in radians and rad/s.</small></div>
+<div class="card"><h3>Selected-axis history</h3>
+<div class="row"><label>Error range ± (<span id="error-unit">m</span>)
+<input id="error-scale" type="number" min="0.01" max="1000" step="any" value="2"></label>
+<label>Command range ± (<span id="command-unit">m/s</span>)
+<input id="command-scale" type="number" min="0.01" max="1000" step="any" value="1"></label>
+<button id="reset-history-scale">Reset axis scales</button></div>
+<p id="history-scale-message" role="status"></p>
+<canvas id="plot" width="720" height="270" role="img" aria-label="Fixed-scale tracking error and command history"></canvas>
+<small>Tracking error (blue, left scale) · command (orange, right scale). Scales stay fixed until changed; out-of-range values are clipped and flagged. Yaw in degrees and degrees/s.</small></div>
 <button id="download">Download YAML</button>
 </div><div class="dashboard-right">
 <div class="card"><h3>Dock-relative error surface (estimated)</h3>
+<div class="row"><label>Surface range ± (m)
+<input id="surface-scale" type="number" min="0.01" max="1000" step="any" value="2"></label>
+<button id="reset-surface-scale">Reset surface scale</button></div>
+<p id="surface-scale-message" role="status"></p>
 <canvas id="position" width="820" height="430" role="img" aria-label="Estimated 3D wireframe of dock-relative errors with live error marker"></canvas>
-<small>X forward · Y left · Z distance-setpoint error (not height). Colored wireframe interpolates only between nearby sampled errors; blank areas are unknown. Marker is the current error, not an absolute drone position. Yaw is shown by the arrow.</small>
+<small>X forward · Y left · Z distance-setpoint error (not height). Adjustable fixed scale; out-of-range positions are clipped and flagged. Colored wireframe interpolates only between nearby sampled errors; blank areas are unknown. Marker is the current error, not an absolute drone position. Yaw is shown by the arrow.</small>
 </div></div></div></main><script>
 const names=['x','y','z','yaw'], fields=['kp','ki','kd'];
+const plotRanges={x:{error:2,command:1,unit:'m',commandUnit:'m/s'},
+  y:{error:2,command:1,unit:'m',commandUnit:'m/s'},
+  z:{error:3,command:1,unit:'m',commandUnit:'m/s'},
+  yaw:{error:180,command:60,unit:'°',commandUnit:'°/s'}};
+const defaultPlotRanges=JSON.parse(JSON.stringify(plotRanges));
+let surfaceScale=2; // Metres per axis; do not zoom as errors improve.
 let axis='x', latest=null, dirty=false, previous=null, holdDirty=false;
 const history={}; names.forEach(a=>history[a]={e:[],c:[]});
 const surfaceSamples=[];
@@ -229,8 +247,50 @@ names.forEach(a=>{
   b.className='axis'; b.onclick=()=>select(a); b.id='axis-'+a; axes.appendChild(b);
 });
 fields.forEach(n=>document.querySelector('#'+n).oninput=()=>dirty=true);
+function showScaleControls(){
+  const range=plotRanges[axis];
+  document.querySelector('#error-scale').value=range.error;
+  document.querySelector('#command-scale').value=range.command;
+  document.querySelector('#error-unit').textContent=range.unit;
+  document.querySelector('#command-unit').textContent=range.commandUnit;
+  document.querySelector('#history-scale-message').textContent='';
+}
+function setScale(input,limit,message,apply){
+  const raw=input.value.trim(),value=Number(raw);
+  if(!raw || !Number.isFinite(value) || value<0.01 || value>1000){
+    input.value=limit;
+    message.textContent='Scale must be between 0.01 and 1000.';
+    return;
+  }
+  apply(value);message.textContent='';
+}
+document.querySelector('#error-scale').onchange=()=>{
+  const input=document.querySelector('#error-scale');
+  setScale(input,plotRanges[axis].error,document.querySelector('#history-scale-message'),
+    value=>{plotRanges[axis].error=value;draw()});
+};
+document.querySelector('#command-scale').onchange=()=>{
+  const input=document.querySelector('#command-scale');
+  setScale(input,plotRanges[axis].command,document.querySelector('#history-scale-message'),
+    value=>{plotRanges[axis].command=value;draw()});
+};
+document.querySelector('#surface-scale').onchange=()=>{
+  const input=document.querySelector('#surface-scale');
+  setScale(input,surfaceScale,document.querySelector('#surface-scale-message'),
+    value=>{surfaceScale=value;drawPosition()});
+};
+document.querySelector('#reset-history-scale').onclick=()=>{
+  plotRanges[axis].error=defaultPlotRanges[axis].error;
+  plotRanges[axis].command=defaultPlotRanges[axis].command;
+  showScaleControls();draw();
+};
+document.querySelector('#reset-surface-scale').onclick=()=>{
+  surfaceScale=2;document.querySelector('#surface-scale').value=surfaceScale;
+  document.querySelector('#surface-scale-message').textContent='';drawPosition();
+};
 function select(a){
   axis=a; dirty=false;
+  showScaleControls();draw();
   document.querySelector('#distance-card').hidden=a!=='z';
   document.querySelectorAll('.axis').forEach(
     b=>b.classList.toggle('on',b.id==='axis-'+a));
@@ -317,7 +377,8 @@ function recordSurfaceSample(){
 function surfaceHeight(x,y,cell){
   if(surfaceSamples.length<3)return null;
   const nearby=surfaceSamples.map(p=>({p,d:Math.hypot(p.x-x,p.y-y)}))
-    .filter(v=>v.d<=cell*4).sort((a,b)=>a.d-b.d).slice(0,7);
+    .filter(v=>v.d<=cell*4 && [v.p.x,v.p.y,v.p.z].every(n=>Math.abs(n)<=surfaceScale))
+    .sort((a,b)=>a.d-b.d).slice(0,7);
   let best=null,bestArea=Infinity;
   for(let a=0;a<nearby.length;a++)for(let b=a+1;b<nearby.length;b++)
     for(let c=b+1;c<nearby.length;c++){
@@ -353,10 +414,11 @@ function drawPosition(){
       (a==='yaw'?(error.yaw*180/Math.PI).toFixed(1)+'°':
         (a==='z'&&!hasZ?'—':error[a].toFixed(2)+' m')):'—';
   });
-  const scale=Math.max(1,...surfaceSamples.flatMap(p=>[p.x,p.y,p.z].map(Math.abs)),
-    ...(valid?[error.x,error.y,hasZ?error.z:0].map(Math.abs):[]))*1.3;
-  function project(x,y,z){return [origin[0]+(x-y)*70/scale,
-    origin[1]+(x+y)*32/scale-z*80/scale]}
+  const scale=surfaceScale;
+  // Keep the current marker and surface within the fixed reference box.
+  const clamp=v=>Math.max(-scale,Math.min(scale,v));
+  function project(x,y,z){x=clamp(x);y=clamp(y);z=clamp(z);
+    return [origin[0]+(x-y)*70/scale,origin[1]+(x+y)*32/scale-z*80/scale]}
   function line(a,b,color,width=2,dash=[]){
     g.beginPath();g.setLineDash(dash);g.moveTo(...a);g.lineTo(...b);
     g.strokeStyle=color;g.lineWidth=width;g.stroke();g.setLineDash([]);
@@ -409,6 +471,10 @@ function drawPosition(){
   }
   const z=hasZ?error.z:0;
   if(!hasZ){g.fillStyle=colors.z;g.fillText('Z error unavailable (no setpoint); marker at Z=0 for display',12,28)}
+  if([error.x,error.y,z].some(v=>Math.abs(v)>scale)){
+    g.fillStyle='#fca5a5';g.font='13px system-ui';
+    g.fillText('Position outside ±'+scale+' m view (marker clipped)',12,hasZ?28:46);
+  }
   const point=project(error.x,error.y,z);
   line(origin,point,'#e5e7eb',2,[5,4]);
   for(const a of ['x','y','z']){
@@ -434,15 +500,40 @@ function drawPosition(){
 }
 function draw(){
   let c=document.querySelector('#plot'),g=c.getContext('2d'),h=history[axis];
-  let all=h.e.concat(h.c),scale=Math.max(.001,...all.map(Math.abs));
-  g.clearRect(0,0,c.width,c.height);g.strokeStyle='#475569';g.beginPath();
-  g.moveTo(0,c.height/2);g.lineTo(c.width,c.height/2);g.stroke();
-  [[h.e,'#60a5fa'],[h.c,'#fb923c']].forEach(([v,col])=>{
-    g.strokeStyle=col;g.beginPath();v.forEach((x,i)=>{
-      let px=i*c.width/119,py=c.height/2-x/scale*c.height*.45;
+  const range=plotRanges[axis],left=72,right=c.width-90,top=35,bottom=c.height-32;
+  const yFor=(value,limit)=>bottom-(value/limit+1)*(bottom-top)/2;
+  g.clearRect(0,0,c.width,c.height);
+  g.font='12px system-ui';g.textAlign='left';g.fillStyle='#60a5fa';
+  g.fillText('error ('+range.unit+')',left,18);
+  g.fillStyle='#fb923c';g.fillText('command ('+range.commandUnit+')',right-95,18);
+  for(const fraction of [-1,-.5,0,.5,1]){
+    const y=yFor(fraction,1);
+    g.strokeStyle=fraction===0?'#94a3b8':'#334155';g.lineWidth=fraction===0?2:1;
+    g.beginPath();g.moveTo(left,y);g.lineTo(right,y);g.stroke();
+    g.fillStyle='#93c5fd';g.textAlign='right';
+    g.fillText((fraction*range.error).toFixed(axis==='yaw'?0:1),left-8,y+4);
+    g.fillStyle='#fdba74';g.textAlign='left';
+    g.fillText((fraction*range.command).toFixed(axis==='yaw'?0:1),right+8,y+4);
+  }
+  g.fillStyle='#9ca3af';g.textAlign='left';
+  g.fillText('oldest',left,bottom+20);g.textAlign='right';g.fillText('latest',right,bottom+20);
+  g.save();g.beginPath();g.rect(left,top,right-left,bottom-top);g.clip();
+  [[h.e,'#60a5fa',range.error],[h.c,'#fb923c',range.command]].forEach(([values,color,limit])=>{
+    g.strokeStyle=color;g.lineWidth=2;g.beginPath();
+    values.forEach((value,i)=>{
+      const displayed=axis==='yaw'?value*180/Math.PI:value;
+      const px=left+i*(right-left)/119,py=yFor(displayed,limit);
       i?g.lineTo(px,py):g.moveTo(px,py);
     });g.stroke();
-  });
+  });g.restore();
+  const errorClipped=h.e.some(v=>Math.abs(axis==='yaw'?v*180/Math.PI:v)>range.error);
+  const commandClipped=h.c.some(v=>Math.abs(axis==='yaw'?v*180/Math.PI:v)>range.command);
+  if(errorClipped||commandClipped){
+    g.fillStyle='#fca5a5';g.textAlign='right';
+    g.fillText((errorClipped?'error':'')+(errorClipped&&commandClipped?' / ':'')+
+      (commandClipped?'command':'')+' outside scale',right,top-9);
+  }
+  g.textAlign='left';
 }
 async function poll(){
   try{

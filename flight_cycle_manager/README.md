@@ -366,6 +366,18 @@ unavailable.
 The display clears stale or missing dock data rather than showing an old
 observation as live.
 
+The selected-axis history uses zero-centred ranges so that a shrinking error
+does not appear to stay the same size as gains change. Default error ranges
+are X/Y ±2 m, Z ±3 m and yaw ±180°. The command has a separate scale
+(X/Y/Z ±1 m/s, yaw ±60°/s), labelled on the right. Edit the **Error range**
+and **Command range** above the plot to set positive half-ranges for the
+selected axis; switching tabs preserves each axis's scale. **Reset axis scales**
+restores that axis's defaults. Set the **Surface range** above the 3D view to
+change its shared X/Y/Z half-range (default ±2 m); its reset button restores
+the default. All scales remain fixed until manually changed or the page is
+reloaded. Values beyond the ranges are clipped and flagged. These display
+settings do not change the PID gains.
+
 The same parameters can be changed from a terminal, for example:
 
 ```bash

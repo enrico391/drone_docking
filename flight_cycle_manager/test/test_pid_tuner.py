@@ -177,8 +177,47 @@ def test_error_surface_only_interpolates_near_fresh_observations():
     assert 'surfaceSetpoint!==setpoint' in DASHBOARD_HTML
     assert 'lastSurfaceTime===latest.time_s' in DASHBOARD_HTML
     assert 'function surfaceHeight(x,y,cell)' in DASHBOARD_HTML
-    assert '.filter(v=>v.d<=cell*4)' in DASHBOARD_HTML
+    assert 'v.d<=cell*4 && [v.p.x,v.p.y,v.p.z].every(n=>Math.abs(n)<=surfaceScale)' in DASHBOARD_HTML
     assert 'if(u < -1e-8 || v < -1e-8 || t < -1e-8)continue;' in DASHBOARD_HTML
     assert 'if(corners.every(p=>p.z!==null))' in DASHBOARD_HTML
     assert 'recordSurfaceSample();drawPosition();' in DASHBOARD_HTML
     assert 'blank areas are unknown' in DASHBOARD_HTML
+
+
+def test_history_has_fixed_separate_error_and_command_scales():
+    for axis, error, command in (("x", 2, 1), ("y", 2, 1),
+                                 ("z", 3, 1), ("yaw", 180, 60)):
+        assert f"{axis}:{{error:{error},command:{command}," in DASHBOARD_HTML
+    assert 'const range=plotRanges[axis]' in DASHBOARD_HTML
+    assert '[[h.e,\'#60a5fa\',range.error],[h.c,\'#fb923c\',range.command]]' in DASHBOARD_HTML
+    assert "axis==='yaw'?value*180/Math.PI:value" in DASHBOARD_HTML
+    assert "g.rect(left,top,right-left,bottom-top);g.clip()" in DASHBOARD_HTML
+    assert "' outside scale'" in DASHBOARD_HTML
+    assert 'error (' in DASHBOARD_HTML and 'command (' in DASHBOARD_HTML
+    assert 'Math.max(.001,...all.map(Math.abs))' not in DASHBOARD_HTML
+
+
+def test_surface_uses_fixed_scale_and_flags_out_of_range_error():
+    assert 'let surfaceScale=2' in DASHBOARD_HTML
+    assert 'const scale=surfaceScale' in DASHBOARD_HTML
+    assert "'Position outside ±'+scale+' m view (marker clipped)'" in DASHBOARD_HTML
+    assert 'const clamp=v=>Math.max(-scale,Math.min(scale,v))' in DASHBOARD_HTML
+
+
+def test_dashboard_allows_independent_manual_axis_and_surface_scales():
+    for control in ('error-scale', 'command-scale', 'surface-scale',
+                    'reset-history-scale', 'reset-surface-scale'):
+        assert f'id="{control}"' in DASHBOARD_HTML
+    assert 'const defaultPlotRanges=JSON.parse(JSON.stringify(plotRanges))' in DASHBOARD_HTML
+    assert 'showScaleControls();draw();' in DASHBOARD_HTML
+    assert 'plotRanges[axis].error=value;draw()' in DASHBOARD_HTML
+    assert 'plotRanges[axis].command=value;draw()' in DASHBOARD_HTML
+    assert 'surfaceScale=value;drawPosition()' in DASHBOARD_HTML
+    assert 'plotRanges[axis].error=defaultPlotRanges[axis].error' in DASHBOARD_HTML
+    assert 'plotRanges[axis].command=defaultPlotRanges[axis].command' in DASHBOARD_HTML
+    assert "surfaceScale=2;document.querySelector('#surface-scale').value=surfaceScale" in DASHBOARD_HTML
+    assert 'const raw=input.value.trim(),value=Number(raw)' in DASHBOARD_HTML
+    assert '!raw || !Number.isFinite(value) || value<0.01 || value>1000' in DASHBOARD_HTML
+    assert "input.value=limit;" in DASHBOARD_HTML
+    assert "document.querySelector('#error-unit').textContent=range.unit" in DASHBOARD_HTML
+    assert "document.querySelector('#command-unit').textContent=range.commandUnit" in DASHBOARD_HTML
