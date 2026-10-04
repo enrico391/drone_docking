@@ -67,6 +67,7 @@ EXPECTED_COMMON_PARAMETERS = {
     "landing_touchdown_warn_after_s": 30.0,
     "landing_disarm_warn_after_s": 20.0,
     "landing_attempt_log_enabled": False,
+    "touchdown_trace_enabled": False,
     "landing_attempt_log_directory": (
         "~/.ros/flight_cycle_manager/landing_attempts"
     ),
@@ -242,6 +243,7 @@ def test_launch_declares_operational_arguments(monkeypatch):
 
     assert {
         "landing_backend",
+        "touchdown_trace_enabled",
         "operation_mode",
         "pid_hold_at_state",
         "pid_fixed_central_reference_mode",

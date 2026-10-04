@@ -315,6 +315,36 @@ ros2 launch flight_cycle_manager pid_landing_debug.launch.py \
   landing_attempt_log_enabled:=false
 ```
 
+For per-update measurements through final central descent and touchdown, enable
+`touchdown_trace_enabled:=true` on either PID launch. This writes a separate
+`touchdown_*.jsonl` in `landing_attempt_log_directory`, beginning at
+`DESCEND_CENTRAL` (including the last visible tag and the commitment sample).
+Each flushed JSON line contains monotonic and wall time, actual position and
+velocity in **ENU**, FC heading in **NED**, visible dock offset in **body FLU**,
+frozen touchdown target in **ENU**, the actual **body-FLU velocity** and yaw-rate
+command, and telemetry ages. Missing observations/commands are JSON `null`.
+`position_enu_m` and `velocity_enu_m_s` are the flight controller's
+`LOCAL_POSITION_NED` estimate converted to ENU, **not** independent position
+measurements. `horizontal_speed_m_s` is the norm of the estimated East/North
+velocity. `frozen_target_enu_m` is `[east, north]`;
+`position_error_to_frozen_target_m` is `[target_east - position_east,
+target_north - position_north]` in metres, and `frozen_error_norm_m` is its
+horizontal norm (both are `null` before commitment).
+`command_body_flu_m_s` is `[forward, left, up]` in m/s.
+`END` records identify completion, failure, cancellation, or shutdown. For
+example:
+
+```bash
+ros2 launch flight_cycle_manager pid_landing_debug.launch.py \
+  touchdown_trace_enabled:=true
+```
+
+The trace is optional because per-update disk flushes can incur latency.
+Desired roll/pitch, FC-internal position/velocity targets and barometer data
+are **not** provided by the docking controller: download the corresponding
+ArduPilot onboard flight log to compare these with the trace. The checked-in
+real-drone parameters do not configure a rangefinder (`RNGFND1_TYPE=0`).
+
 ## Alignment-only PID tuning
 
 To switch an already-airborne vehicle to `GUIDED` and begin alignment as soon

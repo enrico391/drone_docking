@@ -86,6 +86,9 @@ def _launch_setup(
             "landing_attempt_log_enabled": ParameterValue(
                 LaunchConfiguration("landing_attempt_log_enabled"), value_type=bool,
             ),
+            "touchdown_trace_enabled": ParameterValue(
+                LaunchConfiguration("touchdown_trace_enabled"), value_type=bool,
+            ),
             "landing_attempt_log_directory": LaunchConfiguration("landing_attempt_log_directory"),
             "simulation_mode": ParameterValue(
                 LaunchConfiguration("simulation_mode"),
@@ -168,6 +171,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("pid_align_auto_start", default_value="false", choices=["true", "false"]),
             DeclareLaunchArgument("landing_attempt_log_enabled", default_value="false", choices=["true", "false"]),
+            DeclareLaunchArgument("touchdown_trace_enabled", default_value="true", choices=["true", "false"]),
             DeclareLaunchArgument("landing_attempt_log_directory", default_value="~/.ros/flight_cycle_manager/landing_attempts"),
             DeclareLaunchArgument(
                 "start_pid_tuner",

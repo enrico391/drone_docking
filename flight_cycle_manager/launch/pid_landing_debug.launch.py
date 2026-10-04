@@ -18,6 +18,7 @@ def generate_launch_description() -> LaunchDescription:
         "mavlink_connection": "tcp:127.0.0.1:5760",
         "mavlink_baud": "921600",
         "landing_attempt_log_enabled": "true",
+        "touchdown_trace_enabled": "false",
         "landing_attempt_log_directory": "~/.ros/flight_cycle_manager/landing_attempts",
         "start_pid_tuner": "false",
         "pid_hold_at_state": "none",

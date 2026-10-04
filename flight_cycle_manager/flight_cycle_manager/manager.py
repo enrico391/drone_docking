@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import json
 import time
+from datetime import datetime
 from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import Any, Mapping, Optional
@@ -37,6 +38,7 @@ from .landing_target import (
     measurement_time_usec,
 )
 from .landing_attempt_log import LandingAttemptLog
+from .touchdown_trace import TouchdownTrace
 from .mission_contract import (
     MissionContract,
     MissionContractError,
@@ -311,6 +313,11 @@ class FlightCycleManager(Node):
             ),
             warn=self.get_logger().warning,
         )
+        self._touchdown_trace = TouchdownTrace(
+            enabled=bool(self.get_parameter("touchdown_trace_enabled").value),
+            directory=str(self.get_parameter("landing_attempt_log_directory").value),
+            warn=self.get_logger().warning,
+        )
         self._last_landing_debug_event: Optional[tuple[object, ...]] = None
         self._closed = False
 
@@ -411,6 +418,7 @@ class FlightCycleManager(Node):
             "landing_touchdown_warn_after_s": 30.0,
             "landing_disarm_warn_after_s": 20.0,
             "landing_attempt_log_enabled": False,
+            "touchdown_trace_enabled": False,
             "landing_attempt_log_directory": (
                 "~/.ros/flight_cycle_manager/landing_attempts"
             ),
@@ -775,6 +783,11 @@ class FlightCycleManager(Node):
         self._finish_landing_attempt_log(
             "SHUTDOWN", self._state.name, "manager closed during landing attempt"
         )
+        try:
+            self._touchdown_trace.finish("SHUTDOWN", "manager closed during landing attempt")
+        except Exception as error:
+            self.get_logger().warning(f"Could not finish touchdown trace: {error}")
+            self._touchdown_trace.disable()
         self._timer.cancel()
         if self._state in {CycleState.PILOT_OVERRIDE, CycleState.LINK_LOSS}:
             self._vehicle.close_without_output()
@@ -1412,6 +1425,7 @@ class FlightCycleManager(Node):
 
             self._safe_record_landing_backend_decision(decision, now)
             self._publish_pid_debug(now, dock, vehicle, decision)
+            self._record_touchdown_sample(now, dock, vehicle, decision)
 
             self.get_logger().info(
                 f"Landing backend update: {decision}"
@@ -2251,6 +2265,72 @@ class FlightCycleManager(Node):
         message.data = json.dumps(data, separators=(",", ":"), allow_nan=False)
         self._pid_debug_publisher.publish(message)
 
+    def _record_touchdown_sample(self, now: float, dock: Any, vehicle: Any,
+                                 decision: Any) -> None:
+        """Record only final PID stages; recording errors cannot interrupt guidance."""
+        try:
+            self._write_touchdown_sample(now, dock, vehicle, decision)
+        except Exception as error:
+            self.get_logger().warning(f"Touchdown trace sample skipped: {error}")
+            self._touchdown_trace.disable()
+
+    def _write_touchdown_sample(self, now: float, dock: Any, vehicle: Any,
+                                decision: Any) -> None:
+        if not isinstance(self._landing_controller, PidLandingBackend):
+            return
+        if (decision.substate in ("DESCEND_CENTRAL", "HOLD_CENTRAL", "TOUCHDOWN_APPROACH")
+                and not self._touchdown_trace.active):
+            self._touchdown_trace.start()
+        if not self._touchdown_trace.active:
+            return
+        diagnostics = self._landing_controller.diagnostics()
+        command = decision.velocity
+        frozen_target = diagnostics["touchdown_reference_enu_m"]
+        position_error_to_frozen_target = (
+            [frozen_target[axis] - vehicle.position_enu_m[axis] for axis in (0, 1)]
+            if frozen_target is not None else None
+        )
+        horizontal_speed_m_s = math.hypot(
+            vehicle.velocity_enu_m_s[0],
+            vehicle.velocity_enu_m_s[1],
+        )
+        frozen_error_norm_m = (
+            math.hypot(
+                position_error_to_frozen_target[0],
+                position_error_to_frozen_target[1],
+            )
+            if position_error_to_frozen_target is not None
+            else None
+        )
+        data = {
+            "event": "SAMPLE", "time_monotonic_s": now,
+            "wall_time": datetime.now().astimezone().isoformat(),
+            "state": decision.substate,
+            "position_enu_m": list(vehicle.position_enu_m),
+            "velocity_enu_m_s": list(vehicle.velocity_enu_m_s),
+            "horizontal_speed_m_s": horizontal_speed_m_s,
+            "heading_ned_rad": vehicle.heading_rad,
+            "position_age_s": max(0.0, now - self._vehicle.state.position_at),
+            "dock_mode": dock.mode.name if dock is not None else None,
+            "dock_offset_body_flu_m": [dock.forward_m, dock.left_m] if dock is not None else None,
+            "dock_distance_m": dock.distance_m if dock is not None else None,
+            "dock_age_s": max(0.0, now - dock.received_at) if dock is not None else None,
+            "last_dock_pose_age_s": (max(0.0, now - self._dock_pose_received_at)
+                                     if self._dock_pose is not None else None),
+            "last_dock_mode": self._dock_mode,
+            "frozen_target_enu_m": frozen_target,
+            "position_error_to_frozen_target_m": position_error_to_frozen_target,
+            "frozen_error_norm_m": frozen_error_norm_m,
+            "frozen_heading_ned_rad": diagnostics["touchdown_reference_heading_rad"],
+            "fixed_reference_enu_m": diagnostics["fixed_reference_enu_m"],
+            "command_frame": command.frame.name if command is not None else None,
+            "command_body_flu_m_s": [command.velocity_x, command.velocity_y, command.velocity_z]
+            if command is not None else None,
+            "command_yaw_rate_rad_s": command.yaw_rate_rad_s if command is not None else None,
+            "armed": vehicle.armed, "flying": vehicle.flying,
+        }
+        self._touchdown_trace.write(data)
+
     def _build_precise_landing_config(self) -> PreciseLandingConfig:
         yaw_threshold = (
             0.0
@@ -2739,6 +2819,11 @@ class FlightCycleManager(Node):
             self._finish_landing_attempt_log(
                 terminal_outcome, state.name, reason
             )
+            try:
+                self._touchdown_trace.finish(terminal_outcome, reason)
+            except Exception as error:
+                self.get_logger().warning(f"Could not finish touchdown trace: {error}")
+                self._touchdown_trace.disable()
 
     def _start_landing_attempt_log(self, state: str, reason: str) -> None:
         try:

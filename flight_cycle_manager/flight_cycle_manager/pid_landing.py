@@ -1304,6 +1304,8 @@ class PidLandingController:
             "fixed_reference_pending": self._fixed_reference_pending,
             "fixed_reference_enu_m": self._fixed_reference_enu_m,
             "fixed_reference_heading_rad": self._fixed_reference_heading_rad,
+            "touchdown_reference_enu_m": self._touchdown_reference_enu_m,
+            "touchdown_reference_heading_rad": self._touchdown_reference_heading_rad,
             "control_error": self._control_error,
             "pid_hold_at_state": (
                 self._hold_at_state.name if self._hold_at_state is not None else "none"
