@@ -76,15 +76,15 @@ flight_cycle_manager:
     pid_gain_far_yaw_kd: -1.0
 
     # Default PID gains
-    pid_x_kp: 0.30
-    pid_x_ki: 0.02
-    pid_x_kd: 0.20
-    pid_x_integral_limit: 0.5
+    pid_x_kp: 0.60
+    pid_x_ki: 0.00
+    pid_x_kd: 0.12
+    pid_x_integral_limit: 0.1
     pid_x_derivative_filter_time_constant_s: 0.1
-    pid_y_kp: 0.30
-    pid_y_ki: 0.02
-    pid_y_kd: 0.20
-    pid_y_integral_limit: 0.5
+    pid_y_kp: 0.60
+    pid_y_ki: 0.00
+    pid_y_kd: 0.12
+    pid_y_integral_limit: 0.1
     pid_y_derivative_filter_time_constant_s: 0.1
     pid_z_kp: 0.5
     pid_z_ki: 0.02
