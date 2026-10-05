@@ -51,6 +51,8 @@ def pid_config(**overrides):
         fine_horizontal_tolerance_m=0.07,
         coarse_yaw_tolerance_rad=0.2,
         fine_yaw_tolerance_rad=0.1,
+        touchdown_horizontal_speed_tolerance_m_s=0.05,
+        touchdown_horizontal_speed_stable_time_s=1.0,
         max_horizontal_speed_m_s=0.5,
         outer_descent_speed_m_s=0.3,
         central_descent_speed_m_s=0.12,
@@ -104,6 +106,7 @@ def vehicle_observation(
     landed_at=0.0,
     heading_rad=None,
     position_enu_m=None,
+    velocity_enu_m_s=(0.0, 0.0, 0.0),
 ):
     return VehicleObservation(
         position_enu_m=(
@@ -111,7 +114,7 @@ def vehicle_observation(
             if position_enu_m is None
             else position_enu_m
         ),
-        velocity_enu_m_s=(0.0, 0.0, 0.0),
+        velocity_enu_m_s=velocity_enu_m_s,
         armed=armed,
         flying=flying,
         mode=4,
@@ -261,6 +264,96 @@ def enter_touchdown_commitment(backend):
         dock=central_observation(2.81, distance_m=0.20),
         vehicle=vehicle_observation(),
     )
+
+
+@pytest.mark.parametrize("velocity", [
+    (0.11, 0.0, 0.0), (0.08, 0.08, 0.0), (float("nan"), 0.0, 0.0),
+])
+def test_central_descent_waits_for_low_horizontal_speed_throughout_dwell(velocity):
+    backend = start_backend(pid_config())
+    enter_central_descent(backend)
+    dock = lambda now: central_observation(now, distance_m=0.20)
+    backend.update(now=1.8, dock=dock(1.8), vehicle=vehicle_observation())
+    assert backend.update(
+        now=2.81, dock=dock(2.81),
+        vehicle=vehicle_observation(velocity_enu_m_s=velocity),
+    ).substate == "DESCEND_CENTRAL"
+    assert backend.update(
+        now=3.0, dock=dock(3.0), vehicle=vehicle_observation(),
+    ).substate == "DESCEND_CENTRAL"
+    assert backend.update(
+        now=4.01, dock=dock(4.01), vehicle=vehicle_observation(),
+    ).substate == "TOUCHDOWN_APPROACH"
+
+
+def test_central_descent_accepts_speed_at_limit_and_ignores_vertical_descent():
+    backend = start_backend(pid_config())
+    enter_central_descent(backend)
+    for now in (1.8, 2.81):
+        decision = backend.update(
+            now=now, dock=central_observation(now, distance_m=0.20),
+            vehicle=vehicle_observation(velocity_enu_m_s=(0.03, 0.04, -0.20)),
+        )
+    assert decision.substate == "TOUCHDOWN_APPROACH"
+
+
+def test_touchdown_waits_for_configured_speed_dwell_longer_than_alignment():
+    backend = start_backend(pid_config(touchdown_horizontal_speed_stable_time_s=2.0))
+    enter_central_descent(backend)
+    for now, expected in ((1.8, "DESCEND_CENTRAL"),
+                          (2.81, "DESCEND_CENTRAL"),
+                          (3.79, "DESCEND_CENTRAL"),
+                          (3.81, "TOUCHDOWN_APPROACH")):
+        decision = backend.update(
+            now=now, dock=central_observation(now, distance_m=0.20),
+            vehicle=vehicle_observation(),
+        )
+        assert decision.substate == expected
+
+
+def test_speed_dwell_resets_on_misalignment_and_central_tag_loss():
+    backend = start_backend(pid_config(touchdown_horizontal_speed_stable_time_s=2.0))
+    enter_central_descent(backend)
+    def update(now, dock):
+        return backend.update(
+            now=now, dock=dock, vehicle=vehicle_observation(),
+        ).substate
+
+    assert update(1.8, central_observation(1.8, distance_m=0.20)) == "DESCEND_CENTRAL"
+    assert update(2.9, central_observation(2.9, distance_m=0.20)) == "DESCEND_CENTRAL"
+    misaligned = replace(central_observation(3.0, distance_m=0.20), forward_m=0.1)
+    assert update(3.0, misaligned) == "DESCEND_CENTRAL"
+    assert update(3.1, central_observation(3.1, distance_m=0.20)) == "DESCEND_CENTRAL"
+    assert update(4.2, central_observation(4.2, distance_m=0.20)) == "DESCEND_CENTRAL"
+    assert update(4.3, None) == "DESCEND_CENTRAL"
+    assert update(4.4, central_observation(4.4, distance_m=0.20)) == "DESCEND_CENTRAL"
+    assert update(6.39, central_observation(6.39, distance_m=0.20)) == "DESCEND_CENTRAL"
+    assert update(6.4, central_observation(6.4, distance_m=0.20)) == "TOUCHDOWN_APPROACH"
+
+
+def test_alignment_dwell_remains_required_with_shorter_speed_dwell():
+    backend = start_backend(pid_config(touchdown_horizontal_speed_stable_time_s=0.2))
+    enter_central_descent(backend)
+    for now, expected in ((1.8, "DESCEND_CENTRAL"),
+                          (2.1, "DESCEND_CENTRAL"),
+                          (2.81, "TOUCHDOWN_APPROACH")):
+        decision = backend.update(
+            now=now, dock=central_observation(now, distance_m=0.20),
+            vehicle=vehicle_observation(),
+        )
+        assert decision.substate == expected
+
+
+@pytest.mark.parametrize("duration", [0.0, -0.1, math.nan, math.inf])
+def test_invalid_touchdown_horizontal_speed_stable_time_is_rejected(duration):
+    with pytest.raises(ValueError, match="touchdown_horizontal_speed_stable_time_s"):
+        pid_config(touchdown_horizontal_speed_stable_time_s=duration)
+
+
+@pytest.mark.parametrize("limit", [0.0, -0.1, math.nan, math.inf])
+def test_invalid_touchdown_horizontal_speed_tolerance_is_rejected(limit):
+    with pytest.raises(ValueError, match="touchdown_horizontal_speed_tolerance_m_s"):
+        pid_config(touchdown_horizontal_speed_tolerance_m_s=limit)
 
 
 def test_pid_backend_starts_at_alignment_after_shared_search():

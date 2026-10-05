@@ -150,6 +150,8 @@ def pid_config(**overrides):
         fine_horizontal_tolerance_m=0.07,
         coarse_yaw_tolerance_rad=0.2,
         fine_yaw_tolerance_rad=0.1,
+        touchdown_horizontal_speed_tolerance_m_s=0.05,
+        touchdown_horizontal_speed_stable_time_s=1.0,
         max_horizontal_speed_m_s=0.5,
         outer_descent_speed_m_s=0.3,
         central_descent_speed_m_s=0.12,

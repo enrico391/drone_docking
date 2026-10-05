@@ -82,6 +82,8 @@ class PidLandingConfig:
     fine_horizontal_tolerance_m: float
     coarse_yaw_tolerance_rad: float
     fine_yaw_tolerance_rad: float
+    touchdown_horizontal_speed_tolerance_m_s: float
+    touchdown_horizontal_speed_stable_time_s: float
     max_horizontal_speed_m_s: float
     outer_descent_speed_m_s: float
     central_descent_speed_m_s: float
@@ -119,6 +121,8 @@ class PidLandingConfig:
             "fine_horizontal_tolerance_m",
             "coarse_yaw_tolerance_rad",
             "fine_yaw_tolerance_rad",
+            "touchdown_horizontal_speed_tolerance_m_s",
+            "touchdown_horizontal_speed_stable_time_s",
             "max_horizontal_speed_m_s",
             "outer_descent_speed_m_s",
             "central_descent_speed_m_s",
@@ -200,6 +204,7 @@ class PidLandingController:
         self._state = PidLandingState.PID_ALIGN
         self._state_started_at = 0.0
         self._alignment_stable_started_at: Optional[float] = None
+        self._touchdown_speed_stable_started_at: Optional[float] = None
         self._central_stable_started_at: Optional[float] = None
         self._central_loss_started_at: Optional[float] = None
         self._distance_setpoint_m: Optional[float] = None
@@ -233,6 +238,7 @@ class PidLandingController:
         self._state = PidLandingState.PID_ALIGN
         self._state_started_at = now
         self._alignment_stable_started_at = None
+        self._touchdown_speed_stable_started_at = None
         self._central_stable_started_at = None
         self._central_loss_started_at = None
         self._distance_setpoint_m = None
@@ -297,6 +303,7 @@ class PidLandingController:
             self._z_pid.reset()
         if self._state is PidLandingState.HOLD_CENTRAL:
             self._alignment_stable_started_at = None
+            self._touchdown_speed_stable_started_at = None
         self._hold_at_state = state
         self._align_only = self._alignment_only_mode or state is PidLandingState.PID_ALIGN
 
@@ -344,6 +351,7 @@ class PidLandingController:
               mode == "descend_central"))
         )
         self._alignment_stable_started_at = None
+        self._touchdown_speed_stable_started_at = None
         self._control_error = None
         self._x_pid.reset()
         self._y_pid.reset()
@@ -384,6 +392,7 @@ class PidLandingController:
             self._target_loss_started_at = None
             # Latching and changing error source cannot satisfy an old alignment dwell.
             self._alignment_stable_started_at = None
+            self._touchdown_speed_stable_started_at = None
             self._x_pid.reset()
             self._y_pid.reset()
             self._yaw_pid.reset()
@@ -474,6 +483,7 @@ class PidLandingController:
             if self._align_only:
                 self._align_dock_visible = False
                 self._alignment_stable_started_at = None
+                self._touchdown_speed_stable_started_at = None
                 self._target_loss_started_at = None
                 self._reset_pids()
                 return PidLandingDecision(
@@ -551,7 +561,7 @@ class PidLandingController:
         self, now: float, dock: Optional[DockObservation],
         vehicle: VehicleObservation,
     ) -> PidLandingDecision:
-        """Resume touchdown only on fresh central vision and stable fine alignment."""
+        """Resume touchdown only on fresh central vision, alignment and low lateral speed."""
         usable, reason = self._usable_dock(dock)
         if not usable or dock.mode is not DockTargetMode.CENTRAL:
             return self._handle_target_loss(
@@ -562,10 +572,7 @@ class PidLandingController:
         if control_dock is None:
             return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
         if (dock.distance_m <= self._config.touchdown_commit_height_m
-                and self._alignment_is_stable(now, control_dock, (
-                    self._config.fine_horizontal_tolerance_m,
-                    self._config.fine_yaw_tolerance_rad,
-                ))):
+                and self._touchdown_alignment_is_stable(now, control_dock, vehicle)):
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
             self._latch_touchdown_or_fixed_reference(dock, vehicle)
             return PidLandingDecision(self._state, _zero_body_command())
@@ -625,6 +632,7 @@ class PidLandingController:
         # An observation gap breaks all visual dwell and PID history. Rebase
         # descent on the recovered measurement rather than an old setpoint.
         self._alignment_stable_started_at = None
+        self._touchdown_speed_stable_started_at = None
         self._central_stable_started_at = None
         self._distance_setpoint_m = None
         self._descent_last_updated_at = None
@@ -685,6 +693,7 @@ class PidLandingController:
                 self._central_loss_started_at = now
             self._descent_last_updated_at = None
             self._alignment_stable_started_at = None
+            self._touchdown_speed_stable_started_at = None
             self._reset_pids()
             # CHECK IF the central is lost for more than the treshold
             if (
@@ -698,13 +707,8 @@ class PidLandingController:
         control_dock = self._control_dock(dock, vehicle)
         if control_dock is None:
             return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
-        fine_alignment_stable = self._alignment_is_stable(
-            now,
-            control_dock,
-            (
-                self._config.fine_horizontal_tolerance_m,
-                self._config.fine_yaw_tolerance_rad,
-            ),
+        fine_alignment_stable = self._touchdown_alignment_is_stable(
+            now, control_dock, vehicle,
         )
         if (
             dock.distance_m <= self._config.touchdown_commit_height_m
@@ -1090,6 +1094,28 @@ class PidLandingController:
             self._distance_setpoint_m -= speed_m_s * dt
         self._descent_last_updated_at = now
 
+    def _touchdown_alignment_is_stable(
+        self, now: float, dock: DockObservation, vehicle: VehicleObservation,
+    ) -> bool:
+        # Vertical descent is intentional; only measured lateral speed gates
+        # touchdown. Both alignment and speed must stay good for their own dwell.
+        vx, vy = vehicle.velocity_enu_m_s[:2]
+        if (not math.isfinite(vx) or not math.isfinite(vy)
+                or math.hypot(vx, vy) > self._config.touchdown_horizontal_speed_tolerance_m_s):
+            self._alignment_stable_started_at = None
+            self._touchdown_speed_stable_started_at = None
+            return False
+        aligned = self._alignment_is_stable(now, dock, (
+            self._config.fine_horizontal_tolerance_m,
+            self._config.fine_yaw_tolerance_rad,
+        ))
+        if self._alignment_stable_started_at is None:
+            return False
+        if self._touchdown_speed_stable_started_at is None:
+            self._touchdown_speed_stable_started_at = now
+        return (aligned and now - self._touchdown_speed_stable_started_at
+                >= self._config.touchdown_horizontal_speed_stable_time_s)
+
     def _alignment_is_stable(
         self,
         now: float,
@@ -1098,6 +1124,7 @@ class PidLandingController:
     ) -> bool:
         if not self._is_aligned(dock, *tolerance):
             self._alignment_stable_started_at = None
+            self._touchdown_speed_stable_started_at = None
             return False
         if self._alignment_stable_started_at is None:
             self._alignment_stable_started_at = now
@@ -1156,6 +1183,7 @@ class PidLandingController:
         self._state = state
         self._state_started_at = now
         self._alignment_stable_started_at = None
+        self._touchdown_speed_stable_started_at = None
         self._central_stable_started_at = None
         self._distance_setpoint_m = None
         self._descent_last_updated_at = None

@@ -172,6 +172,47 @@ def test_releasing_final_hold_requires_fresh_central_tag_and_stable_alignment():
                           vehicle=vehicle_observation()).substate == "TOUCHDOWN_APPROACH"
 
 
+def test_releasing_final_hold_waits_for_low_horizontal_speed_dwell():
+    backend = PidLandingBackend(pid_config(), hold_at_state=PidLandingState.HOLD_CENTRAL)
+    enter_final_central_hold(backend)
+    backend.set_hold_at_state(None)
+    def update(now, velocity):
+        return backend.update(
+            now=now, dock=central_observation(now, distance_m=0.20),
+            vehicle=vehicle_observation(velocity_enu_m_s=velocity),
+        ).substate
+
+    assert update(3.0, (0.0, 0.0, 0.0)) == "HOLD_CENTRAL"
+    assert update(4.1, (0.2, 0.0, 0.0)) == "HOLD_CENTRAL"
+    assert update(4.2, (0.0, 0.0, 0.0)) == "HOLD_CENTRAL"
+    assert update(5.3, (0.0, 0.0, 0.0)) == "TOUCHDOWN_APPROACH"
+
+
+def test_releasing_final_hold_waits_for_configured_speed_dwell():
+    backend = PidLandingBackend(
+        pid_config(touchdown_horizontal_speed_stable_time_s=2.0),
+        hold_at_state=PidLandingState.HOLD_CENTRAL,
+    )
+    backend.start(now=0.0, dock=dock_observation(0.0), vehicle=vehicle_observation())
+    enter_central_descent(backend)
+    for now in (1.8, 2.81, 3.81):
+        entered = backend.update(
+            now=now, dock=central_observation(now, distance_m=0.20),
+            vehicle=vehicle_observation(),
+        )
+    assert entered.substate == "HOLD_CENTRAL"
+    backend.set_hold_at_state(None)
+    for now, expected in ((4.0, "HOLD_CENTRAL"),
+                          (5.1, "HOLD_CENTRAL"),
+                          (5.99, "HOLD_CENTRAL"),
+                          (6.01, "TOUCHDOWN_APPROACH")):
+        decision = backend.update(
+            now=now, dock=central_observation(now, distance_m=0.20),
+            vehicle=vehicle_observation(),
+        )
+        assert decision.substate == expected
+
+
 @pytest.mark.parametrize("invalid", [PidLandingState.TOUCHDOWN_APPROACH,
                                      PidLandingState.RECOVERY_CLIMB,
                                      PidLandingState.DISARM])

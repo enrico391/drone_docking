@@ -440,7 +440,9 @@ class FlightCycleManager(Node):
             "pid_fine_horizontal_tolerance_m": 0.07,
             "pid_coarse_yaw_tolerance_rad": 0.2,
             "pid_fine_yaw_tolerance_rad": 0.1,
-            "pid_max_horizontal_speed_m_s": 0.5,
+            "pid_touchdown_horizontal_speed_tolerance_m_s": 0.05,
+            "pid_touchdown_horizontal_speed_stable_time_s": 1.0,
+            "pid_max_horizontal_speed_m_s": 0.6,
             "pid_outer_descent_speed_m_s": 0.3,
             "pid_central_descent_speed_m_s": 0.12,
             "pid_recovery_speed_m_s": 0.2,
@@ -2038,6 +2040,12 @@ class FlightCycleManager(Node):
             ),
             fine_yaw_tolerance_rad=self._positive_parameter(
                 "pid_fine_yaw_tolerance_rad"
+            ),
+            touchdown_horizontal_speed_tolerance_m_s=self._positive_parameter(
+                "pid_touchdown_horizontal_speed_tolerance_m_s"
+            ),
+            touchdown_horizontal_speed_stable_time_s=self._positive_parameter(
+                "pid_touchdown_horizontal_speed_stable_time_s"
             ),
             max_horizontal_speed_m_s=max_horizontal,
             outer_descent_speed_m_s=self._positive_parameter(
