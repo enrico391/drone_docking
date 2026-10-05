@@ -27,7 +27,10 @@ flight_cycle_manager:
     pid_touchdown_horizontal_speed_stable_time_s: 1.0
 
     # Speed limits for the PID controller during landing.
-    pid_max_horizontal_speed_m_s: 0.6
+    pid_max_horizontal_speed_m_s: 0.6 # PID_ALIGN; X/Y PID output range covers all stages
+    pid_descend_outer_max_horizontal_speed_m_s: 0.6
+    pid_descend_central_max_horizontal_speed_m_s: 0.30
+    pid_touchdown_max_horizontal_speed_m_s: 0.12
     pid_outer_descent_speed_m_s: 0.30
     pid_central_descent_speed_m_s: 0.20
     pid_recovery_speed_m_s: 0.20

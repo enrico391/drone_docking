@@ -85,6 +85,9 @@ class PidLandingConfig:
     touchdown_horizontal_speed_tolerance_m_s: float
     touchdown_horizontal_speed_stable_time_s: float
     max_horizontal_speed_m_s: float
+    descend_outer_max_horizontal_speed_m_s: float
+    descend_central_max_horizontal_speed_m_s: float
+    touchdown_max_horizontal_speed_m_s: float
     outer_descent_speed_m_s: float
     central_descent_speed_m_s: float
     recovery_speed_m_s: float
@@ -124,6 +127,9 @@ class PidLandingConfig:
             "touchdown_horizontal_speed_tolerance_m_s",
             "touchdown_horizontal_speed_stable_time_s",
             "max_horizontal_speed_m_s",
+            "descend_outer_max_horizontal_speed_m_s",
+            "descend_central_max_horizontal_speed_m_s",
+            "touchdown_max_horizontal_speed_m_s",
             "outer_descent_speed_m_s",
             "central_descent_speed_m_s",
             "recovery_speed_m_s",
@@ -193,8 +199,15 @@ class PidLandingController:
         self._alignment_only_mode = align_only
         self._align_only = align_only or hold_at_state is PidLandingState.PID_ALIGN
         self._hold_at_state = hold_at_state
-        self._x_pid = PID(config.x_pid)
-        self._y_pid = PID(config.y_pid)
+        horizontal_pid_limit = max(
+            config.max_horizontal_speed_m_s,
+            config.descend_outer_max_horizontal_speed_m_s,
+            config.descend_central_max_horizontal_speed_m_s,
+            config.touchdown_max_horizontal_speed_m_s,
+            config.x_pid.output_limit, config.y_pid.output_limit,
+        )
+        self._x_pid = PID(replace(config.x_pid, output_limit=horizontal_pid_limit))
+        self._y_pid = PID(replace(config.y_pid, output_limit=horizontal_pid_limit))
         self._z_pid = PID(config.z_pid)
         self._yaw_pid = PID(config.yaw_pid)
         self._near_pids = config.near_pids or self._base_pids()
@@ -894,7 +907,7 @@ class PidLandingController:
                 now,
             )
             velocity_x, velocity_y = self._limit_horizontal(
-                velocity_x, velocity_y
+                velocity_x, velocity_y, self._config.touchdown_max_horizontal_speed_m_s,
             )
             if self._touchdown_reference_heading_rad is not None:
                 yaw_rate = self._limit_symmetric(
@@ -1027,7 +1040,9 @@ class PidLandingController:
         yaw_rate = self._yaw_pid.update(
             self._wrap_yaw(dock.yaw_error_rad), now
         )
-        velocity_x, velocity_y = self._limit_horizontal(velocity_x, velocity_y)
+        velocity_x, velocity_y = self._limit_horizontal(
+            velocity_x, velocity_y, self._horizontal_speed_limit(),
+        )
         yaw_rate = max(
             -self._config.max_yaw_rate_rad_s,
             min(self._config.max_yaw_rate_rad_s, yaw_rate),
@@ -1261,12 +1276,19 @@ class PidLandingController:
             )
         return vehicle.position_enu_m
 
+    def _horizontal_speed_limit(self) -> float:
+        if self._state is PidLandingState.DESCEND_OUTER:
+            return self._config.descend_outer_max_horizontal_speed_m_s
+        if self._state in (PidLandingState.DESCEND_CENTRAL, PidLandingState.HOLD_CENTRAL):
+            return self._config.descend_central_max_horizontal_speed_m_s
+        return self._config.max_horizontal_speed_m_s
+
     def _limit_horizontal(
-        self, velocity_x: float, velocity_y: float,
+        self, velocity_x: float, velocity_y: float, limit_m_s: float,
     ) -> Tuple[float, float]:
         speed = math.hypot(velocity_x, velocity_y)
-        if speed > self._config.max_horizontal_speed_m_s:
-            scale = self._config.max_horizontal_speed_m_s / speed
+        if speed > limit_m_s:
+            scale = limit_m_s / speed
             velocity_x, velocity_y = velocity_x * scale, velocity_y * scale
         self._x_pid.track_applied_output(velocity_x)
         self._y_pid.track_applied_output(velocity_y)
@@ -1289,6 +1311,7 @@ class PidLandingController:
                     getattr(far_config, gain) - getattr(near_config, gain))
                 for gain in ("kp", "ki", "kd")
             }) for near_config, far_config in zip(self._near_pids, self._far_pids))
+            configs = self._expand_horizontal_pid_limits(configs)
             for pid, config in zip(self._pids(), configs):
                 pid.reconfigure(config)
 
@@ -1309,6 +1332,9 @@ class PidLandingController:
         if (not math.isfinite(near_distance_m) or not math.isfinite(far_distance_m)
                 or near_distance_m <= 0 or near_distance_m >= far_distance_m):
             raise ValueError("gain distances must be finite, positive and near < far")
+        configs = self._expand_horizontal_pid_limits(configs)
+        near = self._expand_horizontal_pid_limits(near) if near is not None else None
+        far = self._expand_horizontal_pid_limits(far) if far is not None else None
         self._config = replace(self._config, x_pid=configs[0], y_pid=configs[1],
                                z_pid=configs[2], yaw_pid=configs[3],
                                gain_near_distance_m=near_distance_m,
@@ -1320,6 +1346,19 @@ class PidLandingController:
                 pid.reconfigure(config)
         else:
             self._apply_distance_gains(None)
+
+    def _expand_horizontal_pid_limits(
+        self, configs: Tuple[PIDConfig, ...],
+    ) -> Tuple[PIDConfig, ...]:
+        limit = max(
+            self._config.max_horizontal_speed_m_s,
+            self._config.descend_outer_max_horizontal_speed_m_s,
+            self._config.descend_central_max_horizontal_speed_m_s,
+            self._config.touchdown_max_horizontal_speed_m_s,
+            configs[0].output_limit, configs[1].output_limit,
+        )
+        return (replace(configs[0], output_limit=limit),
+                replace(configs[1], output_limit=limit), *configs[2:])
 
     def _pids(self) -> Tuple[PID, ...]:
         return self._x_pid, self._y_pid, self._z_pid, self._yaw_pid

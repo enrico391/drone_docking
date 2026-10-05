@@ -54,6 +54,9 @@ def pid_config(**overrides):
         touchdown_horizontal_speed_tolerance_m_s=0.05,
         touchdown_horizontal_speed_stable_time_s=1.0,
         max_horizontal_speed_m_s=0.5,
+        descend_outer_max_horizontal_speed_m_s=0.5,
+        descend_central_max_horizontal_speed_m_s=0.5,
+        touchdown_max_horizontal_speed_m_s=0.5,
         outer_descent_speed_m_s=0.3,
         central_descent_speed_m_s=0.12,
         recovery_speed_m_s=0.2,
@@ -354,6 +357,117 @@ def test_invalid_touchdown_horizontal_speed_stable_time_is_rejected(duration):
 def test_invalid_touchdown_horizontal_speed_tolerance_is_rejected(limit):
     with pytest.raises(ValueError, match="touchdown_horizontal_speed_tolerance_m_s"):
         pid_config(touchdown_horizontal_speed_tolerance_m_s=limit)
+
+
+def test_horizontal_speed_limits_follow_landing_phase_and_hold():
+    config = pid_config(
+        max_horizontal_speed_m_s=0.4,
+        descend_outer_max_horizontal_speed_m_s=0.3,
+        descend_central_max_horizontal_speed_m_s=0.2,
+        touchdown_max_horizontal_speed_m_s=0.1,
+    )
+    dock = lambda now, distance: dock_observation(
+        now, forward_m=1.0, left_m=1.0, distance_m=distance,
+    )
+    # Alignment keeps the original PID cap, independent of descent caps.
+    align = start_backend(config)
+    aligned = align.update(now=0.1, dock=dock(0.1, 2.0), vehicle=vehicle_observation())
+    assert math.hypot(aligned.velocity.velocity_x, aligned.velocity.velocity_y) == pytest.approx(0.4)
+
+    outer = start_backend(config)
+    enter_outer_descent(outer)
+    descending = outer.update(now=1.3, dock=dock(1.3, 2.0), vehicle=vehicle_observation())
+    assert descending.substate == "DESCEND_OUTER"
+    assert math.hypot(descending.velocity.velocity_x, descending.velocity.velocity_y) == pytest.approx(0.3)
+
+    central = start_backend(config)
+    enter_central_descent(central)
+    central_dock = replace(central_observation(1.8), forward_m=1.0, left_m=1.0)
+    descending = central.update(now=1.8, dock=central_dock, vehicle=vehicle_observation())
+    assert descending.substate == "DESCEND_CENTRAL"
+    assert math.hypot(descending.velocity.velocity_x, descending.velocity.velocity_y) == pytest.approx(0.2)
+
+    held = PidLandingBackend(config, hold_at_state=PidLandingState.DESCEND_CENTRAL)
+    held.start(now=0.0, dock=dock_observation(0.0), vehicle=vehicle_observation())
+    enter_central_descent(held)
+    command = held.update(now=1.8, dock=central_dock, vehicle=vehicle_observation())
+    assert command.substate == "DESCEND_CENTRAL"
+    assert math.hypot(command.velocity.velocity_x, command.velocity.velocity_y) == pytest.approx(0.2)
+
+    final_hold = PidLandingBackend(config, hold_at_state=PidLandingState.HOLD_CENTRAL)
+    final_hold.start(now=0.0, dock=dock_observation(0.0), vehicle=vehicle_observation())
+    enter_central_descent(final_hold)
+    for now in (1.8, 2.81):
+        decision = final_hold.update(
+            now=now, dock=central_observation(now, distance_m=0.20),
+            vehicle=vehicle_observation(),
+        )
+    assert decision.substate == "HOLD_CENTRAL"
+    command = final_hold.update(
+        now=3.0,
+        dock=replace(central_observation(3.0, distance_m=0.20),
+                     forward_m=1.0, left_m=1.0),
+        vehicle=vehicle_observation(),
+    )
+    assert math.hypot(command.velocity.velocity_x, command.velocity.velocity_y) == pytest.approx(0.2)
+
+    touchdown = start_backend(config)
+    enter_touchdown_commitment_with_reference(touchdown, heading_rad=0.0)
+    disturbed = touchdown.update(
+        now=2.9, dock=None,
+        vehicle=vehicle_observation(heading_rad=0.0, position_enu_m=(4.5, -2.5, 4.0)),
+    )
+    assert disturbed.substate == "TOUCHDOWN_APPROACH"
+    assert math.hypot(disturbed.velocity.velocity_x, disturbed.velocity.velocity_y) == pytest.approx(0.1)
+
+
+def test_landing_stage_can_exceed_alignment_pid_limit():
+    config = pid_config(
+        max_horizontal_speed_m_s=0.2,
+        descend_outer_max_horizontal_speed_m_s=0.45,
+        descend_central_max_horizontal_speed_m_s=0.4,
+        touchdown_max_horizontal_speed_m_s=0.35,
+        x_pid=controller_pid_config(output_limit=0.2),
+        y_pid=controller_pid_config(output_limit=0.2),
+    )
+    dock = lambda now: dock_observation(
+        now, forward_m=1.0, left_m=0.0, distance_m=2.0,
+    )
+    align = start_backend(config)
+    assert align.update(now=0.1, dock=dock(0.1),
+                        vehicle=vehicle_observation()).velocity.velocity_x == pytest.approx(0.2)
+
+    outer = start_backend(config)
+    enter_outer_descent(outer)
+    decision = outer.update(now=1.3, dock=dock(1.3), vehicle=vehicle_observation())
+    assert decision.velocity.velocity_x == pytest.approx(0.45)
+
+    central = start_backend(config)
+    enter_central_descent(central)
+    decision = central.update(
+        now=1.8, dock=replace(central_observation(1.8), forward_m=1.0, left_m=0.0),
+        vehicle=vehicle_observation(),
+    )
+    assert decision.velocity.velocity_x == pytest.approx(0.4)
+
+    touchdown = start_backend(config)
+    enter_touchdown_commitment_with_reference(touchdown, heading_rad=0.0)
+    decision = touchdown.update(
+        now=2.9, dock=None,
+        vehicle=vehicle_observation(heading_rad=0.0, position_enu_m=(4.0, -2.5, 4.0)),
+    )
+    assert math.hypot(decision.velocity.velocity_x, decision.velocity.velocity_y) == pytest.approx(0.35)
+
+
+@pytest.mark.parametrize("field", (
+    "descend_outer_max_horizontal_speed_m_s",
+    "descend_central_max_horizontal_speed_m_s",
+    "touchdown_max_horizontal_speed_m_s",
+))
+@pytest.mark.parametrize("value", (0.0, -0.1, math.nan, math.inf))
+def test_invalid_stage_horizontal_speed_limit_is_rejected(field, value):
+    with pytest.raises(ValueError, match=field):
+        pid_config(**{field: value})
 
 
 def test_pid_backend_starts_at_alignment_after_shared_search():

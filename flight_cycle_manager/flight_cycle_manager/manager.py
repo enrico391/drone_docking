@@ -443,6 +443,9 @@ class FlightCycleManager(Node):
             "pid_touchdown_horizontal_speed_tolerance_m_s": 0.05,
             "pid_touchdown_horizontal_speed_stable_time_s": 1.0,
             "pid_max_horizontal_speed_m_s": 0.6,
+            "pid_descend_outer_max_horizontal_speed_m_s": 0.6,
+            "pid_descend_central_max_horizontal_speed_m_s": 0.30,
+            "pid_touchdown_max_horizontal_speed_m_s": 0.12,
             "pid_outer_descent_speed_m_s": 0.3,
             "pid_central_descent_speed_m_s": 0.12,
             "pid_recovery_speed_m_s": 0.2,
@@ -1985,11 +1988,17 @@ class FlightCycleManager(Node):
 
     def _build_pid_landing_config(self) -> PidLandingConfig:
         max_horizontal = self._positive_parameter("pid_max_horizontal_speed_m_s")
+        horizontal_pid_limit = max(
+            max_horizontal,
+            self._positive_parameter("pid_descend_outer_max_horizontal_speed_m_s"),
+            self._positive_parameter("pid_descend_central_max_horizontal_speed_m_s"),
+            self._positive_parameter("pid_touchdown_max_horizontal_speed_m_s"),
+        )
         max_yaw = self._positive_parameter("pid_max_yaw_rate_rad_s")
         base_pids = tuple(self._build_pid_axis_config(f"pid_{axis}", limit)
                           for axis, limit in zip(
                               ("x", "y", "z", "yaw"),
-                              (max_horizontal, max_horizontal,
+                              (horizontal_pid_limit, horizontal_pid_limit,
                                self._positive_parameter("search_max_vertical_speed_m_s"),
                                max_yaw)))
         return PidLandingConfig(
@@ -2048,6 +2057,15 @@ class FlightCycleManager(Node):
                 "pid_touchdown_horizontal_speed_stable_time_s"
             ),
             max_horizontal_speed_m_s=max_horizontal,
+            descend_outer_max_horizontal_speed_m_s=self._positive_parameter(
+                "pid_descend_outer_max_horizontal_speed_m_s"
+            ),
+            descend_central_max_horizontal_speed_m_s=self._positive_parameter(
+                "pid_descend_central_max_horizontal_speed_m_s"
+            ),
+            touchdown_max_horizontal_speed_m_s=self._positive_parameter(
+                "pid_touchdown_max_horizontal_speed_m_s"
+            ),
             outer_descent_speed_m_s=self._positive_parameter(
                 "pid_outer_descent_speed_m_s"
             ),
@@ -2195,8 +2213,14 @@ class FlightCycleManager(Node):
                     or near_distance <= 0 or far_distance <= near_distance):
                 raise ValueError("gain distances must be finite, positive and near < far")
             max_horizontal = self._positive_parameter("pid_max_horizontal_speed_m_s")
+            horizontal_pid_limit = max(
+                max_horizontal,
+                self._positive_parameter("pid_descend_outer_max_horizontal_speed_m_s"),
+                self._positive_parameter("pid_descend_central_max_horizontal_speed_m_s"),
+                self._positive_parameter("pid_touchdown_max_horizontal_speed_m_s"),
+            )
             max_yaw = self._positive_parameter("pid_max_yaw_rate_rad_s")
-            limits = (max_horizontal, max_horizontal,
+            limits = (horizontal_pid_limit, horizontal_pid_limit,
                       self._positive_parameter("search_max_vertical_speed_m_s"), max_yaw)
             configs = tuple(
                 self._build_live_pid_axis_config(f"pid_{axis}", limit, tuning_updates)
