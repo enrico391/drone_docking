@@ -78,10 +78,12 @@ class PidLandingConfig:
     landed_stable_time_s: float
     disarm_retry_period_s: float
     alignment_stable_time_s: float
-    coarse_horizontal_tolerance_m: float
-    fine_horizontal_tolerance_m: float
-    coarse_yaw_tolerance_rad: float
-    fine_yaw_tolerance_rad: float
+    outer_horizontal_tolerance_m: float
+    central_horizontal_tolerance_m: float
+    outer_yaw_tolerance_rad: float
+    central_yaw_tolerance_rad: float
+    touchdown_horizontal_tolerance_m: float
+    touchdown_yaw_tolerance_rad: float
     touchdown_horizontal_speed_tolerance_m_s: float
     touchdown_horizontal_speed_stable_time_s: float
     max_horizontal_speed_m_s: float
@@ -120,10 +122,12 @@ class PidLandingConfig:
             "landed_stable_time_s",
             "disarm_retry_period_s",
             "alignment_stable_time_s",
-            "coarse_horizontal_tolerance_m",
-            "fine_horizontal_tolerance_m",
-            "coarse_yaw_tolerance_rad",
-            "fine_yaw_tolerance_rad",
+            "outer_horizontal_tolerance_m",
+            "central_horizontal_tolerance_m",
+            "outer_yaw_tolerance_rad",
+            "central_yaw_tolerance_rad",
+            "touchdown_horizontal_tolerance_m",
+            "touchdown_yaw_tolerance_rad",
             "touchdown_horizontal_speed_tolerance_m_s",
             "touchdown_horizontal_speed_stable_time_s",
             "max_horizontal_speed_m_s",
@@ -158,15 +162,25 @@ class PidLandingConfig:
                 "touchdown_commit_height_m must be below "
                 "central_transition_distance_m"
             )
-        if self.fine_horizontal_tolerance_m >= self.coarse_horizontal_tolerance_m:
+        if self.central_horizontal_tolerance_m >= self.outer_horizontal_tolerance_m:
             raise ValueError(
-                "fine_horizontal_tolerance_m must be smaller than "
-                "coarse_horizontal_tolerance_m"
+                "central_horizontal_tolerance_m must be smaller than "
+                "outer_horizontal_tolerance_m"
             )
-        if self.fine_yaw_tolerance_rad >= self.coarse_yaw_tolerance_rad:
+        if self.central_yaw_tolerance_rad >= self.outer_yaw_tolerance_rad:
             raise ValueError(
-                "fine_yaw_tolerance_rad must be smaller than "
-                "coarse_yaw_tolerance_rad"
+                "central_yaw_tolerance_rad must be smaller than "
+                "outer_yaw_tolerance_rad"
+            )
+        if self.touchdown_horizontal_tolerance_m > self.central_horizontal_tolerance_m:
+            raise ValueError(
+                "touchdown_horizontal_tolerance_m must not exceed "
+                "central_horizontal_tolerance_m"
+            )
+        if self.touchdown_yaw_tolerance_rad > self.central_yaw_tolerance_rad:
+            raise ValueError(
+                "touchdown_yaw_tolerance_rad must not exceed "
+                "central_yaw_tolerance_rad"
             )
         if (not math.isfinite(self.gain_near_distance_m)
                 or not math.isfinite(self.gain_far_distance_m)
@@ -619,8 +633,8 @@ class PidLandingController:
             now,
             dock,
             self._config.outer_descent_speed_m_s,
-            self._config.coarse_horizontal_tolerance_m,
-            self._config.coarse_yaw_tolerance_rad,
+            self._config.outer_horizontal_tolerance_m,
+            self._config.outer_yaw_tolerance_rad,
         )
         # update with PID command to align with the dock while descending
         return PidLandingDecision(
@@ -748,8 +762,8 @@ class PidLandingController:
             now,
             control_dock,
             self._config.central_descent_speed_m_s,
-            self._config.fine_horizontal_tolerance_m,
-            self._config.fine_yaw_tolerance_rad,
+            self._config.central_horizontal_tolerance_m,
+            self._config.central_yaw_tolerance_rad,
         )
         return PidLandingDecision(
             self._state,
@@ -1121,8 +1135,8 @@ class PidLandingController:
             self._touchdown_speed_stable_started_at = None
             return False
         aligned = self._alignment_is_stable(now, dock, (
-            self._config.fine_horizontal_tolerance_m,
-            self._config.fine_yaw_tolerance_rad,
+            self._config.touchdown_horizontal_tolerance_m,
+            self._config.touchdown_yaw_tolerance_rad,
         ))
         if self._alignment_stable_started_at is None:
             return False
@@ -1165,12 +1179,12 @@ class PidLandingController:
     def _tolerance_for(self, distance_m: float) -> Tuple[float, float]:
         if distance_m > self._config.central_transition_distance_m:
             return (
-                self._config.coarse_horizontal_tolerance_m,
-                self._config.coarse_yaw_tolerance_rad,
+                self._config.outer_horizontal_tolerance_m,
+                self._config.outer_yaw_tolerance_rad,
             )
         return (
-            self._config.fine_horizontal_tolerance_m,
-            self._config.fine_yaw_tolerance_rad,
+            self._config.central_horizontal_tolerance_m,
+            self._config.central_yaw_tolerance_rad,
         )
 
     @staticmethod

@@ -563,10 +563,10 @@ pid_landed_state_timeout_s: 1.0
 pid_landed_stable_time_s: 0.50
 pid_disarm_retry_period_s: 1.0
 pid_alignment_stable_time_s: 1.0
-pid_coarse_horizontal_tolerance_m: 0.20
-pid_fine_horizontal_tolerance_m: 0.07
-pid_coarse_yaw_tolerance_rad: 0.1745329252
-pid_fine_yaw_tolerance_rad: 0.0872664626
+pid_outer_horizontal_tolerance_m: 0.20
+pid_central_horizontal_tolerance_m: 0.07
+pid_outer_yaw_tolerance_rad: 0.1745329252
+pid_central_yaw_tolerance_rad: 0.0872664626
 pid_max_horizontal_speed_m_s: 0.50
 pid_outer_descent_speed_m_s: 0.30
 pid_central_descent_speed_m_s: 0.12

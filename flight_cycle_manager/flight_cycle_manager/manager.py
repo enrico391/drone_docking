@@ -436,10 +436,12 @@ class FlightCycleManager(Node):
             "pid_landed_stable_time_s": 0.5,
             "pid_disarm_retry_period_s": 1.0,
             "pid_alignment_stable_time_s": 1.0,
-            "pid_coarse_horizontal_tolerance_m": 0.2,
-            "pid_fine_horizontal_tolerance_m": 0.07,
-            "pid_coarse_yaw_tolerance_rad": 0.2,
-            "pid_fine_yaw_tolerance_rad": 0.1,
+            "pid_outer_horizontal_tolerance_m": 0.2,
+            "pid_central_horizontal_tolerance_m": 0.07,
+            "pid_outer_yaw_tolerance_rad": 0.2,
+            "pid_central_yaw_tolerance_rad": 0.1,
+            "pid_touchdown_horizontal_tolerance_m": 0.06,
+            "pid_touchdown_yaw_tolerance_rad": 0.08,
             "pid_touchdown_horizontal_speed_tolerance_m_s": 0.05,
             "pid_touchdown_horizontal_speed_stable_time_s": 1.0,
             "pid_max_horizontal_speed_m_s": 0.6,
@@ -2038,17 +2040,23 @@ class FlightCycleManager(Node):
             alignment_stable_time_s=self._positive_parameter(
                 "pid_alignment_stable_time_s"
             ),
-            coarse_horizontal_tolerance_m=self._positive_parameter(
-                "pid_coarse_horizontal_tolerance_m"
+            outer_horizontal_tolerance_m=self._positive_parameter(
+                "pid_outer_horizontal_tolerance_m"
             ),
-            fine_horizontal_tolerance_m=self._positive_parameter(
-                "pid_fine_horizontal_tolerance_m"
+            central_horizontal_tolerance_m=self._positive_parameter(
+                "pid_central_horizontal_tolerance_m"
             ),
-            coarse_yaw_tolerance_rad=self._positive_parameter(
-                "pid_coarse_yaw_tolerance_rad"
+            outer_yaw_tolerance_rad=self._positive_parameter(
+                "pid_outer_yaw_tolerance_rad"
             ),
-            fine_yaw_tolerance_rad=self._positive_parameter(
-                "pid_fine_yaw_tolerance_rad"
+            central_yaw_tolerance_rad=self._positive_parameter(
+                "pid_central_yaw_tolerance_rad"
+            ),
+            touchdown_horizontal_tolerance_m=self._positive_parameter(
+                "pid_touchdown_horizontal_tolerance_m"
+            ),
+            touchdown_yaw_tolerance_rad=self._positive_parameter(
+                "pid_touchdown_yaw_tolerance_rad"
             ),
             touchdown_horizontal_speed_tolerance_m_s=self._positive_parameter(
                 "pid_touchdown_horizontal_speed_tolerance_m_s"

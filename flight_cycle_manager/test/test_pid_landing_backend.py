@@ -47,10 +47,12 @@ def pid_config(**overrides):
         landed_stable_time_s=0.5,
         disarm_retry_period_s=1.0,
         alignment_stable_time_s=1.0,
-        coarse_horizontal_tolerance_m=0.2,
-        fine_horizontal_tolerance_m=0.07,
-        coarse_yaw_tolerance_rad=0.2,
-        fine_yaw_tolerance_rad=0.1,
+        outer_horizontal_tolerance_m=0.2,
+        central_horizontal_tolerance_m=0.07,
+        outer_yaw_tolerance_rad=0.2,
+        central_yaw_tolerance_rad=0.1,
+        touchdown_horizontal_tolerance_m=0.06,
+        touchdown_yaw_tolerance_rad=0.08,
         touchdown_horizontal_speed_tolerance_m_s=0.05,
         touchdown_horizontal_speed_stable_time_s=1.0,
         max_horizontal_speed_m_s=0.5,
@@ -267,6 +269,54 @@ def enter_touchdown_commitment(backend):
         dock=central_observation(2.81, distance_m=0.20),
         vehicle=vehicle_observation(),
     )
+
+
+@pytest.mark.parametrize("axis, observation", [
+    ("horizontal", {"forward_m": 0.05, "left_m": 0.0, "yaw_error_rad": 0.0}),
+    ("yaw", {"forward_m": 0.0, "left_m": 0.0, "yaw_error_rad": 0.08}),
+])
+def test_central_descent_uses_central_tolerance_but_touchdown_requires_stricter_alignment(
+    axis, observation,
+):
+    config = pid_config(
+        central_horizontal_tolerance_m=0.07,
+        central_yaw_tolerance_rad=0.1,
+        touchdown_horizontal_tolerance_m=0.02,
+        touchdown_yaw_tolerance_rad=0.04,
+    )
+    backend = start_backend(config)
+    enter_central_descent(backend)
+
+    def sample(now, **errors):
+        dock = replace(central_observation(now, distance_m=0.20), **errors)
+        return backend.update(now=now, dock=dock, vehicle=vehicle_observation())
+
+    # The vehicle may keep descending while inside the central descent tolerance,
+    # even though it is not yet safe to commit to touchdown.
+    sample(1.8, **observation)
+    decision = sample(2.81, **observation)
+    assert decision.substate == "DESCEND_CENTRAL"
+    assert decision.velocity.velocity_z < 0.0
+
+    aligned = {"forward_m": 0.01, "left_m": 0.0, "yaw_error_rad": 0.02}
+    assert sample(3.0, **aligned).substate == "DESCEND_CENTRAL"
+    # A momentary excursion outside the touchdown tolerance restarts its dwell.
+    assert sample(3.5, **observation).substate == "DESCEND_CENTRAL"
+    assert sample(3.6, **aligned).substate == "DESCEND_CENTRAL"
+    assert sample(4.61, **aligned).substate == "TOUCHDOWN_APPROACH"
+
+
+@pytest.mark.parametrize("field, value", [
+    ("touchdown_horizontal_tolerance_m", 0.0),
+    ("touchdown_horizontal_tolerance_m", math.nan),
+    ("touchdown_horizontal_tolerance_m", 0.08),
+    ("touchdown_yaw_tolerance_rad", -0.1),
+    ("touchdown_yaw_tolerance_rad", math.inf),
+    ("touchdown_yaw_tolerance_rad", 0.11),
+])
+def test_invalid_touchdown_alignment_tolerance_is_rejected(field, value):
+    with pytest.raises(ValueError, match=field):
+        pid_config(**{field: value})
 
 
 @pytest.mark.parametrize("velocity", [
