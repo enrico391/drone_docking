@@ -113,6 +113,9 @@ EXPECTED_PID_PARAMETERS = {
     "pid_target_loss_grace_s": 0.7,
     "pid_gain_near_distance_m": 0.2,
     "pid_gain_far_distance_m": 6.0,
+    "pid_x_k_v": 0.0,
+    "pid_y_k_v": 0.0,
+    "pid_z_k_v": 0.0,
     **{f"pid_gain_{side}_{axis}_{gain}": -1.0
        for side in ("near", "far")
        for axis in ("x", "y", "z", "yaw")

@@ -53,6 +53,9 @@ class PidLandingBackend:
     def diagnostics(self) -> dict:
         return self._controller.diagnostics()
 
+    def reconfigure_velocity_feedback(self, *, x: float, y: float, z: float) -> None:
+        self._controller.reconfigure_velocity_feedback(x=x, y=y, z=z)
+
     def set_align_distance_setpoint(self, distance_m: float) -> None:
         self._controller.set_align_distance_setpoint(distance_m)
 

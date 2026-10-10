@@ -79,6 +79,11 @@ flight_cycle_manager:
     pid_gain_far_yaw_kd: -1.0
 
     # Default PID gains
+    # ONLY P or PD control is used for X/Y/Z because possible conflict with the position controller.
+    # Measured-velocity damping: v_cmd = v_pid - pid_<axis>_k_v * v_mea.
+    pid_x_k_v: 0.0
+    pid_y_k_v: 0.0
+    pid_z_k_v: 0.0
     pid_x_kp: 0.60
     pid_x_ki: 0.00
     pid_x_kd: 0.12
@@ -90,7 +95,7 @@ flight_cycle_manager:
     pid_y_integral_limit: 0.1
     pid_y_derivative_filter_time_constant_s: 0.1
     pid_z_kp: 0.5
-    pid_z_ki: 0.02
+    pid_z_ki: 0.00
     pid_z_kd: 0.05
     pid_z_integral_limit: 0.5
     pid_z_derivative_filter_time_constant_s: 0.1

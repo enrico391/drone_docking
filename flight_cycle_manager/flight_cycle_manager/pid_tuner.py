@@ -34,6 +34,16 @@ def parse_gain_request(payload: Any) -> tuple[str, float, float, float]:
     return payload["axis"], *values
 
 
+def parse_velocity_feedback_request(payload: Any) -> tuple[str, float]:
+    if not isinstance(payload, dict) or payload.get("axis") not in ("x", "y", "z"):
+        raise ValueError("axis must be x, y, or z")
+    value = payload.get("k_v")
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0.0):
+        raise ValueError("k_v must be finite and non-negative")
+    return payload["axis"], float(value)
+
+
 def parse_distance_request(payload: Any) -> float:
     value = payload.get("distance_m") if isinstance(payload, dict) else None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -123,7 +133,7 @@ def _handler_for(app: _WebApp) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path not in ("/api/gains", "/api/distance", "/api/hold", "/api/fixed-reference"):
+            if self.path not in ("/api/gains", "/api/velocity-feedback", "/api/distance", "/api/hold", "/api/fixed-reference"):
                 self.send_error(404)
                 return
             try:
@@ -135,6 +145,9 @@ def _handler_for(app: _WebApp) -> type[BaseHTTPRequestHandler]:
                     axis, kp, ki, kd = parse_gain_request(payload)
                     parameters = {f"pid_{axis}_{name}": value for name, value in
                                   zip(("kp", "ki", "kd"), (kp, ki, kd))}
+                elif self.path == "/api/velocity-feedback":
+                    axis, k_v = parse_velocity_feedback_request(payload)
+                    parameters = {f"pid_{axis}_k_v": k_v}
                 elif self.path == "/api/distance":
                     parameters = {"pid_align_distance_setpoint_m": parse_distance_request(payload)}
                 elif self.path == "/api/hold":
@@ -193,6 +206,12 @@ small{color:#9ca3af}#message{min-height:20px}
 <button class="apply" id="apply">Apply</button>
 <button id="undo">Undo</button><button id="ponly">P-only</button>
 </div><p id="message"></p></div>
+<div class="card"><h3>Measured velocity feedback</h3>
+<div class="row"><label>Selected axis K_v (X/Y/Z)
+<input id="k-v" type="number" min="0" step="0.01"></label>
+<button class="apply" id="apply-k-v">Apply K_v</button></div>
+<small>v_cmd = v_pid - K_v × measured velocity. Horizontal feedback requires heading telemetry; yaw is unchanged.</small>
+<p id="k-v-message" role="status"></p></div>
 <div class="card"><h3>Landing hold</h3>
 <div class="row"><label>Hold at state
 <select id="hold" disabled>
@@ -237,6 +256,25 @@ small{color:#9ca3af}#message{min-height:20px}
 <small>Tracking error (blue, left scale) · command (orange, right scale). Scales stay fixed until changed; out-of-range values are clipped and flagged. Yaw in degrees and degrees/s.</small></div>
 <button id="download">Download YAML</button>
 </div><div class="dashboard-right">
+<div class="card"><h3>Measured dock-relative position</h3>
+<div class="readings" aria-live="off">
+<div class="reading"><span>Dock forward offset (X)</span><strong id="dock-forward">—</strong></div>
+<div class="reading"><span>Dock left offset (Y)</span><strong id="dock-left">—</strong></div>
+<div class="reading"><span>Dock distance</span><strong id="dock-distance">—</strong></div>
+</div><p id="dock-position-status">Waiting for a fresh dock observation</p>
+<small>Measured dock location relative to the drone: X forward, Y left. Distance is the observed dock distance, not PID Z error or absolute height.</small>
+</div>
+<div class="card"><h3>Measured drone velocity</h3>
+<div class="readings" aria-live="off">
+<div class="reading"><span>Forward (body X)</span><strong id="velocity-forward">—</strong></div>
+<div class="reading"><span>Left (body Y)</span><strong id="velocity-left">—</strong></div>
+<div class="reading"><span>Up (body Z)</span><strong id="velocity-up">—</strong></div>
+<div class="reading"><span>Total speed</span><strong id="velocity-speed">—</strong></div>
+<div class="reading"><span>East (ENU X)</span><strong id="velocity-east">—</strong></div>
+<div class="reading"><span>North (ENU Y)</span><strong id="velocity-north">—</strong></div>
+</div><p id="velocity-status">Waiting for live vehicle telemetry</p>
+<small>Actual measured velocity in m/s, not commanded velocity. Body X/Y require vehicle heading; ENU velocity remains available without heading.</small>
+</div>
 <div class="card"><h3>Dock-relative error surface (estimated)</h3>
 <div class="row"><label>Surface range ± (m)
 <input id="surface-scale" type="number" min="0.01" max="1000" step="any" value="2"></label>
@@ -253,6 +291,7 @@ const plotRanges={x:{error:2,command:1,unit:'m',commandUnit:'m/s'},
 const defaultPlotRanges=JSON.parse(JSON.stringify(plotRanges));
 let surfaceScale=2; // Metres per axis; do not zoom as errors improve.
 let axis='x', latest=null, dirty=false, previous=null, holdDirty=false, fixedReferenceDirty=false;
+let velocityDirty=false;
 const history={}; names.forEach(a=>history[a]={e:[],c:[]});
 const surfaceSamples=[];
 let surfaceSetpoint=null, lastSurfaceTime=null;
@@ -310,13 +349,33 @@ document.querySelector('#reset-surface-scale').onclick=()=>{
   document.querySelector('#surface-scale-message').textContent='';drawPosition();
 };
 function select(a){
-  axis=a; dirty=false;
+  axis=a; dirty=false;velocityDirty=false;
+  document.querySelector('#k-v').disabled=a==='yaw';
+  document.querySelector('#apply-k-v').disabled=a==='yaw';
   showScaleControls();draw();
   document.querySelector('#distance-card').hidden=a!=='z';
   document.querySelectorAll('.axis').forEach(
     b=>b.classList.toggle('on',b.id==='axis-'+a));
-  fill();drawPosition();
+  fillVelocity();fill();drawPosition();
 }
+document.querySelector('#k-v').oninput=()=>velocityDirty=true;
+function fillVelocity(){
+  if(axis==='yaw'||velocityDirty||!latest?.velocity_feedback)return;
+  document.querySelector('#k-v').value=latest.velocity_feedback[axis]??0;
+}
+document.querySelector('#apply-k-v').onclick=async()=>{
+  let input=document.querySelector('#k-v'),message=document.querySelector('#k-v-message');
+  let raw=input.value.trim(),k_v=Number(raw);
+  if(!raw||!Number.isFinite(k_v)||k_v<0){
+    message.textContent='K_v must be finite and non-negative';return;
+  }
+  try{
+    let r=await fetch('/api/velocity-feedback',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({axis,k_v})});
+    let result=await r.json();message.textContent=result.message;
+    if(result.ok)velocityDirty=false;
+  }catch(e){message.textContent=e.message}
+};
 function fill(){
   let d=latest?.axes?.[axis]; if(!d||dirty)return;
   fields.forEach(n=>document.querySelector('#'+n).value=d[n]??0);
@@ -572,6 +631,33 @@ function draw(){
   }
   g.textAlign='left';
 }
+function updateMeasuredReadings(){
+  const display=(id,value,unit)=>{
+    document.querySelector('#'+id).textContent=Number.isFinite(value)?
+      value.toFixed(3)+' '+unit:'—';
+  };
+  const dock=latest?.measured_dock_position;
+  const dockFresh=Boolean(dock)&&Number.isFinite(latest?.dock_age_s)&&latest.dock_age_s<1;
+  display('dock-forward',dockFresh?dock.forward_m:null,'m');
+  display('dock-left',dockFresh?dock.left_m:null,'m');
+  display('dock-distance',dockFresh?dock.distance_m:null,'m');
+  document.querySelector('#dock-position-status').textContent=dockFresh?
+    'Live dock observation · age '+latest.dock_age_s.toFixed(2)+' s':
+    'Waiting for a fresh dock observation';
+  const body=latest?.measured_velocity_body_flu,enu=latest?.measured_velocity_enu;
+  const validEnu=Array.isArray(enu)&&enu.length===3&&enu.every(Number.isFinite);
+  const validBody=Array.isArray(body)&&body.length===3&&body.every(Number.isFinite);
+  display('velocity-forward',validBody?body[0]:null,'m/s');
+  display('velocity-left',validBody?body[1]:null,'m/s');
+  display('velocity-up',validEnu?enu[2]:null,'m/s');
+  display('velocity-speed',validEnu?Math.hypot(...enu):null,'m/s');
+  display('velocity-east',validEnu?enu[0]:null,'m/s');
+  display('velocity-north',validEnu?enu[1]:null,'m/s');
+  document.querySelector('#velocity-status').textContent=validBody?
+    'Live measured velocity · body FLU and map ENU':validEnu?
+    'Body X/Y unavailable (heading missing); ENU velocity is live':
+    'Waiting for live vehicle telemetry';
+}
 async function poll(){
   try{
     let s=await(await fetch('/api/state')).json();latest=s.connected?s.telemetry:null;
@@ -602,7 +688,7 @@ async function poll(){
       sat.className='badge '+(d.saturated?'bad':'');
       let pause=document.querySelector('#pause');
       pause.textContent=latest.descent_paused?'DESCENT PAUSED':'descent active';
-      pause.className='badge '+(latest.descent_paused?'bad':'');fill();
+      pause.className='badge '+(latest.descent_paused?'bad':'');fill();fillVelocity();
       let card=document.querySelector('#distance-card');
       card.hidden=axis!=='z';
       let input=document.querySelector('#distance');
@@ -633,7 +719,7 @@ async function poll(){
       document.querySelector('#apply-distance').disabled=true;
       document.querySelector('#distance-status').textContent='Waiting for alignment and a valid dock observation';
     }
-    recordSurfaceSample();drawPosition();
+    updateMeasuredReadings();recordSurfaceSample();drawPosition();
   }catch(e){
     latest=null;document.querySelector('#link').textContent='waiting for PID data';
     document.querySelector('#link').className='badge bad';
@@ -641,7 +727,7 @@ async function poll(){
     document.querySelector('#hold-status').textContent='Waiting for live PID data';
     fixedReferenceSelect.disabled=true;document.querySelector('#apply-fixed-reference').disabled=true;
     document.querySelector('#fixed-reference-status').textContent='Waiting for live PID data';
-    recordSurfaceSample();drawPosition();
+    updateMeasuredReadings();recordSurfaceSample();drawPosition();
   }setTimeout(poll,200);
 }
 document.querySelector('#download').onclick=()=>{
@@ -649,6 +735,7 @@ document.querySelector('#download').onclick=()=>{
   let y='flight_cycle_manager:\n  ros__parameters:\n';
   names.forEach(a=>fields.forEach(n=>
     y+=`    pid_${a}_${n}: ${latest.axes[a]?.[n]??0}\n`));
+  ['x','y','z'].forEach(a=>y+=`    pid_${a}_k_v: ${latest.velocity_feedback?.[a]??0}\n`);
   let u=URL.createObjectURL(new Blob([y],{type:'text/yaml'}));
   let a=document.createElement('a');a.href=u;a.download='pid_tuned.yaml';a.click();
   URL.revokeObjectURL(u);

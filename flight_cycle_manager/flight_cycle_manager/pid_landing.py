@@ -104,8 +104,15 @@ class PidLandingConfig:
     gain_far_distance_m: float = 6.0
     near_pids: Optional[Tuple[PIDConfig, ...]] = None
     far_pids: Optional[Tuple[PIDConfig, ...]] = None
+    x_k_v: float = 0.0
+    y_k_v: float = 0.0
+    z_k_v: float = 0.0
 
     def __post_init__(self) -> None:
+        for axis in ("x", "y", "z"):
+            value = getattr(self, f"{axis}_k_v")
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{axis}_k_v must be finite and nonnegative")
         if self.fixed_central_reference_mode not in ("off", "descend_central", "hold_central"):
             raise ValueError("fixed_central_reference_mode must be off, descend_central or hold_central")
         numeric_fields = (
@@ -527,17 +534,17 @@ class PidLandingController:
             if self._align_distance_setpoint_m is None:
                 self._align_distance_setpoint_m = dock.distance_m
                 self._z_pid.reset()
-            command = self._visual_command(now, dock, z_enabled=False)
+            command = self._visual_command(now, dock, vehicle, z_enabled=False)
             velocity_z = self._z_pid.update(
                 self._align_distance_setpoint_m - dock.distance_m, now
             )
-            self._z_pid.track_applied_output(velocity_z)
+            velocity_z = self._feedback_vertical(velocity_z, vehicle)
             return PidLandingDecision(
                 self._state,
                 VelocityCommand(command.frame, command.velocity_x, command.velocity_y,
                                 velocity_z, command.yaw_rate_rad_s),
             )
-        command = self._visual_command(now, dock, z_enabled=False)
+        command = self._visual_command(now, dock, vehicle, z_enabled=False)
         if not self._alignment_is_stable(now, dock, tolerance):
             return PidLandingDecision(self._state, command)
 
@@ -575,7 +582,7 @@ class PidLandingController:
         return PidLandingDecision(
             self._state,
             self._visual_command(
-                now, control_dock, z_enabled=True,
+                now, control_dock, vehicle, z_enabled=True,
                 vertical_limit_m_s=(
                     self._config.outer_descent_speed_m_s
                     if self._state is PidLandingState.DESCEND_OUTER
@@ -642,6 +649,7 @@ class PidLandingController:
             self._visual_command(
                 now,
                 dock,
+                vehicle,
                 z_enabled=not self._descent_paused,
                 vertical_limit_m_s=self._config.outer_descent_speed_m_s,
             ),
@@ -770,6 +778,7 @@ class PidLandingController:
             self._visual_command(
                 now,
                 control_dock,
+                vehicle,
                 z_enabled=not self._descent_paused,
                 vertical_limit_m_s=self._config.central_descent_speed_m_s,
             ),
@@ -920,8 +929,9 @@ class PidLandingController:
                 + error_north_m * math.sin(heading_rad),
                 now,
             )
-            velocity_x, velocity_y = self._limit_horizontal(
-                velocity_x, velocity_y, self._config.touchdown_max_horizontal_speed_m_s,
+            velocity_x, velocity_y = self._feedback_horizontal(
+                velocity_x, velocity_y, vehicle,
+                self._config.touchdown_max_horizontal_speed_m_s,
             )
             if self._touchdown_reference_heading_rad is not None:
                 yaw_rate = self._limit_symmetric(
@@ -1043,6 +1053,7 @@ class PidLandingController:
         self,
         now: float,
         dock: DockObservation,
+        vehicle: VehicleObservation,
         *,
         z_enabled: bool,
         vertical_limit_m_s: Optional[float] = None,
@@ -1054,8 +1065,8 @@ class PidLandingController:
         yaw_rate = self._yaw_pid.update(
             self._wrap_yaw(dock.yaw_error_rad), now
         )
-        velocity_x, velocity_y = self._limit_horizontal(
-            velocity_x, velocity_y, self._horizontal_speed_limit(),
+        velocity_x, velocity_y = self._feedback_horizontal(
+            velocity_x, velocity_y, vehicle, self._horizontal_speed_limit(),
         )
         yaw_rate = max(
             -self._config.max_yaw_rate_rad_s,
@@ -1068,11 +1079,9 @@ class PidLandingController:
                 self._distance_setpoint_m - dock.distance_m,
                 now,
             )
-            if vertical_limit_m_s is not None:
-                velocity_z = self._limit_symmetric(
-                    velocity_z, vertical_limit_m_s
-                )
-            self._z_pid.track_applied_output(velocity_z)
+            velocity_z = self._feedback_vertical(
+                velocity_z, vehicle, vertical_limit_m_s,
+            )
         return VelocityCommand(
             VelocityFrame.BODY_FLU,
             velocity_x,
@@ -1080,6 +1089,34 @@ class PidLandingController:
             velocity_z,
             yaw_rate,
         )
+
+    def _feedback_horizontal(
+        self, x: float, y: float, vehicle: VehicleObservation, limit: float,
+    ) -> Tuple[float, float]:
+        heading = self._finite_heading(vehicle)
+        east, north = vehicle.velocity_enu_m_s[:2]
+        if (heading is not None and math.isfinite(east) and math.isfinite(north)):
+            measured_x = east * math.sin(heading) + north * math.cos(heading)
+            measured_y = -east * math.cos(heading) + north * math.sin(heading)
+            x -= self._config.x_k_v * measured_x
+            y -= self._config.y_k_v * measured_y
+        return self._limit_horizontal(x, y, limit)
+
+    def _feedback_vertical(
+        self, z: float, vehicle: VehicleObservation, limit: Optional[float] = None,
+    ) -> float:
+        measured_z = vehicle.velocity_enu_m_s[2]
+        if math.isfinite(measured_z):
+            z -= self._config.z_k_v * measured_z
+        if limit is not None:
+            z = self._limit_symmetric(z, limit)
+        else:
+            z = self._limit_symmetric(z, self._z_pid.config.output_limit)
+        self._z_pid.track_applied_output(z)
+        return z
+
+    def reconfigure_velocity_feedback(self, *, x: float, y: float, z: float) -> None:
+        self._config = replace(self._config, x_k_v=x, y_k_v=y, z_k_v=z)
 
     def _advance_distance_setpoint(
         self,
@@ -1400,6 +1437,8 @@ class PidLandingController:
             "gain_distance_m": self._gain_distance_m,
             "gain_near_distance_m": self._config.gain_near_distance_m,
             "gain_far_distance_m": self._config.gain_far_distance_m,
+            "velocity_feedback": {axis: getattr(self._config, f"{axis}_k_v")
+                                  for axis in ("x", "y", "z")},
             "axes": {axis: pid.diagnostics()
                      for axis, pid in zip(("x", "y", "z", "yaw"), self._pids())},
         }

@@ -455,6 +455,9 @@ class FlightCycleManager(Node):
             "pid_target_loss_grace_s" : 0.5,
             "pid_gain_near_distance_m": 0.2,
             "pid_gain_far_distance_m": 6.0,
+            "pid_x_k_v": 0.0,
+            "pid_y_k_v": 0.0,
+            "pid_z_k_v": 0.0,
             "pid_x_kp": 1.0,
             "pid_x_ki": 0.0,
             "pid_x_kd": 0.0,
@@ -2084,6 +2087,9 @@ class FlightCycleManager(Node):
             max_yaw_rate_rad_s=max_yaw,
             x_pid=base_pids[0], y_pid=base_pids[1],
             z_pid=base_pids[2], yaw_pid=base_pids[3],
+            x_k_v=self._positive_parameter("pid_x_k_v", allow_zero=True),
+            y_k_v=self._positive_parameter("pid_y_k_v", allow_zero=True),
+            z_k_v=self._positive_parameter("pid_z_k_v", allow_zero=True),
             gain_near_distance_m=self._positive_parameter("pid_gain_near_distance_m"),
             gain_far_distance_m=self._positive_parameter("pid_gain_far_distance_m"),
             near_pids=self._build_distance_pid_configs("near", base_pids),
@@ -2142,6 +2148,8 @@ class FlightCycleManager(Node):
                    for axis in ("x", "y", "z", "yaw")
                    for suffix in tunable_suffixes)
         }
+        velocity_updates = {name: updates[name] for name in
+                            ("pid_x_k_v", "pid_y_k_v", "pid_z_k_v") if name in updates}
         has_distance_update = "pid_align_distance_setpoint_m" in updates
         distance_update = updates.get("pid_align_distance_setpoint_m")
         schedule_updates = {
@@ -2154,7 +2162,7 @@ class FlightCycleManager(Node):
         }
         has_fixed_mode_update = "pid_fixed_central_reference_mode" in updates
         has_hold_update = "pid_hold_at_state" in updates
-        if not (tuning_updates or schedule_updates or has_distance_update
+        if not (tuning_updates or velocity_updates or schedule_updates or has_distance_update
                 or has_hold_update or has_fixed_mode_update):
             return SetParametersResult(successful=True)
         try:
@@ -2197,7 +2205,27 @@ class FlightCycleManager(Node):
                 diagnostics = backend.diagnostics()
                 if not diagnostics["align_dock_visible"]:
                     raise ValueError("wait for a fresh dock observation before setting Z")
-            if not tuning_updates and not schedule_updates:
+            for name, value in velocity_updates.items():
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value < 0.0):
+                    raise ValueError(f"{name} must be finite and nonnegative")
+            if velocity_updates and not tuning_updates and not schedule_updates:
+                if backend is not None:
+                    backend.reconfigure_velocity_feedback(**{
+                        axis: float(updates.get(f"pid_{axis}_k_v",
+                                                self.get_parameter(f"pid_{axis}_k_v").value))
+                        for axis in ("x", "y", "z")
+                    })
+                if has_distance_update:
+                    backend.set_align_distance_setpoint(distance_update)
+                if has_hold_update:
+                    if self._state is CycleState.LANDING_BACKEND and backend is not None:
+                        backend.set_hold_at_state(hold_state)
+                    self._pid_hold_at_state = hold_state
+                if has_fixed_mode_update and self._state is CycleState.LANDING_BACKEND and backend is not None:
+                    backend.set_fixed_central_reference_mode(fixed_mode)
+                return SetParametersResult(successful=True)
+            if not tuning_updates and not schedule_updates and not velocity_updates:
                 if has_distance_update:
                     backend.set_align_distance_setpoint(distance_update)
                 if has_hold_update:
@@ -2239,6 +2267,12 @@ class FlightCycleManager(Node):
             reconfigure = getattr(backend, "reconfigure_pids", None)
             if callable(reconfigure):
                 reconfigure(configs, near, far, near_distance, far_distance)
+            if velocity_updates and backend is not None:
+                backend.reconfigure_velocity_feedback(**{
+                    axis: float(updates.get(f"pid_{axis}_k_v",
+                                            self.get_parameter(f"pid_{axis}_k_v").value))
+                    for axis in ("x", "y", "z")
+                })
             if has_distance_update:
                 backend.set_align_distance_setpoint(distance_update)
             if has_hold_update:
@@ -2281,6 +2315,13 @@ class FlightCycleManager(Node):
             "measured_velocity_enu": list(vehicle.velocity_enu_m_s),
         })
         data["dock_distance_m"] = dock.distance_m if dock is not None else None
+        # Keep the measured camera offsets separate from the PID error, which
+        # can refer to a latched target or a distance setpoint instead.
+        data["measured_dock_position"] = ({
+            "forward_m": dock.forward_m,
+            "left_m": dock.left_m,
+            "distance_m": dock.distance_m,
+        } if dock is not None else None)
         heading = vehicle.heading_rad
         if heading is not None and math.isfinite(heading):
             east, north, up = vehicle.velocity_enu_m_s

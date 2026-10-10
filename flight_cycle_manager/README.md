@@ -378,6 +378,19 @@ Use the dashboard to modify the active gains and inspect
 
 ### Live PID tuning
 
+Measured-velocity damping for translational PID commands is independently tuned
+with `pid_x_k_v`, `pid_y_k_v`, and `pid_z_k_v` (default `0.0`):
+`v_cmd = v_pid - k_v * v_mea`. The X/Y measurement is rotated from ENU into
+body FLU using vehicle heading; without heading, horizontal damping is skipped.
+Yaw and non-PID safety/recovery commands are unaffected. Configure these in
+`config/pid_landing.yaml`, with live ROS parameters, or with the dashboard's
+selected-axis **K_v** control. Velocity limits still apply to the final command.
+
+The dashboard also displays measured dock forward/left offsets and distance,
+separately from PID tracking errors, plus measured drone velocity in body FLU
+and map ENU and total speed. Stale dock observations are hidden; missing heading
+leaves body X/Y unavailable while ENU velocity and upward velocity remain visible.
+
 PID gains can be changed while a PID landing is active. Updates are validated
 atomically and ramped over 0.5 seconds to avoid a command step. The active
 controller keeps its derivative and integral history, while enabling or

@@ -11,6 +11,7 @@ from flight_cycle_manager.pid_tuner import (
     DASHBOARD_HTML, TelemetryStore, _WebApp, _handler_for,
     parse_distance_request, parse_gain_request, parse_hold_request,
     parse_fixed_reference_request,
+    parse_velocity_feedback_request,
 )
 from flight_cycle_manager.pid_landing import PidLandingState
 from flight_cycle_manager.pid_landing_backend import PidLandingBackend
@@ -21,6 +22,45 @@ def test_gain_request_accepts_one_complete_axis_update():
     assert parse_gain_request({
         "axis": "yaw", "kp": 1, "ki": 0.2, "kd": 0.03,
     }) == ("yaw", 1.0, 0.2, 0.03)
+
+
+def test_velocity_feedback_request_and_dashboard():
+    assert parse_velocity_feedback_request({"axis": "x", "k_v": 0}) == ("x", 0.0)
+    assert parse_velocity_feedback_request({"axis": "z", "k_v": 0.3}) == ("z", 0.3)
+    for payload in ({"axis": "yaw", "k_v": 0.1},
+                    {"axis": "x", "k_v": True}, {"axis": "x", "k_v": -1},
+                    {"axis": "x", "k_v": math.nan}, {"axis": "y", "k_v": "1"}):
+        with pytest.raises(ValueError):
+            parse_velocity_feedback_request(payload)
+    assert 'id="k-v"' in DASHBOARD_HTML
+    assert "fetch('/api/velocity-feedback'" in DASHBOARD_HTML
+    assert 'pid_${a}_k_v:' in DASHBOARD_HTML
+
+
+def test_velocity_feedback_endpoint_forwards_only_selected_axis():
+    received = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_for(
+        _WebApp(TelemetryStore(), lambda parameters: (
+            received.append(parameters) or {"ok": True, "message": "applied"}))))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        def post(payload):
+            request = Request(f"http://127.0.0.1:{server.server_port}/api/velocity-feedback",
+                              data=json.dumps(payload).encode(), method="POST")
+            try:
+                response = urlopen(request, timeout=2)
+            except HTTPError as error:
+                response = error
+            with response:
+                return response.status, json.load(response)
+        assert post({"axis": "y", "k_v": 0.4})[0] == 200
+        assert post({"axis": "yaw", "k_v": 0.4})[0] == 400
+        assert received == [{"pid_y_k_v": 0.4}]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 @pytest.mark.parametrize("payload", [
@@ -212,6 +252,20 @@ def test_relative_error_view_stays_visible_on_all_axis_tabs():
     assert 'Z error unavailable (no setpoint)' in DASHBOARD_HTML
     assert 'latest.dock_age_s < 1' in DASHBOARD_HTML
     assert "(error.yaw*180/Math.PI).toFixed(1)" in DASHBOARD_HTML
+
+
+def test_dashboard_measured_position_and_velocity_are_separate_from_pid_error():
+    for name in ("dock-forward", "dock-left", "dock-distance",
+                 "velocity-forward", "velocity-left", "velocity-up",
+                 "velocity-east", "velocity-north", "velocity-speed"):
+        assert DASHBOARD_HTML.count(f'id="{name}"') == 1
+    assert 'latest?.measured_dock_position' in DASHBOARD_HTML
+    assert 'latest?.measured_velocity_body_flu' in DASHBOARD_HTML
+    assert 'latest?.measured_velocity_enu' in DASHBOARD_HTML
+    assert 'Math.hypot(...enu)' in DASHBOARD_HTML
+    assert 'latest.dock_age_s<1' in DASHBOARD_HTML
+    assert 'Body X/Y unavailable (heading missing)' in DASHBOARD_HTML
+    assert DASHBOARD_HTML.count('updateMeasuredReadings();recordSurfaceSample();') == 2
 
 
 def test_dashboard_places_selection_and_errors_left_of_plot():

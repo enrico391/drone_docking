@@ -1,6 +1,7 @@
 """Live tuning must affect the active backend, not only the parameter store."""
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -50,6 +51,38 @@ def test_live_gains_change_active_output_and_reject_invalid_batch(monkeypatch):
         vehicle.state = airborne_state(1.7)
         manager.tick(1.7)
         assert vehicle.velocity_calls[-1][1] == pytest.approx(0.2)
+    finally:
+        manager.close()
+
+
+def test_live_velocity_feedback_changes_active_backend_and_rejects_invalid_batch(monkeypatch):
+    manager, vehicle = manager_at_landing_boundary(monkeypatch)
+    try:
+        monkeypatch.setattr(manager, "_dock_observation", lambda now: dock_observation(now))
+        vehicle.state = airborne_state(1.1)
+        manager.tick(1.1)
+        backend = manager.backend
+        result = manager.set_parameters_atomically([
+            Parameter("pid_x_k_v", value=0.4),
+            Parameter("pid_y_k_v", value=0.2),
+            Parameter("pid_z_k_v", value=0.3),
+        ])
+        assert result.successful
+        assert manager.backend is backend
+        assert backend.diagnostics()["velocity_feedback"] == {
+            "x": 0.4, "y": 0.2, "z": 0.3,
+        }
+        vehicle.state = replace(airborne_state(1.2), heading_rad=0.0,
+                                velocity_enu_m_s=(-0.5, 0.5, 0.05))
+        manager.tick(1.2)
+        assert vehicle.velocity_calls[-1][1:3] == pytest.approx((-0.1, -0.2))
+        result = manager.set_parameters_atomically([
+            Parameter("pid_x_k_v", value=0.8),
+            Parameter("pid_y_k_v", value=-0.1),
+        ])
+        assert not result.successful
+        assert manager.get_parameter("pid_x_k_v").value == 0.4
+        assert backend.diagnostics()["velocity_feedback"]["x"] == 0.4
     finally:
         manager.close()
 
@@ -155,9 +188,19 @@ def test_pid_diagnostics_match_command_and_body_velocity(monkeypatch):
         assert data["error"]["x"] == pytest.approx(0.1)
         assert data["command_body_flu"][0] == pytest.approx(0.1)
         assert data["measured_velocity_body_flu"] == [0.0, 0.0, 0.05]
+        assert data["measured_dock_position"] == {
+            "forward_m": 0.1, "left_m": -0.1, "distance_m": 2.0,
+        }
         assert data["axes"]["x"]["p"] == pytest.approx(0.1)
         assert data["axes"]["x"]["kp"] == 1.0
         assert data["dock_age_s"] == 0.0
+        monkeypatch.setattr(manager, "_dock_observation", lambda now: None)
+        vehicle.state = airborne_state(1.2)
+        manager.tick(1.2)
+        missing = json.loads(published[-1])
+        assert missing["measured_dock_position"] is None
+        assert missing["measured_velocity_body_flu"] is None
+        assert missing["measured_velocity_enu"] == [0.0, 0.0, 0.05]
     finally:
         manager.close()
 

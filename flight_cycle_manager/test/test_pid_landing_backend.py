@@ -148,6 +148,80 @@ def start_backend(config=None):
     return backend
 
 
+def test_velocity_feedback_uses_independent_body_axes_and_preserves_yaw():
+    backend = start_backend(pid_config(x_k_v=0.5, y_k_v=0.25, z_k_v=0.75))
+    vehicle = vehicle_observation(heading_rad=0.0, velocity_enu_m_s=(-0.4, 0.2, 0.3))
+    decision = backend.update(now=1.0, dock=dock_observation(1.0), vehicle=vehicle)
+    assert decision.velocity.velocity_x == pytest.approx(0.0)
+    assert decision.velocity.velocity_y == pytest.approx(-0.2)
+    assert decision.velocity.velocity_z == 0.0  # Normal alignment does not control Z.
+    assert decision.velocity.yaw_rate_rad_s == pytest.approx(0.05)
+
+    backend = start_backend(pid_config(x_k_v=0.5, y_k_v=0.25))
+    # At +90 degrees NED, East is forward and North is left.
+    vehicle = vehicle_observation(heading_rad=math.pi / 2,
+                                  velocity_enu_m_s=(0.2, -0.4, 0.0))
+    command = backend.update(now=1.0, dock=dock_observation(1.0), vehicle=vehicle).velocity
+    assert (command.velocity_x, command.velocity_y) == pytest.approx((0.0, 0.0))
+
+
+def test_velocity_feedback_clamps_after_subtraction_and_skips_unknown_heading():
+    backend = start_backend(pid_config(x_k_v=3.0, y_k_v=2.0))
+    dock = dock_observation(1.0)
+    vehicle = vehicle_observation(heading_rad=0.0, velocity_enu_m_s=(0.0, -1.0, 0.0))
+    command = backend.update(now=1.0, dock=dock, vehicle=vehicle).velocity
+    scale = 0.5 / math.hypot(3.1, -0.1)
+    assert (command.velocity_x, command.velocity_y) == pytest.approx(
+        (3.1 * scale, -0.1 * scale))
+    backend = start_backend(pid_config(x_k_v=3.0, y_k_v=2.0))
+    command = backend.update(now=1.0, dock=dock,
+                             vehicle=vehicle_observation(velocity_enu_m_s=(0, -1, 0))).velocity
+    assert (command.velocity_x, command.velocity_y) == pytest.approx((0.1, -0.1))
+
+
+def test_alignment_debug_z_feedback_and_live_reconfiguration():
+    backend = PidLandingBackend(pid_config(), align_only=True)
+    backend.start(now=0.0, dock=dock_observation(0.0), vehicle=vehicle_observation())
+    vehicle = vehicle_observation(velocity_enu_m_s=(0.0, 0.0, 0.2))
+    backend.update(now=1.0, dock=dock_observation(1.0), vehicle=vehicle)
+    backend.set_align_distance_setpoint(2.2)
+    baseline = backend.update(now=1.1, dock=dock_observation(1.1), vehicle=vehicle).velocity
+    backend.reconfigure_velocity_feedback(x=0.0, y=0.0, z=0.5)
+    command = backend.update(now=1.2, dock=dock_observation(1.2), vehicle=vehicle).velocity
+    assert command.velocity_z == pytest.approx(baseline.velocity_z - 0.1)
+    assert backend.diagnostics()["velocity_feedback"] == {"x": 0.0, "y": 0.0, "z": 0.5}
+
+
+def test_descent_z_feedback_is_bounded_and_paused_descent_stays_zero():
+    backend = start_backend(pid_config(z_k_v=2.0))
+    vehicle = vehicle_observation(heading_rad=0.0, velocity_enu_m_s=(0.0, 0.0, -1.0))
+    backend.update(now=1.0, dock=dock_observation(1.0), vehicle=vehicle)
+    backend.update(now=2.1, dock=dock_observation(2.1), vehicle=vehicle)
+    assert backend.diagnostics()["velocity_feedback"]["z"] == 2.0
+    descending = backend.update(now=2.2, dock=dock_observation(2.2), vehicle=vehicle)
+    assert descending.substate == "DESCEND_OUTER"
+    assert abs(descending.velocity.velocity_z) <= 0.3
+    # Loss of alignment pauses the Z PID, not a zero PID output to be damped.
+    paused = backend.update(now=2.3, dock=dock_observation(
+        2.3, forward_m=1.0), vehicle=vehicle)
+    assert paused.velocity.velocity_z == 0.0
+
+
+def test_touchdown_horizontal_feedback_respects_touchdown_limit():
+    backend = start_backend(pid_config(x_k_v=1.0, y_k_v=0.5))
+    enter_touchdown_commitment_with_reference(backend, heading_rad=0.0)
+    command = backend.update(now=2.9, dock=None, vehicle=vehicle_observation(
+        heading_rad=0.0, velocity_enu_m_s=(-1.0, -1.0, 0.0))).velocity
+    assert math.hypot(command.velocity_x, command.velocity_y) == pytest.approx(0.5)
+    assert command.velocity_z == -0.05
+
+
+@pytest.mark.parametrize("value", [-0.1, math.nan, math.inf])
+def test_velocity_feedback_config_rejects_invalid_gain(value):
+    with pytest.raises(ValueError, match="x_k_v"):
+        pid_config(x_k_v=value)
+
+
 def test_gains_follow_dock_distance_independent_of_state_and_hold_on_loss():
     base = controller_pid_config(output_limit=0.5)
     near = replace(base, kp=0.5)
