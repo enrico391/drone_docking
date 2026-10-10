@@ -205,6 +205,49 @@ def test_pid_diagnostics_match_command_and_body_velocity(monkeypatch):
         manager.close()
 
 
+def test_frame_age_uses_ros_clock_and_tracks_last_pose_during_loss(monkeypatch):
+    from types import SimpleNamespace
+
+    manager, vehicle = manager_at_landing_boundary(monkeypatch)
+    try:
+        published = []
+        clock = SimpleNamespace(nanoseconds=100_200_000_000)
+        monkeypatch.setattr(manager, "get_clock", lambda: SimpleNamespace(now=lambda: clock),
+                            raising=False)
+        monkeypatch.setattr(manager._pid_debug_publisher, "publish",
+                            lambda msg: published.append(json.loads(msg.data)))
+        dock = replace(dock_observation(1.1), source_stamp_s=100.0)
+        monkeypatch.setattr(manager, "_dock_observation", lambda now: dock)
+        vehicle.state = airborne_state(1.1)
+        manager.tick(1.1)
+        assert published[-1]["frame_age_s"] == pytest.approx(0.2)
+        assert published[-1]["dock_age_s"] == 0.0
+        assert published[-1]["frame_age_status"] == "ok"
+
+        manager._dock_pose = SimpleNamespace(
+            header=SimpleNamespace(stamp=SimpleNamespace(sec=100, nanosec=0)))
+        monkeypatch.setattr(manager, "_dock_observation", lambda now: None)
+        clock.nanoseconds = 100_500_000_000
+        vehicle.state = airborne_state(1.2)
+        manager.tick(1.2)
+        assert published[-1]["frame_age_s"] == pytest.approx(0.5)
+        assert published[-1]["dock_usable"] is False
+
+        clock.nanoseconds = 99_000_000_000
+        vehicle.state = airborne_state(1.3)
+        manager.tick(1.3)
+        assert published[-1]["frame_age_s"] == -1.0
+        assert published[-1]["frame_age_status"] == "future_stamp"
+
+        manager._dock_pose.header.stamp.sec = 0
+        vehicle.state = airborne_state(1.4)
+        manager.tick(1.4)
+        assert published[-1]["frame_age_s"] is None
+        assert published[-1]["frame_age_status"] == "missing_stamp"
+    finally:
+        manager.close()
+
+
 def test_live_distance_schedule_updates_and_invalid_batches(monkeypatch):
     manager, vehicle = manager_at_landing_boundary(monkeypatch)
     try:

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import os
 import math
+import json
+import time
 import yaml
 import numpy as np
 import cv2
@@ -170,6 +172,7 @@ class DockLocalizer(Node):
         self.pose_pub = self.create_publisher(PoseStamped, '/dock/pose', 10)
         self.mode_pub = self.create_publisher(String, '/dock/mode', 10)
         self.ids_pub = self.create_publisher(Int32MultiArray, '/dock/visible_tag_ids', 10)
+        self.timing_pub = self.create_publisher(String, '/dock/timing', 10)
         self.debug_pub = None
         if self.get_parameter('publish_debug_image').value:
             self.debug_pub = self.create_publisher(
@@ -384,7 +387,16 @@ class DockLocalizer(Node):
                     0.8, (255, 255, 255), 2, cv2.LINE_AA)
         return image
 
+    def _frame_age_s(self, stamp):
+        """Age in ROS time; preserve negative ages to expose clock errors."""
+        stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+        if stamp_ns == 0:
+            return None
+        return (self.get_clock().now().nanoseconds - stamp_ns) * 1e-9
+
     def _image_cb(self, msg):
+        started = time.perf_counter()
+        image_age_s = self._frame_age_s(msg.header.stamp)
         if self.K is None:
             self.get_logger().warning(
                 'Waiting for CameraInfo...', throttle_duration_sec=3.0
@@ -393,7 +405,9 @@ class DockLocalizer(Node):
 
         bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        detection_started = time.perf_counter()
         detections = self.detector.detect(gray, estimate_tag_pose=False)
+        detection_finished = time.perf_counter()
 
         candidates = []
         visible_ids = []
@@ -410,6 +424,8 @@ class DockLocalizer(Node):
         self.ids_pub.publish(ids_msg)
 
         T, mode = self._select_pose(candidates)
+        pose_age_s = None
+        filter_status = 'no_target'
         if T is not None:
             stamp_s = (
                 float(msg.header.stamp.sec)
@@ -417,6 +433,7 @@ class DockLocalizer(Node):
             )
             filtered_T, filter_status = self.pose_filter.update(T, stamp_s)
             if filtered_T is not None:
+                pose_age_s = self._frame_age_s(msg.header.stamp)
                 self._publish_pose(filtered_T, msg.header, mode)
             else:
                 self.get_logger().warning(
@@ -433,11 +450,28 @@ class DockLocalizer(Node):
             m.data = mode
             self.mode_pub.publish(m)
 
+        debug_started = time.perf_counter()
         if self.debug_pub is not None:
             dbg = self._draw_debug(bgr, candidates, mode)
             out = self.bridge.cv2_to_imgmsg(dbg, encoding='bgr8')
             out.header = msg.header
             self.debug_pub.publish(out)
+
+        finished = time.perf_counter()
+        timing = String()
+        timing.data = json.dumps({
+            'source_stamp_s': msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            'image_age_at_callback_s': image_age_s,
+            'pose_age_at_publish_s': pose_age_s,
+            'conversion_s': detection_started - started,
+            'detection_s': detection_finished - detection_started,
+            'pose_processing_s': debug_started - detection_finished,
+            'debug_image_s': finished - debug_started,
+            'callback_processing_s': finished - started,
+            'mode': mode,
+            'filter_status': filter_status,
+        }, allow_nan=False)
+        self.timing_pub.publish(timing)
 
 
 def main(args=None):

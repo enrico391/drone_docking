@@ -11,6 +11,31 @@ ROS 2 node for two-stage precision docking with multiple AprilTags.
 - The selected pose is temporally smoothed and implausible position jumps are
   rejected before `/dock/pose` is published.
 
+## Frame timing diagnostics
+
+While the camera and localizer run, inspect timing for each processed image:
+
+```bash
+ros2 topic echo /dock/timing
+```
+
+All durations are seconds. `image_age_at_callback_s` is ROS time at image
+callback entry minus the original image stamp. `pose_age_at_publish_s` is
+the same age immediately before publishing an accepted pose; it is `null`
+when no pose is published. `source_stamp_s` identifies the source image.
+`conversion_s` includes callback setup and image conversion; `detection_s`
+measures AprilTag detection; `pose_processing_s` includes candidate estimation,
+filtering and pose/mode publication; `debug_image_s` measures the optional debug
+image work. `callback_processing_s` covers the callback up to timing-message
+serialization. Processing durations use a monotonic clock.
+
+Timing is also published for no-target and filter-rejected frames, with `mode`
+and `filter_status`. Images received before camera calibration is available
+are skipped. Zero image timestamps produce `null` ages; negative ages are
+preserved to expose future timestamps or clock mismatch. Capture-age accuracy
+requires acquisition timestamps and synchronized ROS clocks. These ages do
+not include the extra signal lag introduced by pose smoothing.
+
 ## Dependencies
 
 ROS packages:

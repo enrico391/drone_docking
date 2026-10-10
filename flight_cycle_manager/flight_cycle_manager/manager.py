@@ -2315,6 +2315,19 @@ class FlightCycleManager(Node):
             "measured_velocity_enu": list(vehicle.velocity_enu_m_s),
         })
         data["dock_distance_m"] = dock.distance_m if dock is not None else None
+        # Unlike dock_age_s (time since receipt), this includes camera and
+        # localization latency. Keep reporting the last frame during loss.
+        source_stamp_s = dock.source_stamp_s if dock is not None else None
+        if source_stamp_s is None and self._dock_pose is not None:
+            stamp = self._dock_pose.header.stamp
+            source_stamp_s = stamp.sec + stamp.nanosec * 1e-9
+        data["frame_age_s"] = None
+        data["frame_age_status"] = "missing_stamp"
+        data["dock_usable"] = dock is not None
+        if source_stamp_s is not None and math.isfinite(source_stamp_s) and source_stamp_s > 0:
+            age = self.get_clock().now().nanoseconds * 1e-9 - source_stamp_s
+            data["frame_age_s"] = age
+            data["frame_age_status"] = "ok" if age >= 0 else "future_stamp"
         # Keep the measured camera offsets separate from the PID error, which
         # can refer to a latched target or a distance setpoint instead.
         data["measured_dock_position"] = ({

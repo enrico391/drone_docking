@@ -473,6 +473,17 @@ gains, P/I/D terms, saturation, and whether descent is paused:
 ros2 topic echo /flight_cycle_manager/pid_debug
 ```
 
+`frame_age_s` measures ROS time minus the source image timestamp when PID
+diagnostics are published in the control tick. It includes camera/localizer
+latency and time waiting in the manager. The existing `dock_age_s` measures
+only time since pose receipt. `frame_age_s` continues aging the last received
+pose during target loss; `dock_usable` indicates whether this tick has a usable
+dock observation. `frame_age_status` is `ok`, `future_stamp` (negative age), or
+`missing_stamp` (null age). These fields are diagnostic only and do not change
+target freshness checks or flight commands. Acquisition timestamps and
+synchronized ROS clocks are required; pose-filter lag is not measured here.
+Use `/dock/timing` to separate callback-entry age from localizer processing.
+
 Start with X/Y `Kp`; only add a small `Ki` when the trace shows a persistent
 offset. Descent pauses outside the phase's existing alignment tolerance and
 resumes inside 80% of that tolerance, preventing stale vertical error from
