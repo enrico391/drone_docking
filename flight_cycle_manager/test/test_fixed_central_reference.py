@@ -54,7 +54,7 @@ def test_descend_latch_ignores_later_camera_xy_yaw(mode, hold):
     assert result.velocity.velocity_y < 0
     assert result.velocity.yaw_rate_rad_s > 0
     assert backend.diagnostics()["control_error"] == pytest.approx(
-        {"x": 0.05, "y": -0.05, "yaw": 0.05})
+        {"x": 0.05, "y": -0.05, "yaw": 0.05, "z": 0.0})
     assert backend.diagnostics()["fixed_reference_enu_m"] == reference
 
 

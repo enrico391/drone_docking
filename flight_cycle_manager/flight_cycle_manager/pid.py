@@ -95,6 +95,7 @@ class PID:
     def diagnostics(self) -> dict:
         return dict(zip(("p", "i", "d"), self._terms),
                     kp=self.config.kp, ki=self.config.ki, kd=self.config.kd,
+                    error=self._last_error, unclamped_output=self._unclamped_output,
                     saturated=self._saturated)
 
     def update(self, error: float, now: float) -> float:

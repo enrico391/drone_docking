@@ -24,6 +24,7 @@ _MESSAGE_INTERVALS_US = (
     (32, 50_000),  # LOCAL_POSITION_NED at 20 Hz
     (33, 50_000),  # GLOBAL_POSITION_INT (altitude above home) at 20 Hz
     (30, 50_000),  # ATTITUDE at 20 Hz
+    (36, 100_000),  # SERVO_OUTPUT_RAW at 10 Hz (PWM outputs, not thrust)
     (245, 200_000),  # EXTENDED_SYS_STATE at 5 Hz
     (42, 200_000),  # MISSION_CURRENT at 5 Hz
     (1, 500_000),  # SYS_STATUS at 2 Hz
@@ -88,6 +89,14 @@ class VehicleState:
     mission_mode: Optional[int] = None
     mission_id: Optional[int] = None
     mission_current_at: float = 0.0
+    position_time_boot_ms: Optional[int] = None
+    attitude_ned_rad: Optional[Tuple[float, float, float]] = None
+    angular_velocity_body_frd_rad_s: Optional[Tuple[float, float, float]] = None
+    attitude_time_boot_ms: Optional[int] = None
+    attitude_at: float = 0.0
+    actuator_outputs_pwm_us: Optional[Tuple[Optional[int], ...]] = None
+    actuator_time_usec: Optional[int] = None
+    actuator_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -782,6 +791,7 @@ class MavlinkVehicle:
                     -float(message.vz),
                 ),
                 position_at=max(state.position_at, now),
+                position_time_boot_ms=_optional_int(getattr(message, "time_boot_ms", None)),
             )
         elif message_type == "GLOBAL_POSITION_INT":
             state = replace(
@@ -790,7 +800,30 @@ class MavlinkVehicle:
                 relative_altitude_at=max(state.relative_altitude_at, now),
             )
         elif message_type == "ATTITUDE":
-            state = replace(state, heading_rad=float(message.yaw))
+            attitude = tuple(getattr(message, axis, None) for axis in ("roll", "pitch", "yaw"))
+            rates = tuple(getattr(message, axis, None)
+                          for axis in ("rollspeed", "pitchspeed", "yawspeed"))
+            state = replace(
+                state, heading_rad=float(message.yaw),
+                attitude_ned_rad=attitude if all(
+                    value is not None and math.isfinite(value) for value in attitude
+                ) else None,
+                angular_velocity_body_frd_rad_s=rates if all(
+                    value is not None and math.isfinite(value) for value in rates
+                ) else None,
+                attitude_time_boot_ms=_optional_int(getattr(message, "time_boot_ms", None)),
+                attitude_at=max(state.attitude_at, now),
+            )
+        elif message_type == "SERVO_OUTPUT_RAW" and int(message.port) == 0:
+            state = replace(
+                state,
+                actuator_outputs_pwm_us=tuple(
+                    _optional_int(getattr(message, f"servo{channel}_raw", None))
+                    for channel in range(1, 17)
+                ),
+                actuator_time_usec=_optional_int(getattr(message, "time_usec", None)),
+                actuator_at=max(state.actuator_at, now),
+            )
         elif message_type == "EXTENDED_SYS_STATE":
             landed_state = int(message.landed_state)
             flying = {

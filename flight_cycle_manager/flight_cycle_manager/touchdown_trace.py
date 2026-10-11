@@ -1,9 +1,11 @@
-"""Optional per-update JSONL trace of the final PID approach."""
+"""Optional per-update JSONL trace of the complete PID docking procedure."""
 
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, TextIO
+
+from .numbered_logs import open_numbered_log
 
 
 class TouchdownTrace:
@@ -20,21 +22,16 @@ class TouchdownTrace:
     def active(self) -> bool:
         return self._file is not None
 
+    @property
+    def trace_id(self) -> Optional[str]:
+        return Path(self._file.name).stem if self._file is not None else None
+
     def start(self) -> None:
         if not self._enabled or self.active:
             return
         try:
             directory = Path(self._directory).expanduser()
-            directory.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
-            for index in range(1000):
-                try:
-                    self._file = (directory / f"touchdown_{stamp}_{index:03d}.jsonl").open(
-                        "x", encoding="utf-8")
-                    return
-                except FileExistsError:
-                    continue
-            raise RuntimeError("could not allocate a unique touchdown trace name")
+            _, self._file = open_numbered_log(directory, "touchdown", ".jsonl")
         except Exception as error:
             self._safe_warn(f"Could not create touchdown trace: {error}")
             self._enabled = False
@@ -59,10 +56,12 @@ class TouchdownTrace:
     def close(self) -> None:
         if self._file is None:
             return
+        trace_file = self._file
+        self._file = None
         try:
-            self._file.close()
-        finally:
-            self._file = None
+            trace_file.close()
+        except Exception as error:
+            self._safe_warn(f"Could not close touchdown trace: {error}")
 
     def disable(self) -> None:
         """Stop attempting disk writes after an unexpected recording failure."""

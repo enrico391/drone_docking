@@ -269,6 +269,35 @@ def test_vehicle_state_has_neutral_mission_progress_defaults():
     assert state.mission_current_at == 0.0
 
 
+def test_diagnostic_telemetry_retains_source_times_attitude_and_actuator_outputs(vehicle, connection):
+    """Catch source timestamps dropped or NED attitude/actuator values mislabelled."""
+    push_heartbeat(connection)
+    connection.incoming.extend([
+        FakeMessage("LOCAL_POSITION_NED", time_boot_ms=1234,
+                    x=1.0, y=2.0, z=-0.5, vx=0.2, vy=-0.3, vz=0.0),
+        FakeMessage("ATTITUDE", time_boot_ms=1250, roll=0.1, pitch=-0.2, yaw=0.3,
+                    rollspeed=0.4, pitchspeed=0.5, yawspeed=-0.6),
+        FakeMessage("SERVO_OUTPUT_RAW", time_usec=1260000, port=0,
+                    **{f"servo{i}_raw": 1000 + i * 10 for i in range(1, 9)}),
+    ])
+    vehicle.receive_telemetry(now=10.0)
+    assert vehicle.state.position_time_boot_ms == 1234
+    assert vehicle.state.attitude_time_boot_ms == 1250
+    assert vehicle.state.attitude_ned_rad == pytest.approx((0.1, -0.2, 0.3))
+    assert vehicle.state.angular_velocity_body_frd_rad_s == pytest.approx((0.4, 0.5, -0.6))
+    assert vehicle.state.attitude_at == 10.0
+    assert vehicle.state.actuator_outputs_pwm_us[:8] == (1010, 1020, 1030, 1040, 1050, 1060, 1070, 1080)
+    assert vehicle.state.actuator_time_usec == 1260000
+    assert vehicle.state.actuator_at == 10.0
+    connection.incoming.append(FakeMessage("SERVO_OUTPUT_RAW", time_usec=1300000,
+        port=1, **{f"servo{i}_raw": 2000 for i in range(1, 9)}))
+    vehicle.receive_telemetry(now=10.1)
+    assert vehicle.state.actuator_outputs_pwm_us[0] == 1010
+    requested_streams = [args[4] for args in connection.mav.calls_for("command_long_send")
+                         if args[2] == MAVLINK.MAV_CMD_SET_MESSAGE_INTERVAL]
+    assert MAVLINK.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW in requested_streams
+
+
 def test_global_position_provides_home_relative_altitude_in_metres(vehicle, connection):
     push_heartbeat(connection)
     connection.incoming.append(FakeMessage(

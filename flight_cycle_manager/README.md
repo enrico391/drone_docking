@@ -302,7 +302,8 @@ while disarmed, on the ground, or already present when the node starts are not
 accepted as triggers. Stale MAVLink telemetry also cancels the attempt; after
 the link recovers, another fresh LAND edge is required.
 
-Each approach writes a separate timestamped text trace under
+Each approach writes a separate numbered text trace (`landing_attempt_000001.txt`,
+`landing_attempt_000002.txt`, etc.) under
 `~/.ros/flight_cycle_manager/landing_attempts/`. The trace records lifecycle
 and PID state changes, vehicle and dock observations, recovery and disarm
 retries, cancellations, failures, and successful completion. Logging is enabled
@@ -315,14 +316,29 @@ ros2 launch flight_cycle_manager pid_landing_debug.launch.py \
   landing_attempt_log_enabled:=false
 ```
 
-For per-update measurements through final central descent and touchdown, enable
+For per-update measurements through the complete PID docking procedure, enable
 `touchdown_trace_enabled:=true` on either PID launch. This writes a separate
-`touchdown_*.jsonl` in `landing_attempt_log_directory`, beginning at
-`DESCEND_CENTRAL` (including the last visible tag and the commitment sample).
-Each flushed JSON line contains monotonic and wall time, actual position and
+`touchdown_000001.jsonl`, `touchdown_000002.jsonl`, etc. in
+`landing_attempt_log_directory`, beginning when the
+manager accepts the fresh airborne **LAND mode trigger**, before requesting
+GUIDED. In `flight_cycle` mode it begins at the mission landing handoff;
+alignment auto-start begins its trace when requesting GUIDED without a LAND
+trigger. Recording remains active through takeover, search, alignment,
+descent holds and touchdown. `START` includes a schema version, a unique
+`trace_id` (the filename stem), trigger reason, operation mode and hold setting.
+Each log type numbers independently, continuing after the highest existing
+number in its directory, including after a manager restart or Pi reboot.
+Names do not depend on the Pi's date/time. Old timestamped files remain intact
+and are ignored when choosing the next number; existing files are never
+overwritten. If you remove the numbered files or select an empty directory,
+numbering starts at 1 again. Wall-time fields inside logs still reflect the Pi's
+clock; use monotonic/ROS timestamps for signal alignment.
+Each flushed `SAMPLE` line contains monotonic, ROS and wall time, position and
 velocity in **ENU**, FC heading in **NED**, visible dock offset in **body FLU**,
-frozen touchdown target in **ENU**, the actual **body-FLU velocity** and yaw-rate
-command, and telemetry ages. Missing observations/commands are JSON `null`.
+frozen touchdown target in **ENU**, velocity and yaw-rate commands, and telemetry
+ages. Missing observations/commands are JSON `null`. One sample is written per
+manager tick after guidance and velocity sending; a tick with no velocity send
+has `command_send=null`, rather than repeating the previous command.
 `position_enu_m` and `velocity_enu_m_s` are the flight controller's
 `LOCAL_POSITION_NED` estimate converted to ENU, **not** independent position
 measurements. `horizontal_speed_m_s` is the norm of the estimated East/North
@@ -331,6 +347,49 @@ velocity. `frozen_target_enu_m` is `[east, north]`;
 target_north - position_north]` in metres, and `frozen_error_norm_m` is its
 horizontal norm (both are `null` before commitment).
 `command_body_flu_m_s` is `[forward, left, up]` in m/s.
+It is `null` for the search's **MAP_ENU** commands. Use `command_velocity_m_s`
+and `command_frame` for all stages; `measured_velocity_command_frame_m_s`
+expresses the FC velocity in that same frame. `measured_velocity_body_flu_m_s`
+uses FC heading to rotate horizontal ENU velocity into the command's
+heading-relative forward/left axes; it is `null` when heading is unavailable.
+
+`diagnostics` contains active P/I/D gains and terms, per-axis errors and
+unclamped outputs, saturation flags, velocity-feedback gains and the signed
+`velocity_feedback_terms` actually applied before limiting, the applied
+horizontal speed limit, distance setpoint, hold state, gain-schedule distance,
+and descent-pause/reference flags. `control_error` is the error used by the
+controller in body FLU (yaw in radians); it uses the latched reference during
+fixed-reference control and touchdown. A null Z error means the Z PID did not
+regulate height on that update. The visual dock offset remains separate.
+PID terms retain controller history on ticks without a PID update; a null
+`control_error` indicates that they are not a fresh visual/reference correction.
+`controller_updated_this_tick` distinguishes current backend diagnostics from
+retained context during handoff/cancellation. The final control tick is recorded
+before `END`, including completion's zero command and frozen reference.
+
+`source_image_stamp_s`, `frame_age_s`, `frame_age_status` and `dock_usable`
+carry the same image-age semantics as `pid_debug`. On ticks with a velocity
+send, `frame_age_s` is measured at the `command_send.ros_time_s` immediately
+before calling the transport; otherwise it is measured when recording.
+`command_send.start_monotonic_s` and `end_monotonic_s` bracket the transport
+call, and `sent` reports its return value, **not** FC receipt or acceptance.
+Source image timestamps must represent acquisition and share the ROS clock;
+camera-driver buffering and pose-filter lag cannot be inferred from receipt
+time alone. During target loss, the last image timestamp continues aging.
+
+`position_time_boot_ms` retains the FC source timestamp for both position and
+velocity; `position_received_monotonic_s` and `position_age_s`/`velocity_age_s`
+describe companion receipt. `attitude_ned_rad` is `[roll, pitch, yaw]` from
+ATTITUDE; body FRD angular rates, its FC timestamp and receipt age are retained.
+`actuator_outputs_pwm_us` lists port-0 SERVO_OUTPUT_RAW channels 1–16 (missing
+extensions are null), with source timestamp and receipt age. These are actuator
+outputs, not measured thrust or RPM; motor mapping depends on FC configuration.
+The transport requests actuator telemetry at 10 Hz. `relative_altitude_m` is
+altitude above home, while `dock_distance_m` is the visual target distance;
+neither field is an independent measurement of clearance above the dock.
+FC boot times, ROS time and companion monotonic time are distinct clocks;
+align them using a measured offset before estimating response delay.
+
 `END` records identify completion, failure, cancellation, or shutdown. For
 example:
 
@@ -339,10 +398,10 @@ ros2 launch flight_cycle_manager pid_landing_debug.launch.py \
   touchdown_trace_enabled:=true
 ```
 
-The trace is optional because per-update disk flushes can incur latency.
-Desired roll/pitch, FC-internal position/velocity targets and barometer data
-are **not** provided by the docking controller: download the corresponding
-ArduPilot onboard flight log to compare these with the trace. The checked-in
+The trace is optional because per-update disk flushes can incur latency. Trace
+creation/write failures disable recording without preventing guidance or pilot
+handback. Desired roll/pitch, FC-internal position/velocity targets and barometer
+data still require the corresponding ArduPilot onboard flight log. The checked-in
 real-drone parameters do not configure a rangefinder (`RNGFND1_TYPE=0`).
 
 ## Alignment-only PID tuning

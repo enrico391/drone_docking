@@ -263,6 +263,8 @@ class PidLandingController:
         self._fixed_reference_heading_rad: Optional[float] = None
         self._fixed_reference_pending = False
         self._control_error: Optional[dict] = None
+        self._velocity_feedback_terms: dict = {}
+        self._applied_horizontal_limit_m_s: Optional[float] = None
 
     def start_after_acquisition(self, now: float) -> None:
         """Begin at PID alignment after the shared search acquired the dock."""
@@ -414,6 +416,8 @@ class PidLandingController:
             return self._fail(now, "vehicle disarmed while mission was active")
 
         self._control_error = None
+        self._velocity_feedback_terms = {}
+        self._applied_horizontal_limit_m_s = None
         if self._fixed_reference_pending:
             usable, reason = self._usable_dock(dock)
             if not usable or dock.mode is not DockTargetMode.CENTRAL:
@@ -538,6 +542,7 @@ class PidLandingController:
             velocity_z = self._z_pid.update(
                 self._align_distance_setpoint_m - dock.distance_m, now
             )
+            self._control_error["z"] = self._align_distance_setpoint_m - dock.distance_m
             velocity_z = self._feedback_vertical(velocity_z, vehicle)
             return PidLandingDecision(
                 self._state,
@@ -852,6 +857,10 @@ class PidLandingController:
     def _latch_touchdown_or_fixed_reference(
         self, dock: DockObservation, vehicle: VehicleObservation,
     ) -> None:
+        """
+            Freeze the last aligned tag observation as the touchdown reference.
+            If a fixed reference is configured, use that instead of the tag.
+        """
         if self._fixed_reference_enu_m is not None:
             self._touchdown_reference_enu_m = self._fixed_reference_enu_m
             self._touchdown_reference_heading_rad = self._fixed_reference_heading_rad
@@ -917,6 +926,13 @@ class PidLandingController:
                 self._touchdown_reference_enu_m = reference_enu_m
             error_east_m = reference_enu_m[0] - position_east_m
             error_north_m = reference_enu_m[1] - position_north_m
+            self._control_error = {
+                "x": error_east_m * math.sin(heading_rad) + error_north_m * math.cos(heading_rad),
+                "y": -error_east_m * math.cos(heading_rad) + error_north_m * math.sin(heading_rad),
+                "z": None,
+                "yaw": self._wrap_yaw(heading_rad - self._touchdown_reference_heading_rad)
+                if self._touchdown_reference_heading_rad is not None else None,
+            }
             # NED yaw is clockwise positive, so the forward axis is
             # (sin, cos) and the left axis is (-cos, sin) in East/North.
             velocity_x = self._x_pid.update(
@@ -1059,7 +1075,9 @@ class PidLandingController:
         vertical_limit_m_s: Optional[float] = None,
     ) -> VelocityCommand:
         self._control_error = {"x": dock.forward_m, "y": dock.left_m,
-                               "yaw": self._wrap_yaw(dock.yaw_error_rad)}
+                               "yaw": self._wrap_yaw(dock.yaw_error_rad),
+                               "z": self._distance_setpoint_m - dock.distance_m
+                               if z_enabled else None}
         velocity_x = self._x_pid.update(dock.forward_m, now)
         velocity_y = self._y_pid.update(dock.left_m, now)
         yaw_rate = self._yaw_pid.update(
@@ -1098,6 +1116,10 @@ class PidLandingController:
         if (heading is not None and math.isfinite(east) and math.isfinite(north)):
             measured_x = east * math.sin(heading) + north * math.cos(heading)
             measured_y = -east * math.cos(heading) + north * math.sin(heading)
+            self._velocity_feedback_terms.update({
+                "x": -self._config.x_k_v * measured_x,
+                "y": -self._config.y_k_v * measured_y,
+            })
             x -= self._config.x_k_v * measured_x
             y -= self._config.y_k_v * measured_y
         return self._limit_horizontal(x, y, limit)
@@ -1107,6 +1129,7 @@ class PidLandingController:
     ) -> float:
         measured_z = vehicle.velocity_enu_m_s[2]
         if math.isfinite(measured_z):
+            self._velocity_feedback_terms["z"] = -self._config.z_k_v * measured_z
             z -= self._config.z_k_v * measured_z
         if limit is not None:
             z = self._limit_symmetric(z, limit)
@@ -1163,6 +1186,9 @@ class PidLandingController:
     def _touchdown_alignment_is_stable(
         self, now: float, dock: DockObservation, vehicle: VehicleObservation,
     ) -> bool:
+        """
+        Check if the vehicle is aligned with the dock and has a stable lateral speed for touchdown.
+        """
         # Vertical descent is intentional; only measured lateral speed gates
         # touchdown. Both alignment and speed must stay good for their own dwell.
         vx, vy = vehicle.velocity_enu_m_s[:2]
@@ -1337,6 +1363,7 @@ class PidLandingController:
     def _limit_horizontal(
         self, velocity_x: float, velocity_y: float, limit_m_s: float,
     ) -> Tuple[float, float]:
+        self._applied_horizontal_limit_m_s = limit_m_s
         speed = math.hypot(velocity_x, velocity_y)
         if speed > limit_m_s:
             scale = limit_m_s / speed
@@ -1416,6 +1443,8 @@ class PidLandingController:
 
     def diagnostics(self) -> dict:
         return {
+            "velocity_feedback_terms": dict(self._velocity_feedback_terms),
+            "applied_horizontal_limit_m_s": self._applied_horizontal_limit_m_s,
             "descent_paused": self._descent_paused,
             "fixed_central_reference_mode": self._config.fixed_central_reference_mode,
             "fixed_reference_active": self._fixed_reference_enu_m is not None,

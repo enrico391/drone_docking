@@ -30,6 +30,7 @@ from .landing_backend import (
     DockTargetMode,
     LandingBackendOutcome,
     VehicleObservation,
+    VelocityCommand,
     VelocityFrame,
 )
 from .landing_target import (
@@ -318,6 +319,12 @@ class FlightCycleManager(Node):
             directory=str(self.get_parameter("landing_attempt_log_directory").value),
             warn=self.get_logger().warning,
         )
+        self._trace_decision = None
+        self._trace_controller = None
+        self._trace_velocity_command = None
+        self._trace_command_send = None
+        self._trace_tick_now = None
+        self._trace_pending_end = None
         self._last_landing_debug_event: Optional[tuple[object, ...]] = None
         self._closed = False
 
@@ -564,6 +571,24 @@ class FlightCycleManager(Node):
         return response
 
     def tick(self, now: float) -> None:
+        """Advance guidance, then record this tick after any velocity send."""
+        self._trace_decision = None
+        self._trace_controller = None
+        self._trace_velocity_command = None
+        self._trace_command_send = None
+        self._trace_tick_now = now
+        try:
+            self._tick(now)
+        finally:
+            if self._touchdown_trace.active:
+                self._record_touchdown_sample(now, None, None, self._trace_decision)
+            if self._trace_pending_end is not None:
+                outcome, reason = self._trace_pending_end
+                self._trace_pending_end = None
+                self._finish_touchdown_trace(outcome, reason)
+            self._trace_tick_now = None
+
+    def _tick(self, now: float) -> None:
         """Advance at most one acknowledged transaction or lifecycle action."""
         self._vehicle.receive_telemetry(now)
         if self._closed:
@@ -711,6 +736,7 @@ class FlightCycleManager(Node):
             if self._pid_align_auto_start_pending:
                 self._pid_align_auto_start_pending = False
                 self._debug_land_trigger_armed = False
+                self._start_touchdown_trace(now, "alignment auto-start")
                 self._transition(
                     CycleState.GUIDED_TAKEOVER,
                     "fresh airborne telemetry received; requesting GUIDED "
@@ -723,6 +749,7 @@ class FlightCycleManager(Node):
                 return True
             if self._debug_land_trigger_armed:
                 self._debug_land_trigger_armed = False
+                self._start_touchdown_trace(now, "airborne LAND trigger")
                 self._transition(
                     CycleState.GUIDED_TAKEOVER,
                     "airborne LAND trigger received; requesting GUIDED for PID docking",
@@ -1217,6 +1244,7 @@ class FlightCycleManager(Node):
             return
 
     def _begin_guided_takeover(self, now: float) -> None:
+        self._start_touchdown_trace(now, "mission landing handoff")
         self._dock_request_queued = True
         self._dock_request_acknowledged = True
         self._transition(
@@ -1360,7 +1388,7 @@ class FlightCycleManager(Node):
             )
         )
         if decision.outcome is SearchOutcome.SEARCHING:
-            self._vehicle.send_velocity(
+            self._send_traced_velocity(
                 VelocityFrame.MAP_ENU,
                 decision.velocity_enu_m_s[0],
                 decision.velocity_enu_m_s[1],
@@ -1435,7 +1463,8 @@ class FlightCycleManager(Node):
 
             self._safe_record_landing_backend_decision(decision, now)
             self._publish_pid_debug(now, dock, vehicle, decision)
-            self._record_touchdown_sample(now, dock, vehicle, decision)
+            self._trace_decision = decision
+            self._trace_controller = backend
 
             self.get_logger().info(
                 f"Landing backend update: {decision}"
@@ -1450,7 +1479,7 @@ class FlightCycleManager(Node):
         # 1) execute velocity requested by backend
         if decision.velocity is not None:
             command = decision.velocity
-            self._vehicle.send_velocity(
+            self._send_traced_velocity(
                 command.frame,
                 command.velocity_x,
                 command.velocity_y,
@@ -2317,17 +2346,7 @@ class FlightCycleManager(Node):
         data["dock_distance_m"] = dock.distance_m if dock is not None else None
         # Unlike dock_age_s (time since receipt), this includes camera and
         # localization latency. Keep reporting the last frame during loss.
-        source_stamp_s = dock.source_stamp_s if dock is not None else None
-        if source_stamp_s is None and self._dock_pose is not None:
-            stamp = self._dock_pose.header.stamp
-            source_stamp_s = stamp.sec + stamp.nanosec * 1e-9
-        data["frame_age_s"] = None
-        data["frame_age_status"] = "missing_stamp"
-        data["dock_usable"] = dock is not None
-        if source_stamp_s is not None and math.isfinite(source_stamp_s) and source_stamp_s > 0:
-            age = self.get_clock().now().nanoseconds * 1e-9 - source_stamp_s
-            data["frame_age_s"] = age
-            data["frame_age_status"] = "ok" if age >= 0 else "future_stamp"
+        data.update(self._image_timing(dock))
         # Keep the measured camera offsets separate from the PID error, which
         # can refer to a latched target or a distance setpoint instead.
         data["measured_dock_position"] = ({
@@ -2359,9 +2378,85 @@ class FlightCycleManager(Node):
         message.data = json.dumps(data, separators=(",", ":"), allow_nan=False)
         self._pid_debug_publisher.publish(message)
 
+    def _image_timing(self, dock: Any, ros_time_s: Optional[float] = None) -> dict:
+        source_stamp_s = dock.source_stamp_s if dock is not None else None
+        if source_stamp_s is None and self._dock_pose is not None:
+            stamp = self._dock_pose.header.stamp
+            source_stamp_s = stamp.sec + stamp.nanosec * 1e-9
+        if ros_time_s is None:
+            ros_time_s = self.get_clock().now().nanoseconds * 1e-9
+        data = {
+            "source_image_stamp_s": source_stamp_s,
+            "ros_time_s": ros_time_s,
+            "frame_age_s": None, "frame_age_status": "missing_stamp",
+            "dock_usable": dock is not None,
+        }
+        if source_stamp_s is not None and math.isfinite(source_stamp_s) and source_stamp_s > 0:
+            age = ros_time_s - source_stamp_s
+            data.update(frame_age_s=age, frame_age_status="ok" if age >= 0 else "future_stamp")
+        elif source_stamp_s is not None and not math.isfinite(source_stamp_s):
+            data["source_image_stamp_s"] = None
+        return data
+
+    def _start_touchdown_trace(self, now: float, reason: str) -> None:
+        if self._landing_backend != "pid" or self._touchdown_trace.active:
+            return
+        try:
+            self._touchdown_trace.start()
+            if self._touchdown_trace.active:
+                self._touchdown_trace.write({
+                    "event": "START", "schema_version": 2,
+                    "trace_id": self._touchdown_trace.trace_id,
+                    "time_monotonic_s": now,
+                    "ros_time_s": self.get_clock().now().nanoseconds * 1e-9,
+                    "wall_time": datetime.now().astimezone().isoformat(),
+                    "reason": reason, "flight_mode": self._vehicle.state.mode,
+                    "operation_mode": self._operation_mode,
+                    "pid_hold_at_state": (self._pid_hold_at_state.name
+                                          if self._pid_hold_at_state is not None else "none"),
+                })
+        except Exception as error:
+            self.get_logger().warning(f"Could not start touchdown trace: {error}")
+            self._touchdown_trace.disable()
+
+    def _finish_touchdown_trace(self, outcome: str, reason: str) -> None:
+        try:
+            self._touchdown_trace.finish(outcome, reason)
+        except Exception as error:
+            self.get_logger().warning(f"Could not finish touchdown trace: {error}")
+            self._touchdown_trace.disable()
+
+    def _send_traced_velocity(self, frame: VelocityFrame, velocity_x: float,
+                              velocity_y: float, velocity_z: float, *, now: float,
+                              yaw_rate_rad_s: Optional[float] = None) -> bool:
+        # Collect timing only while recording; diagnostic failures cannot suppress a send.
+        if self._touchdown_trace.active:
+            try:
+                self._trace_velocity_command = VelocityCommand(
+                    frame, velocity_x, velocity_y, velocity_z, yaw_rate_rad_s)
+                self._trace_command_send = {
+                    "ros_time_s": self.get_clock().now().nanoseconds * 1e-9,
+                    "start_monotonic_s": time.monotonic(),
+                    "end_monotonic_s": None, "sent": False,
+                }
+            except Exception as error:
+                self.get_logger().warning(f"Could not timestamp velocity command: {error}")
+                self._touchdown_trace.disable()
+        result = self._vehicle.send_velocity(
+            frame, velocity_x, velocity_y, velocity_z, now=now,
+            yaw_rate_rad_s=yaw_rate_rad_s,
+        )
+        if self._touchdown_trace.active and self._trace_command_send is not None:
+            try:
+                self._trace_command_send.update(end_monotonic_s=time.monotonic(), sent=result)
+            except Exception as error:
+                self.get_logger().warning(f"Could not record velocity send result: {error}")
+                self._touchdown_trace.disable()
+        return result
+
     def _record_touchdown_sample(self, now: float, dock: Any, vehicle: Any,
                                  decision: Any) -> None:
-        """Record only final PID stages; recording errors cannot interrupt guidance."""
+        """Recording errors cannot interrupt guidance or pilot handback."""
         try:
             self._write_touchdown_sample(now, dock, vehicle, decision)
         except Exception as error:
@@ -2370,41 +2465,61 @@ class FlightCycleManager(Node):
 
     def _write_touchdown_sample(self, now: float, dock: Any, vehicle: Any,
                                 decision: Any) -> None:
-        if not isinstance(self._landing_controller, PidLandingBackend):
+        if self._landing_backend != "pid":
             return
-        if (decision.substate in ("DESCEND_CENTRAL", "HOLD_CENTRAL", "TOUCHDOWN_APPROACH")
-                and not self._touchdown_trace.active):
-            self._touchdown_trace.start()
         if not self._touchdown_trace.active:
             return
-        diagnostics = self._landing_controller.diagnostics()
-        command = decision.velocity
-        frozen_target = diagnostics["touchdown_reference_enu_m"]
-        position_error_to_frozen_target = (
-            [frozen_target[axis] - vehicle.position_enu_m[axis] for axis in (0, 1)]
-            if frozen_target is not None else None
-        )
-        horizontal_speed_m_s = math.hypot(
-            vehicle.velocity_enu_m_s[0],
-            vehicle.velocity_enu_m_s[1],
-        )
-        frozen_error_norm_m = (
-            math.hypot(
-                position_error_to_frozen_target[0],
-                position_error_to_frozen_target[1],
-            )
-            if position_error_to_frozen_target is not None
-            else None
-        )
+        if vehicle is None:
+            vehicle = self._vehicle.state
+            dock = self._dock_observation(now)
+        controller = self._trace_controller or self._landing_controller
+        diagnostics = (controller.diagnostics()
+                       if isinstance(controller, PidLandingBackend) else None)
+        command = decision.velocity if decision is not None else self._trace_velocity_command
+        frozen_target = diagnostics.get("touchdown_reference_enu_m") if diagnostics else None
+        position = vehicle.position_enu_m
+        velocity = vehicle.velocity_enu_m_s
+        position_error = ([frozen_target[axis] - position[axis] for axis in (0, 1)]
+                          if frozen_target is not None and position is not None else None)
+        horizontal_speed = math.hypot(*velocity[:2]) if velocity is not None else None
+        heading = vehicle.heading_rad
+        measured_body = None
+        if velocity is not None and heading is not None and math.isfinite(heading):
+            east, north, up = velocity
+            measured_body = [east * math.sin(heading) + north * math.cos(heading),
+                             -east * math.cos(heading) + north * math.sin(heading), up]
+        telemetry = self._vehicle.state
+        send = self._trace_command_send
+        timing = self._image_timing(dock, send["ros_time_s"] if send is not None else None)
         data = {
             "event": "SAMPLE", "time_monotonic_s": now,
+            "trace_id": self._touchdown_trace.trace_id,
             "wall_time": datetime.now().astimezone().isoformat(),
-            "state": decision.substate,
-            "position_enu_m": list(vehicle.position_enu_m),
-            "velocity_enu_m_s": list(vehicle.velocity_enu_m_s),
-            "horizontal_speed_m_s": horizontal_speed_m_s,
-            "heading_ned_rad": vehicle.heading_rad,
-            "position_age_s": max(0.0, now - self._vehicle.state.position_at),
+            "state": decision.substate if decision is not None else self._state.name,
+            "manager_state": self._state.name, "flight_mode": telemetry.mode,
+            "position_enu_m": list(position) if position is not None else None,
+            "velocity_enu_m_s": list(velocity) if velocity is not None else None,
+            "measured_velocity_body_flu_m_s": measured_body,
+            "measured_velocity_command_frame_m_s": (
+                measured_body if command.frame is VelocityFrame.BODY_FLU
+                else list(velocity) if velocity is not None else None
+            ) if command is not None else None,
+            "horizontal_speed_m_s": horizontal_speed,
+            "heading_ned_rad": heading,
+            "position_age_s": max(0.0, now - telemetry.position_at) if position is not None else None,
+            "velocity_age_s": max(0.0, now - telemetry.position_at) if velocity is not None else None,
+            "position_time_boot_ms": telemetry.position_time_boot_ms,
+            "position_received_monotonic_s": telemetry.position_at if position is not None else None,
+            "attitude_ned_rad": telemetry.attitude_ned_rad,
+            "angular_velocity_body_frd_rad_s": telemetry.angular_velocity_body_frd_rad_s,
+            "attitude_time_boot_ms": telemetry.attitude_time_boot_ms,
+            "attitude_age_s": max(0.0, now - telemetry.attitude_at) if telemetry.attitude_at else None,
+            "actuator_outputs_pwm_us": telemetry.actuator_outputs_pwm_us,
+            "actuator_time_usec": telemetry.actuator_time_usec,
+            "actuator_age_s": max(0.0, now - telemetry.actuator_at) if telemetry.actuator_at else None,
+            "relative_altitude_m": telemetry.relative_altitude_m,
+            "relative_altitude_age_s": (max(0.0, now - telemetry.relative_altitude_at)
+                                        if telemetry.relative_altitude_m is not None else None),
             "dock_mode": dock.mode.name if dock is not None else None,
             "dock_offset_body_flu_m": [dock.forward_m, dock.left_m] if dock is not None else None,
             "dock_distance_m": dock.distance_m if dock is not None else None,
@@ -2413,16 +2528,24 @@ class FlightCycleManager(Node):
                                      if self._dock_pose is not None else None),
             "last_dock_mode": self._dock_mode,
             "frozen_target_enu_m": frozen_target,
-            "position_error_to_frozen_target_m": position_error_to_frozen_target,
-            "frozen_error_norm_m": frozen_error_norm_m,
-            "frozen_heading_ned_rad": diagnostics["touchdown_reference_heading_rad"],
-            "fixed_reference_enu_m": diagnostics["fixed_reference_enu_m"],
+            "position_error_to_frozen_target_m": position_error,
+            "frozen_error_norm_m": math.hypot(*position_error) if position_error is not None else None,
+            "frozen_heading_ned_rad": diagnostics.get("touchdown_reference_heading_rad") if diagnostics else None,
+            "fixed_reference_enu_m": diagnostics.get("fixed_reference_enu_m") if diagnostics else None,
+            "diagnostics": diagnostics,
+            "control_error": diagnostics.get("control_error")
+            if diagnostics and decision is not None else None,
+            "controller_updated_this_tick": decision is not None,
             "command_frame": command.frame.name if command is not None else None,
-            "command_body_flu_m_s": [command.velocity_x, command.velocity_y, command.velocity_z]
+            "command_velocity_m_s": [command.velocity_x, command.velocity_y, command.velocity_z]
             if command is not None else None,
+            "command_body_flu_m_s": [command.velocity_x, command.velocity_y, command.velocity_z]
+            if command is not None and command.frame is VelocityFrame.BODY_FLU else None,
             "command_yaw_rate_rad_s": command.yaw_rate_rad_s if command is not None else None,
+            "command_send": send,
             "armed": vehicle.armed, "flying": vehicle.flying,
         }
+        data.update(timing)
         self._touchdown_trace.write(data)
 
     def _build_precise_landing_config(self) -> PreciseLandingConfig:
@@ -2766,6 +2889,8 @@ class FlightCycleManager(Node):
         self._transition(state, reason, force=True)
 
     def _reset_active_guidance(self) -> None:
+        if self._touchdown_trace.active and self._landing_controller is not None:
+            self._trace_controller = self._landing_controller
         self._dock_request_queued = False
         self._dock_request_acknowledged = False
         self._guided_handoff_retry_count = 0
@@ -2913,11 +3038,11 @@ class FlightCycleManager(Node):
             self._finish_landing_attempt_log(
                 terminal_outcome, state.name, reason
             )
-            try:
-                self._touchdown_trace.finish(terminal_outcome, reason)
-            except Exception as error:
-                self.get_logger().warning(f"Could not finish touchdown trace: {error}")
-                self._touchdown_trace.disable()
+            if self._trace_tick_now is not None:
+                # Keep the terminal tick's telemetry/last command before END.
+                self._trace_pending_end = terminal_outcome, reason
+            else:
+                self._finish_touchdown_trace(terminal_outcome, reason)
 
     def _start_landing_attempt_log(self, state: str, reason: str) -> None:
         try:

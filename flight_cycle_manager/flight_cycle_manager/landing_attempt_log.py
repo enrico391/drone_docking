@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, TextIO
 
+from .numbered_logs import open_numbered_log
+
 
 class LandingAttemptLog:
     """Write one flushed text file per landing approach."""
@@ -30,25 +32,10 @@ class LandingAttemptLog:
     def start(self, state: str, reason: str) -> None:
         if not self._enabled or self.active:
             return
-        self._attempt_number += 1
         try:
             directory = Path(self._directory).expanduser()
-            directory.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
-            path = directory / (
-                f"landing_attempt_{stamp}_{self._attempt_number:03d}.txt"
-            )
-            collision = 1
-            while True:
-                try:
-                    self._file = path.open("x", encoding="utf-8")
-                    break
-                except FileExistsError:
-                    path = directory / (
-                        f"landing_attempt_{stamp}_{self._attempt_number:03d}"
-                        f"_{collision}.txt"
-                    )
-                    collision += 1
+            self._attempt_number, self._file = open_numbered_log(
+                directory, "landing_attempt", ".txt")
             self._file.write(f"Landing attempt {self._attempt_number}\n")
             self.write(f"ATTEMPT_START state={state} reason={reason}")
         except Exception as error:
