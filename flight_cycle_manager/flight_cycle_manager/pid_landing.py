@@ -107,6 +107,9 @@ class PidLandingConfig:
     x_k_v: float = 0.0
     y_k_v: float = 0.0
     z_k_v: float = 0.0
+    approach_vertical_response_time_s: float = 0.5
+    approach_braking_accel_m_s2: float = 0.5
+    approach_height_tolerance_m: float = 0.01
 
     def __post_init__(self) -> None:
         for axis in ("x", "y", "z"):
@@ -145,7 +148,10 @@ class PidLandingConfig:
             "central_descent_speed_m_s",
             "recovery_speed_m_s",
             "max_yaw_rate_rad_s",
-            "target_loss_grace_s"
+            "target_loss_grace_s",
+            "approach_vertical_response_time_s",
+            "approach_braking_accel_m_s2",
+            "approach_height_tolerance_m",
         )
         for field in numeric_fields:
             if not math.isfinite(getattr(self, field)):
@@ -169,6 +175,10 @@ class PidLandingConfig:
                 "touchdown_commit_height_m must be below "
                 "central_transition_distance_m"
             )
+        if (self.touchdown_commit_height_m + self.approach_height_tolerance_m
+                >= self.central_transition_distance_m):
+            raise ValueError("approach_height_tolerance_m must keep the arrival band "
+                             "below central_transition_distance_m")
         if self.central_horizontal_tolerance_m >= self.outer_horizontal_tolerance_m:
             raise ValueError(
                 "central_horizontal_tolerance_m must be smaller than "
@@ -265,6 +275,7 @@ class PidLandingController:
         self._control_error: Optional[dict] = None
         self._velocity_feedback_terms: dict = {}
         self._applied_horizontal_limit_m_s: Optional[float] = None
+        self._approach_height_guard: Optional[dict] = None
 
     def start_after_acquisition(self, now: float) -> None:
         """Begin at PID alignment after the shared search acquired the dock."""
@@ -291,6 +302,7 @@ class PidLandingController:
         self._fixed_reference_heading_rad = None
         self._fixed_reference_pending = False
         self._control_error = None
+        self._approach_height_guard = None
         self._landed_stable_started_at = None
         self._disarm_request_in_flight = False
         self._disarm_acknowledged = False
@@ -317,6 +329,8 @@ class PidLandingController:
             raise ValueError("dock distance setpoint must be finite")
         if not 0.3 <= distance_m <= 20.0:
             raise ValueError("dock distance setpoint must be between 0.3 and 20 m")
+        if distance_m < self._config.touchdown_commit_height_m:
+            raise ValueError("dock distance setpoint must not be below the approach height")
         self._align_distance_setpoint_m = float(distance_m)
         self._z_pid.reset()
 
@@ -394,6 +408,29 @@ class PidLandingController:
         self._yaw_pid.reset()
 
     def update(
+        self,
+        now: float,
+        dock: Optional[DockObservation],
+        vehicle: VehicleObservation,
+    ) -> PidLandingDecision:
+        self._approach_height_guard = None
+        decision = self._update_decision(now, dock, vehicle)
+        usable, _ = self._usable_dock(dock)
+        if (decision.outcome is PidLandingOutcome.RUNNING
+                and decision.state in PID_HOLD_STATES and usable):
+            limit = (self._config.outer_descent_speed_m_s
+                     if decision.state is PidLandingState.DESCEND_OUTER
+                     else self._config.central_descent_speed_m_s)
+            limit = min(limit, self._z_pid.config.output_limit)
+            z = self._protect_approach_height(
+                now, dock, vehicle, decision.command.velocity_z, limit,
+            )
+            if self._control_error is not None and self._control_error.get("z") is not None:
+                self._z_pid.track_applied_output(z)
+            decision = replace(decision, command=replace(decision.command, velocity_z=z))
+        return decision
+
+    def _update_decision(
         self,
         now: float,
         dock: Optional[DockObservation],
@@ -536,7 +573,9 @@ class PidLandingController:
         if self._align_only:
             self._align_dock_visible = True
             if self._align_distance_setpoint_m is None:
-                self._align_distance_setpoint_m = dock.distance_m
+                self._align_distance_setpoint_m = max(
+                    self._config.touchdown_commit_height_m, dock.distance_m,
+                )
                 self._z_pid.reset()
             command = self._visual_command(now, dock, vehicle, z_enabled=False)
             velocity_z = self._z_pid.update(
@@ -579,7 +618,12 @@ class PidLandingController:
         if self._state is PidLandingState.ACQUIRE_CENTRAL:
             return PidLandingDecision(self._state, _zero_body_command())
         if self._distance_setpoint_m is None:
-            self._distance_setpoint_m = dock.distance_m
+            self._distance_setpoint_m = (
+                self._config.touchdown_commit_height_m
+                if self._state is PidLandingState.HOLD_CENTRAL else max(
+                    self._config.touchdown_commit_height_m, dock.distance_m,
+                )
+            )
             self._z_pid.reset()
         control_dock = self._control_dock(dock, vehicle)
         if control_dock is None:
@@ -610,8 +654,8 @@ class PidLandingController:
         control_dock = self._control_dock(dock, vehicle)
         if control_dock is None:
             return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
-        if (dock.distance_m <= self._config.touchdown_commit_height_m
-                and self._touchdown_alignment_is_stable(now, control_dock, vehicle)):
+        fine_alignment_stable = self._touchdown_alignment_is_stable(now, control_dock, vehicle)
+        if (self._touchdown_height_is_ready(dock, vehicle) and fine_alignment_stable):
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
             self._latch_touchdown_or_fixed_reference(dock, vehicle)
             return PidLandingDecision(self._state, _zero_body_command())
@@ -751,17 +795,17 @@ class PidLandingController:
             now, control_dock, vehicle,
         )
         if (
-            dock.distance_m <= self._config.touchdown_commit_height_m
+            self._touchdown_height_is_ready(dock, vehicle)
             and fine_alignment_stable
         ):
             # used only for debug hold, not for normal landing
             if self._hold_at_state is PidLandingState.HOLD_CENTRAL:
-                # Latch the *measured* distance, not the moving descent setpoint.
+                # Hold the approach height, including after a small undershoot.
                 # This is still pre-commit: retain vision and target-loss recovery.
                 if not self._latch_fixed_reference_if_needed("hold_central", dock, vehicle):
                     return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
                 self._enter_state(PidLandingState.HOLD_CENTRAL, now)
-                self._distance_setpoint_m = dock.distance_m
+                self._distance_setpoint_m = self._config.touchdown_commit_height_m
                 self._z_pid.reset()
                 return PidLandingDecision(self._state, _zero_body_command())
 
@@ -1141,6 +1185,61 @@ class PidLandingController:
     def reconfigure_velocity_feedback(self, *, x: float, y: float, z: float) -> None:
         self._config = replace(self._config, x_k_v=x, y_k_v=y, z_k_v=z)
 
+    def _touchdown_height_is_ready(
+        self, dock: DockObservation, vehicle: VehicleObservation,
+    ) -> bool:
+        # A bounded arrival band avoids waiting forever for an exact height.
+        # A substantial undershoot must first be corrected; rapid vertical
+        # motion must first be braked, even if horizontal alignment is good.
+        return (abs(dock.distance_m - self._config.touchdown_commit_height_m)
+                <= self._config.approach_height_tolerance_m
+                and math.isfinite(vehicle.velocity_enu_m_s[2])
+                and abs(vehicle.velocity_enu_m_s[2]) <= self._config.touchdown_speed_m_s)
+
+    def _protect_approach_height(
+        self, now: float, dock: DockObservation, vehicle: VehicleObservation,
+        requested_z: float, vertical_limit: float,
+    ) -> float:
+        """Bound pre-commit descent with an assumed stopping-response model.
+
+        Camera-to-controller delay is covered by the configured response time;
+        receipt age adds time spent waiting after that observation arrived.
+        The model is a command guard, not a guaranteed physical clearance.
+        """
+        height = self._config.touchdown_commit_height_m
+        clearance = max(0.0, dock.distance_m - height)
+        response = (self._config.approach_vertical_response_time_s
+                    + max(0.0, now - dock.received_at))
+        accel = self._config.approach_braking_accel_m_s2
+        # Invert clearance = speed * response + speed**2 / (2 * accel).
+        # This form avoids cancellation when clearance is very small.
+        maximum_down = (2.0 * accel * clearance
+                        / (math.sqrt((accel * response)**2 + 2.0 * accel * clearance)
+                           + accel * response))
+        measured_z = vehicle.velocity_enu_m_s[2]
+        known_velocity = math.isfinite(measured_z)
+        down_speed = max(0.0, -measured_z) if known_velocity else None
+        z = max(requested_z, -maximum_down) if known_velocity else max(requested_z, 0.0)
+        if known_velocity and down_speed > maximum_down:
+            z = max(z, min(vertical_limit, down_speed - maximum_down))
+        if dock.distance_m < height:
+            # Correct upward even while lateral misalignment has paused Z PID.
+            z = max(z, min(vertical_limit, (height - dock.distance_m) / response))
+        self._approach_height_guard = {
+            "height_m": height,
+            "arrival_tolerance_m": self._config.approach_height_tolerance_m,
+            "response_time_s": response,
+            "braking_accel_m_s2": accel,
+            "maximum_descent_speed_m_s": maximum_down,
+            "measured_descent_speed_m_s": down_speed,
+            "stopping_distance_m": (down_speed * response + down_speed**2 / (2.0 * accel)
+                                    if known_velocity else None),
+            "requested_vertical_speed_m_s": requested_z,
+            "applied_vertical_speed_m_s": z,
+            "active": not math.isclose(z, requested_z, rel_tol=1e-9, abs_tol=1e-12),
+        }
+        return z
+
     def _advance_distance_setpoint(
         self,
         now: float,
@@ -1165,12 +1264,16 @@ class PidLandingController:
         was_paused = self._descent_paused
         self._descent_paused = not aligned
         if self._descent_paused or was_paused:
-            self._distance_setpoint_m = dock.distance_m
+            self._distance_setpoint_m = max(
+                self._config.touchdown_commit_height_m, dock.distance_m,
+            )
             self._descent_last_updated_at = now
             self._z_pid.reset()
             return
         if self._distance_setpoint_m is None:
-            self._distance_setpoint_m = dock.distance_m
+            self._distance_setpoint_m = max(
+                self._config.touchdown_commit_height_m, dock.distance_m,
+            )
             self._descent_last_updated_at = now
             return
         if self._descent_last_updated_at is None:
@@ -1180,7 +1283,10 @@ class PidLandingController:
         if self._is_aligned(
             dock, horizontal_tolerance_m, yaw_tolerance_rad
         ):
-            self._distance_setpoint_m -= speed_m_s * dt
+            self._distance_setpoint_m = max(
+                self._config.touchdown_commit_height_m,
+                self._distance_setpoint_m - speed_m_s * dt,
+            )
         self._descent_last_updated_at = now
 
     def _touchdown_alignment_is_stable(
@@ -1443,6 +1549,8 @@ class PidLandingController:
 
     def diagnostics(self) -> dict:
         return {
+            "approach_height_guard": self._approach_height_guard,
+            "approach_height_m": self._config.touchdown_commit_height_m,
             "velocity_feedback_terms": dict(self._velocity_feedback_terms),
             "applied_horizontal_limit_m_s": self._applied_horizontal_limit_m_s,
             "descent_paused": self._descent_paused,

@@ -88,6 +88,9 @@ EXPECTED_PID_PARAMETERS = {
     "pid_recovery_altitude_tolerance_m": 0.05,
     "pid_max_recovery_attempts": 3,
     "pid_touchdown_commit_height_m": 0.30,
+    "pid_approach_vertical_response_time_s": 0.5,
+    "pid_approach_braking_accel_m_s2": 0.5,
+    "pid_approach_height_tolerance_m": 0.01,
     "pid_touchdown_speed_m_s": 0.05,
     "pid_touchdown_timeout_s": 15.0,
     "pid_landed_state_timeout_s": 1.0,
@@ -224,6 +227,18 @@ def test_common_and_pid_configuration_match_declared_manager_parameters():
         key.startswith("pid_search_") or "initial_search" in key
         for key in set(common) | set(pid)
     )
+
+
+def test_approach_braking_configuration_matches_declared_parameters():
+    pid = load_parameters(PID_CONFIG)
+    declared = manager_declared_parameters()
+    for name, expected in {
+        "pid_approach_vertical_response_time_s": 0.5,
+        "pid_approach_braking_accel_m_s2": 0.5,
+        "pid_approach_height_tolerance_m": 0.01,
+    }.items():
+        assert name in declared
+        assert pid[name] == expected
 
 
 def test_distance_gain_references_are_declared_and_inherit_base_gains():

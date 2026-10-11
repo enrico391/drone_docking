@@ -437,6 +437,9 @@ class FlightCycleManager(Node):
             "pid_recovery_altitude_tolerance_m": 0.05,
             "pid_max_recovery_attempts": 3,
             "pid_touchdown_commit_height_m": 0.20,
+            "pid_approach_vertical_response_time_s": 0.5,
+            "pid_approach_braking_accel_m_s2": 0.5,
+            "pid_approach_height_tolerance_m": 0.01,
             "pid_touchdown_speed_m_s": 0.05,
             "pid_touchdown_timeout_s": 15.0,
             "pid_landed_state_timeout_s": 1.0,
@@ -2056,6 +2059,15 @@ class FlightCycleManager(Node):
             touchdown_commit_height_m=self._positive_parameter(
                 "pid_touchdown_commit_height_m"
             ),
+            approach_vertical_response_time_s=self._positive_parameter(
+                "pid_approach_vertical_response_time_s"
+            ),
+            approach_braking_accel_m_s2=self._positive_parameter(
+                "pid_approach_braking_accel_m_s2"
+            ),
+            approach_height_tolerance_m=self._positive_parameter(
+                "pid_approach_height_tolerance_m"
+            ),
             touchdown_speed_m_s=self._positive_parameter(
                 "pid_touchdown_speed_m_s"
             ),
@@ -2171,6 +2183,13 @@ class FlightCycleManager(Node):
             "derivative_filter_time_constant_s",
         }
         updates = {parameter.name: parameter.value for parameter in parameters}
+        if any(name in updates for name in (
+                "pid_approach_vertical_response_time_s",
+                "pid_approach_braking_accel_m_s2", "pid_approach_height_tolerance_m")):
+            return SetParametersResult(
+                successful=False,
+                reason="approach height braking parameters are startup-only; restart the manager",
+            )
         tuning_updates = {
             name: value for name, value in updates.items()
             if any(name == f"pid_{axis}_{suffix}"
@@ -2234,6 +2253,8 @@ class FlightCycleManager(Node):
                 diagnostics = backend.diagnostics()
                 if not diagnostics["align_dock_visible"]:
                     raise ValueError("wait for a fresh dock observation before setting Z")
+                if distance_update < diagnostics["approach_height_m"]:
+                    raise ValueError("dock distance setpoint must not be below the approach height")
             for name, value in velocity_updates.items():
                 if (isinstance(value, bool) or not isinstance(value, (int, float))
                         or not math.isfinite(value) or value < 0.0):

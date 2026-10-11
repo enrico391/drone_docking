@@ -365,12 +365,12 @@ def test_central_descent_uses_central_tolerance_but_touchdown_requires_stricter_
         dock = replace(central_observation(now, distance_m=0.20), **errors)
         return backend.update(now=now, dock=dock, vehicle=vehicle_observation())
 
-    # The vehicle may keep descending while inside the central descent tolerance,
-    # even though it is not yet safe to commit to touchdown.
+    # At the approach height, coarse alignment cannot permit further descent
+    # while the stricter touchdown conditions remain unsatisfied.
     sample(1.8, **observation)
     decision = sample(2.81, **observation)
     assert decision.substate == "DESCEND_CENTRAL"
-    assert decision.velocity.velocity_z < 0.0
+    assert decision.velocity.velocity_z == 0.0
 
     aligned = {"forward_m": 0.01, "left_m": 0.0, "yaw_error_rad": 0.02}
     assert sample(3.0, **aligned).substate == "DESCEND_CENTRAL"
@@ -413,7 +413,7 @@ def test_central_descent_waits_for_low_horizontal_speed_throughout_dwell(velocit
     ).substate == "TOUCHDOWN_APPROACH"
 
 
-def test_central_descent_accepts_speed_at_limit_and_ignores_vertical_descent():
+def test_central_descent_accepts_lateral_speed_at_limit_after_vertical_braking():
     backend = start_backend(pid_config())
     enter_central_descent(backend)
     for now in (1.8, 2.81):
@@ -421,6 +421,12 @@ def test_central_descent_accepts_speed_at_limit_and_ignores_vertical_descent():
             now=now, dock=central_observation(now, distance_m=0.20),
             vehicle=vehicle_observation(velocity_enu_m_s=(0.03, 0.04, -0.20)),
         )
+    assert decision.substate == "DESCEND_CENTRAL"
+    assert decision.velocity.velocity_z > 0.0
+    decision = backend.update(
+        now=2.9, dock=central_observation(2.9, distance_m=0.20),
+        vehicle=vehicle_observation(velocity_enu_m_s=(0.03, 0.04, -0.05)),
+    )
     assert decision.substate == "TOUCHDOWN_APPROACH"
 
 

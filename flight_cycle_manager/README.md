@@ -186,12 +186,13 @@ The unified launch supports three startup paths via `operation_mode`:
 to `PID_ALIGN`, `DESCEND_OUTER`, `ACQUIRE_CENTRAL`, `DESCEND_CENTRAL`, or
 `HOLD_CENTRAL` to stop forward PID state progression. The first four hold when
 their named stage begins. `HOLD_CENTRAL` instead completes central descent and
-waits for the normal touchdown conditions (distance at or below
-`pid_touchdown_commit_height_m` and stable fine alignment), then holds at the
-measured central-tag distance *before* touchdown commitment. In a descent hold,
+waits for the normal touchdown conditions (distance within the configured
+arrival band, stable fine alignment and sufficiently slow vertical motion),
+then holds at `pid_touchdown_commit_height_m` *before* touchdown commitment. In a descent hold,
 the controller continues X/Y/yaw alignment and holds the observed dock distance
 with Z control instead of continuing its descent. `HOLD_CENTRAL` also keeps
-visual X/Y/yaw and Z control at that final measured distance. `ACQUIRE_CENTRAL` waits in
+visual X/Y/yaw and Z control at the configured approach height, including after
+brief target loss and reacquisition. `ACQUIRE_CENTRAL` waits in
 place; `PID_ALIGN` aligns and holds dock distance. Safety checks remain active:
 a lost target stops visual commands and can trigger the normal recovery climb;
 loss of GUIDED authority or stale telemetry cancels a debug attempt. Do not use
@@ -404,6 +405,12 @@ handback. Desired roll/pitch, FC-internal position/velocity targets and baromete
 data still require the corresponding ArduPilot onboard flight log. The checked-in
 real-drone parameters do not configure a rangefinder (`RNGFND1_TYPE=0`).
 
+For offline plots, use [`tools/matlab/plot_touchdown_traces.m`](../tools/matlab/plot_touchdown_traces.m).
+It reads all touchdown JSONL files, compares attempts, and plots controller
+errors, commands/estimated velocities, timing, PID diagnostics, state, height,
+attitude and actuator PWM. See the [MATLAB instructions](../tools/matlab/README.md)
+for selecting traces, exporting plots and interpreting historical logs.
+
 ## Alignment-only PID tuning
 
 To switch an already-airborne vehicle to `GUIDED` and begin alignment as soon
@@ -547,6 +554,47 @@ Start with X/Y `Kp`; only add a small `Ki` when the trace shows a persistent
 offset. Descent pauses outside the phase's existing alignment tolerance and
 resumes inside 80% of that tolerance, preventing stale vertical error from
 continuing the descent during a disturbance.
+
+Before touchdown commitment, `pid_touchdown_commit_height_m` also sets the
+minimum visual-distance setpoint (0.35 m in `pid_landing.yaml`). Central descent
+holds at that height while waiting for the stricter touchdown alignment and
+lateral-speed dwell. Alignment-only manual Z targets below that height are
+rejected. With a usable target, all pre-touchdown PID stages also limit downward
+commands as the remaining distance decreases and command bounded upward braking
+when measured descent exceeds the stopping model. A distance already below the
+approach height produces an upward correction even when lateral misalignment
+has paused descent. Loss of the target retains the existing zero-command grace
+period and recovery climb; the guard does not invent a distance from stale vision.
+
+The guard uses `pid_approach_vertical_response_time_s` (initially 0.5 s) and
+`pid_approach_braking_accel_m_s2` (initially 0.5 m/s²). These are **assumptions to
+validate against vertical response**, not measurements from the lateral shaping
+analysis. The response interval covers camera, filter and vehicle response delay;
+pose receipt age is added. For downward speed `u`, the assumed stopping distance
+is `u * response_time + u^2 / (2 * braking_accel)`. The model bounds the allowable
+descent speed using the distance remaining above the approach height. The three
+new `pid_approach_*` parameters are startup settings; edit the YAML and restart
+the manager rather than changing them during an attempt.
+
+Touchdown commitment requires distance within
+`pid_approach_height_tolerance_m` (initially ±0.01 m) of the approach height,
+the existing fine-alignment/lateral-speed dwell, and absolute measured vertical
+speed no greater than `pid_touchdown_speed_m_s`. The arrival band permits a
+transition just above the height without requiring an exact floating-point match;
+a larger undershoot must first be corrected. `TOUCHDOWN_APPROACH` then uses the
+intentional final-descent behavior. Debug `HOLD_CENTRAL` retains the approach
+height until released and all commitment conditions are satisfied again.
+
+Touchdown JSONL and PID diagnostics include `approach_height_m` and
+`approach_height_guard`: the configured height, response interval, assumed
+braking acceleration, allowed/measured descent speeds, stopping distance,
+requested/applied Z commands and whether the guard changed the command. The
+guard is null on ticks without a usable pre-touchdown visual target. Existing
+MATLAB readers retain these fields in the raw `records`/`samples` diagnostics.
+This protects commands using the reported camera/dock distance; it does not
+guarantee mechanical clearance under measurement error, attitude changes or
+unvalidated vehicle response. Validate in simulation and controlled hover before
+using the change for landing.
 
 To force a manual mode takeover during SITL, use a separate MAVLink client on
 the observer port (`5762`). Replace `mode_id` with `3` (`AUTO`), `4`
