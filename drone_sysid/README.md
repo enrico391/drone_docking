@@ -19,8 +19,15 @@ python3 -m pip install -r requirements.txt
 python3 -m unittest discover -s tests -v
 ```
 
-The companion logger itself needs only pymavlink; the numerical dependencies
-are used by the fitter and its tests.
+The companion logger needs pymavlink and pyserial for serial connections;
+the numerical dependencies are used by the fitter and its tests. If a serial
+connection reports `No module named 'serial'`, install `pyserial` in the same
+Python environment used to run the logger:
+
+```bash
+python3 -m pip install pyserial
+python3 -c "import serial; print(serial.__file__)"
+```
 
 Use a **dedicated routed MAVLink endpoint**. If MAVROS, your docking manager or
 MAVProxy already owns `/dev/ttyAMA0`, do not open that UART a second time. Route
