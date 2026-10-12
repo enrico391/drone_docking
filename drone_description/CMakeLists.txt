@@ -50,6 +50,7 @@ install(
 )
 
 install(PROGRAMS scripts/disturbance_injector scripts/disturbance_tuner
+  scripts/camera_latency
   DESTINATION lib/${PROJECT_NAME})
 
 install(
@@ -83,6 +84,10 @@ if(BUILD_TESTING)
     ENV "ROS_HOME=/tmp/ground_disturbances_ros_home")
   ament_add_pytest_test(disturbance_tuner_test
     test/test_disturbance_tuner.py TIMEOUT 30)
+  ament_add_pytest_test(camera_latency_test
+    test/test_camera_latency.py TIMEOUT 30)
+  ament_add_pytest_test(camera_latency_launch_test
+    test/test_camera_latency_launch.py TIMEOUT 30)
 endif()
 
 ament_package()

@@ -1,7 +1,10 @@
 """Spawn one Gazebo vehicle with the pinned ArduCopter 4.7 stack."""
 
+import math
 import tempfile
 from pathlib import Path
+
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchContext, LaunchDescription
@@ -16,10 +19,18 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def _bridge_config(source: str, world_name: str, robot_name: str) -> str:
+def _bridge_config(
+    source: str, world_name: str, robot_name: str, camera_latency_s: float = 0.0
+) -> str:
     config = Path(source).read_text(encoding="utf-8")
     config = config.replace("{{ world_name }}", world_name)
     config = config.replace("{{ robot_name }}", robot_name)
+    if camera_latency_s > 0:
+        mappings = yaml.safe_load(config)
+        image = next(mapping for mapping in mappings
+                     if mapping['ros_topic_name'] == 'camera/image_raw')
+        image['ros_topic_name'] = 'camera/image_raw_undelayed'
+        config = yaml.safe_dump(mappings)
     output = tempfile.NamedTemporaryFile(
         mode="w", delete=False, suffix=".yaml", encoding="utf-8"
     )
@@ -29,6 +40,11 @@ def _bridge_config(source: str, world_name: str, robot_name: str) -> str:
 
 
 def create_robot_actions(context: LaunchContext):
+    camera_latency_s = float(
+        LaunchConfiguration("camera_latency_s", default="0.0").perform(context)
+    )
+    if not math.isfinite(camera_latency_s) or camera_latency_s < 0:
+        raise ValueError("camera_latency_s must be finite and nonnegative")
     namespace = LaunchConfiguration("namespace")
     robot_name = LaunchConfiguration("robot_name").perform(context)
     world_name = LaunchConfiguration("world_name").perform(context)
@@ -46,6 +62,7 @@ def create_robot_actions(context: LaunchContext):
         LaunchConfiguration("bridge_config_file").perform(context),
         world_name,
         robot_name,
+        camera_latency_s,
     )
 
     state_publisher = Node(
@@ -131,7 +148,17 @@ def create_robot_actions(context: LaunchContext):
         }.items(),
         condition=IfCondition(LaunchConfiguration("use_mavproxy")),
     )
-    return [state_publisher, bridge, tf_relay, sitl, dds_agent, mavproxy, spawn]
+    camera_nodes = []
+    if camera_latency_s > 0:
+        camera_nodes.append(Node(
+            package="drone_description",
+            executable="camera_latency",
+            namespace=namespace,
+            output="screen",
+            parameters=[{"use_sim_time": True, "delay_s": camera_latency_s}],
+        ))
+    return [state_publisher, bridge, *camera_nodes, tf_relay,
+            sitl, dds_agent, mavproxy, spawn]
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -151,6 +178,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("use_dds_agent", default_value="true"),
         DeclareLaunchArgument("use_mavproxy", default_value="false"),
         DeclareLaunchArgument("use_gz_tf", default_value="true"),
+        DeclareLaunchArgument(
+            "camera_latency_s", default_value="0.0",
+            description="Additional simulated image delivery delay in seconds.",
+        ),
         DeclareLaunchArgument("x", default_value="0.0"),
         DeclareLaunchArgument("y", default_value="0.0"),
         DeclareLaunchArgument("z", default_value="-0.032"),

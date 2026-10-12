@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+"""Executable entry point for simulated camera latency."""
+
+from drone_description.camera_latency import main
+
+
+if __name__ == '__main__':
+    main()

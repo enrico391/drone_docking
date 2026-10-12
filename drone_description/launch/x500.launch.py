@@ -99,6 +99,7 @@ def create_robot_actions(context: LaunchContext) -> List[IncludeLaunchDescriptio
             "use_dds_agent": LaunchConfiguration("use_dds_agent"),
             "use_mavproxy": LaunchConfiguration("use_mavproxy"),
             "use_gz_tf": LaunchConfiguration("use_gz_tf"),
+            "camera_latency_s": LaunchConfiguration("camera_latency_s", default="0.0"),
         }.items(),
     )
     return [robot]
@@ -121,6 +122,10 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("use_dds_agent", default_value="true"),
             DeclareLaunchArgument("use_mavproxy", default_value="true"),
             DeclareLaunchArgument("use_gz_tf", default_value="true"),
+            DeclareLaunchArgument(
+                "camera_latency_s", default_value="0.0",
+                description="Additional simulated image delivery delay in seconds.",
+            ),
             DeclareLaunchArgument("x", default_value="0.0"),
             DeclareLaunchArgument("y", default_value="0.0"),
             DeclareLaunchArgument(
