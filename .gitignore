@@ -1,2 +1,6 @@
 *.pyc
 docs
+.venv
+*.m
+*.Identifier
+*/matlab
