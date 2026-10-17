@@ -4,3 +4,5 @@ docs
 *.m
 *.Identifier
 */matlab
+drone_sysid/models/*
+drone_sysid/runs/*

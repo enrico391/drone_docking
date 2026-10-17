@@ -58,6 +58,8 @@ install(
     models/drone_docking_base_structure
     models/mono_cam
     models/x500
+    models/x500_px4_base
+    models/x500_px4_mono_cam_down
     models/x500_triangular_base
     models/x500_mono_cam_down
     models/x500_with_ardupilot
@@ -88,6 +90,8 @@ if(BUILD_TESTING)
     test/test_camera_latency.py TIMEOUT 30)
   ament_add_pytest_test(camera_latency_launch_test
     test/test_camera_latency_launch.py TIMEOUT 30)
+  ament_add_pytest_test(px4_launch_test
+    test/test_px4_launch.py TIMEOUT 30)
 endif()
 
 ament_package()

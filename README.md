@@ -162,6 +162,29 @@ The image is 640x480, the target update rate is 30 Hz, and both messages use
 `camera_optical_frame`. Use `/camera/image_raw` and `/camera/camera_info` as the inputs to
 `dock_apriltag_localizer`.
 
+To exercise the docking controller with delayed camera feedback, start the
+simulation with:
+
+```bash
+ros2 launch drone_bringup docking_sim.launch.py camera_latency_s:=0.11
+```
+
+`camera_latency_s` adds a fixed arrival-to-publication delay in seconds before
+AprilTag detection. The default `0.0` keeps the direct camera bridge. With a
+positive delay, Gazebo images first appear on `/camera/image_raw_undelayed`;
+the delayed stream remains `/camera/image_raw`, so localizer commands stay
+the same. Camera calibration on `/camera/camera_info` is unchanged. The relay
+uses simulation time, pauses with Gazebo, clears pending frames on clock reset,
+and preserves image capture timestamps. Its buffer holds at most 64 frames,
+dropping the oldest if full. Very large delays can exceed this capacity.
+
+The 110 ms example is an initial sensitivity test based on the real flight's
+median capture-to-controller image age. It adds to existing bridge, detection,
+and scheduling latency; it does not establish a matched total latency. Measure
+the resulting age using a consistent clock before treating it as calibrated.
+Pose-filter lag remains separate. The argument is also accepted by
+`drone_description gazebo_docking.launch.py` and `x500.launch.py`.
+
 Start the localizer in a second terminal after activating its environment and
 sourcing the workspace:
 
@@ -203,3 +226,162 @@ Only use the explicit disarm request after touchdown or for a stopped test:
 ros2 service call /ap/v1/arm_motors ardupilot_msgs/srv/ArmMotors \
   "{arm: false}"
 ```
+
+## PX4 SITL comparison stack
+
+The same world, airframe, camera and docking platform can be driven by PX4
+instead of ArduPilot. The PX4 launch uses DART physics; the ArduPilot launch
+retains its existing backend, so comparisons do not currently use identical
+physics engines.
+
+### Layout
+
+- `.worktrees/PX4-Autopilot` holds PX4-Autopilot v1.16.2 (recursive clone of
+  the pinned tag).
+- `.worktrees/px4-venv` is a dedicated Python virtual environment for the PX4
+  build. It is separate from `apriltag_venv` and from the system interpreter so
+  PX4's newer `numpy`/`pandas` cannot shadow the ROS 2 or ArduPilot packages.
+- `models/x500_px4_base` is the PX4 vehicle body: the same geometry, mass,
+  inertia and meshes as `x500_triangular_base` (`model://x500_triangular_base/`
+  meshes are shared so both stacks simulate one airframe), plus the sensors PX4's
+  `gz_bridge` subscribes to.
+- `models/x500_px4_mono_cam_down` composes the body with the existing
+  `mono_cam` (same 0.19 m downward offset) and adds the joint-state and pose
+  publishers the ROS-Gazebo bridge consumes, mirroring `x500_with_ardupilot`.
+
+### Build
+
+```bash
+cd .worktrees/PX4-Autopilot
+source ../px4-venv/bin/activate
+make px4_sitl_default            # produces build/px4_sitl_default/bin/px4
+```
+
+The Gazebo (gz/Harmonic) bridge, the `MulticopterMotorModel` support and the PX4
+Gazebo plugins are part of that build. `gz-harmonic` and `libgz-*-dev` come from
+the existing system setup; no additional `apt` packages are required beyond the
+PX4 Python requirements already installed into `px4-venv`.
+
+### Run
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch drone_description px4_docking.launch.py
+```
+
+The launch starts the docking world and GUI, spawns `x500_px4_mono_cam_down`
+under the instance name `x500`, starts the ROS-Gazebo bridge (clock, TF, joint
+states, camera, disturbance wrenches) and finally launches PX4 in Gazebo
+*standalone* mode, where PX4 attaches to the already running model instead of
+spawning its own world. Because Gazebo and the model are started here, the
+custom `docking_world.sdf` and the custom docking platform are used unchanged.
+
+Useful arguments: `use_gz_sim_gui:=false` (server only), `spawn_robot:=false`
+(world only), `initial_point:=dock` (start in the dock recess),
+`initial_point:=custom spawn_x:=2.0 spawn_y:=2.0`, `px4_dir:=<path>` to point at
+a different PX4 checkout.
+
+`initial_point:=ground` defaults to `(2, 2, -0.032)`. The dock's lower body is a
+solid 1.6 m box up to `z=0.88` centred on the origin, so spawning at `(0, 0)`
+would place the vehicle inside the dock collision.
+
+### PX4-specific model requirements
+
+Two details in `x500_px4_base` differ from the ArduPilot airframe on purpose:
+
+1. **Sensor noise is mandatory.** PX4's sensor data validator flags a channel as
+   `STALE` when it returns bit-identical values (within `1e-6`) more than a few
+   times in a row. A noiseless simulated IMU/magnetometer therefore fails
+   `DataValidatorGroup::get_best()`, `sensor_combined` is never published and
+   EKF2 stays at zero updates (`ekf2: attitude: 0, local position: 0`), which
+   surfaces as `Preflight Fail: ekf2 missing data`. The IMU and magnetometer
+   noise figures mirror PX4's own `x500_base`. The ArduPilot airframe is left
+   unnoised because it consumes the sensors over the ArduPilot FDM interface.
+2. **IMU orientation.** PX4's `gz_bridge` expects Gazebo's native
+   forward-left-up axes and applies the FLU->FRD rotation itself, so the IMU must
+   *not* carry the 180 degree roll used by the ArduPilot variant.
+
+PX4 also needs `magnetometer_sensor` and `navsat_sensor` on `base_link`, which
+the ArduPilot airframe does not define; both are present in `x500_px4_base`.
+
+### Required PX4 parameters
+
+The PX4 launch automatically applies
+`/home/enri-ubuntu/drone_ws/src/drone_docking/drone_description/config/px4_sitl_docking.parm`
+on every boot, using PX4's `PX4_PARAM_*` environment overrides. PX4 reads these
+after importing saved BSON parameters and before starting the simulator and
+controllers. This prevents fresh or previously configured rootfs directories
+from silently using stock-x500 thrust scaling and allocation geometry.
+
+```text
+MPC_THR_HOVER     0.38      # docking airframe, normalised thrust domain
+THR_MDL_FAC       0.74      # quadratic motor thrust curve
+NAV_DLL_ACT        0        # do not require a GCS datalink to arm
+COM_DISARM_PRFLT   0        # no auto-disarm before a scripted takeoff
+CBRK_SUPPLY_CHK    894281   # skip the avionics power check (no power module)
+```
+
+The profile also matches `CA_ROTOR{0..3}_PX/PY` to the actual rotor positions
+(`+/-0.174 m`, converted from Gazebo FLU to PX4 FRD), and `_KM` to the
+`momentConstant` (`+/-0.016`, signed by spin direction). QGC changes to parameters
+listed in the profile are replaced on the next launch; edit the profile for
+persistent changes. These are SITL settings, not a real-vehicle configuration.
+
+Do not use PX4's `param load` command with this text file: native parameter
+load/import expects BSON. To update an already running SITL, the optional
+MAVLink helper remains available:
+
+```bash
+python3 /home/enri-ubuntu/drone_ws/src/drone_docking/drone_description/config/px4_param_tool.py \
+  /home/enri-ubuntu/drone_ws/src/drone_docking/drone_description/config/px4_sitl_docking.parm --apply
+```
+
+### Verification status
+
+Verified against this workspace:
+
+- PX4 v1.16.2 SITL built with the Gazebo Harmonic bridge;
+- `docking_world` loads with the custom dock and the custom `x500` model spawns
+  `x500_px4_mono_cam_down`, standing level with its feet on `z=0`;
+- PX4's `gz_bridge` attaches (`world: docking_world, model: x500`) and receives
+  gyro, accel, magnetometer, barometer, GPS and the camera streams;
+- EKF2 reports `attitude: 1, local position: 1, global position: 1` with the
+  expected GPS origin (`45.3821944, 12.0005833`), matching the world's
+  `spherical_coordinates`;
+- the vehicle arms and the ESC outputs drive the four
+  `MulticopterMotorModel` motors (`/x500/command/motor_speed`, values 150-1000).
+
+### Takeoff instability: physics backend and IMU acceleration
+
+The installed Bullet Featherstone backend (gz-physics 7.8.0, Gazebo Sim
+8.15.0) does not supply the translational acceleration needed by Gazebo's IMU.
+A free-falling body reports `linear_acceleration.z = +9.8 m/s^2` in Gazebo FLU
+instead of approximately zero. The same test with DART reports zero correctly.
+PX4's FLU-to-FRD conversion is correct and must not be changed to compensate.
+
+The failure is visible even with the corrected thrust profile in flight log
+`/home/enri-ubuntu/drone_ws/.worktrees/PX4-Autopilot/build/px4_sitl_default/rootfs/log/2026-10-17/20_19_28.ulg`:
+
+- at 19 s, ground-truth vertical speed is -1.95 m/s, but EKF speed is -0.09 m/s;
+- at 20 s, ground-truth vertical speed is -6.15 m/s, but EKF speed is -0.53 m/s;
+- the body accelerometer still reads approximately -9.79 m/s^2 in PX4 FRD.
+
+The estimator therefore misses the climb acceleration and the altitude
+controller continues increasing thrust. Later position corrections and attitude
+errors produce runaway flight. Thrust matching or PID tuning alone cannot fix
+missing inertial measurements.
+
+`px4_docking.launch.py` now defaults to `gz-physics-dartsim-plugin`. The docking
+world already uses primitive box collision proxies and the vehicle uses point
+contacts, so it does not require Bullet for its visual CAD meshes. Keep the DART
+default unless a replacement backend has been checked for correct IMU
+acceleration. The ArduPilot launch and airframe are unchanged.
+
+Validation after the fix: a headless 2.5 m takeoff, 25 s flight followed by LAND
+completed with automatic disarm. During the final 13 s before LAND, simulated
+ground-truth height stayed within 2.458-2.517 m and horizontal excursion was
+0.084 m; MAVLink roll/pitch stayed below 0.28 degrees. This verifies basic
+flight, not autonomous docking or real-hardware tuning. Details and known
+shutdown issues are in
+`/home/enri-ubuntu/drone_ws/src/drone_docking/docs/px4_takeoff_validation.md`.

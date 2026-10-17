@@ -1,0 +1,85 @@
+# PX4 SITL parameters for the docking comparison runs.
+#
+# sitl_px4.launch.py applies this profile on every boot using PX4_PARAM_*
+# environment overrides, after saved BSON parameters have been imported.
+# Values changed in QGC for parameters listed here are replaced at next launch.
+# Do not use `param load` on this text file: PX4's native load/import expects BSON.
+# For an already running SITL, use px4_param_tool.py with --apply instead.
+#
+# Format: "PARAM_NAME value" (comments start with #).
+
+# The stock "Gazebo x500" airframe (4001) sets NAV_DLL_ACT 2, which makes PX4
+# refuse to arm unless an active ground station datalink is present
+# ("Preflight Fail: No connection to the ground control station" -> the
+# communication_links arming check fails). Automated docking runs start with no
+# GCS, so the datalink-loss action is disabled here.
+NAV_DLL_ACT          0
+
+# Do not auto-disarm while sitting armed on the ground before a scripted
+# takeoff (PX4 default disarms after COM_DISARM_PRFLT seconds).
+COM_DISARM_PRFLT     0
+
+# Warning threshold for the controller gains/actuator effectiveness warnings;
+# the default is fine, kept explicit for reproducibility.
+# COM_CPU_MAX / COM_RAM_MAX are intentionally left at their defaults (-1 =
+# checks disabled) because a shared developer VM reports high usage.
+
+# SITL has no avionics power module before system_power_simulator publishes, so
+# the avionics power check can fail during the first seconds of boot. Bypassing
+# it keeps scripted arming deterministic. Set back to 0 to re-enable the check.
+CBRK_SUPPLY_CHK      894281
+
+# ---------------------------------------------------------------------------
+# Airframe matching (thrust model)
+# ---------------------------------------------------------------------------
+# PX4's stock "Gazebo x500" airframe (4001) assumes a 2.0 kg vehicle and a
+# near-linear thrust curve. The docking airframe is different, and until PX4 is
+# told about it the thrust scaling and allocation do not match the plant.
+# These settings do NOT fix missing IMU acceleration from the installed Bullet
+# Featherstone backend. The PX4 launch must also use DART physics.
+#
+# Docking airframe numbers (models/x500_px4_base/model.sdf):
+#   mass  = 1.277 (base_link) + 0.914 (triangular base)
+#         + 4 x 0.016076923 (rotors) + 0.05 (mono_cam)  = 2.305 kg -> 22.6 N
+#   thrust(u) = 4 * motorConstant * omega^2,  omega = 150 + 850*u
+#             = 4 * 1.47e-05 * (150 + 850*u)^2
+#   max TWR   = 58.8 N / 22.6 N = 2.60
+#
+# Hover needs thrust = weight: 22.6 N out of 58.8 N max -> 0.384.
+# MPC_THR_HOVER is in that normalised *thrust* domain ("Vertical thrust required
+# to hover", @unit norm), not in motor-signal units.
+#
+# It matters twice over: altitude control uses it as the zero-vertical-acceleration
+# base, and the land detector compares the current thrust against it
+# (LNDMC_THR_RANGE). With the stock 0.60 the take-off ramp passes straight
+# through the "hover thrust while not yet moving" window and PX4 reports
+# "Takeoff detected" followed immediately by "Landing detected" -> "Disarmed by
+# landing".
+MPC_THR_HOVER        0.38
+
+# Thrust vs motor signal is quadratic, not linear. PX4 models it as
+# rel_thrust = fac*u^2 + (1-fac)*u. Fitting (0.15+0.85u)^2 (after removing the
+# idle offset and renormalising to 1 at u=1) gives 0.26*u + 0.74*u^2.
+THR_MDL_FAC          0.74
+
+# Let PX4 keep adapting the hover thrust from the estimate in flight.
+MPC_USE_HTE          1
+
+# ---------------------------------------------------------------------------
+# Control allocation geometry
+# ---------------------------------------------------------------------------
+# Rotors sit on the 45 deg diagonals at +/-0.174 m (FRD body frame), not at the
+# stock x500's 0.13/0.22 m layout. Yaw torque per unit thrust equals the model's
+# momentConstant (0.016); the sign follows the spin direction (ccw = +).
+CA_ROTOR0_PX         0.174
+CA_ROTOR0_PY         0.174
+CA_ROTOR0_KM         0.016
+CA_ROTOR1_PX         -0.174
+CA_ROTOR1_PY         -0.174
+CA_ROTOR1_KM         0.016
+CA_ROTOR2_PX         0.174
+CA_ROTOR2_PY         -0.174
+CA_ROTOR2_KM         -0.016
+CA_ROTOR3_PX         -0.174
+CA_ROTOR3_PY         0.174
+CA_ROTOR3_KM         -0.016
