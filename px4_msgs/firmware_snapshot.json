@@ -1,0 +1,34 @@
+{
+  "tag": "v1.18.0-rc1",
+  "commit": "fca3df865af36124a28c9d607e850f111dbaaea9",
+  "messages": {
+    "OffboardControlMode.msg": {
+      "path": "msg/OffboardControlMode.msg",
+      "sha256": "8bd6fa373300e5bd35ade9d34ba0e1f470b880bf5d5b2f5c9316957bbe2a40e7"
+    },
+    "TrajectorySetpoint.msg": {
+      "path": "msg/versioned/TrajectorySetpoint.msg",
+      "sha256": "d5671f1a094a9183e2337171ab738ae3395442e024b58aaacbf51c2b0188d5e2"
+    },
+    "VehicleCommand.msg": {
+      "path": "msg/versioned/VehicleCommand.msg",
+      "sha256": "538fa3c94e9a2de85247e1084d817d1f009e21196038e16d6f4dac552a5021c8"
+    },
+    "VehicleCommandAck.msg": {
+      "path": "msg/versioned/VehicleCommandAck.msg",
+      "sha256": "185833dab85d5e9682ac230afc8ef193c2d48ab43804af52bea2fdc4d959a782"
+    },
+    "VehicleLandDetected.msg": {
+      "path": "msg/versioned/VehicleLandDetected.msg",
+      "sha256": "479ef4ed2bdf80acd4fe1d5cca988ee3dfe49e703494339eb7b62a01f00632f8"
+    },
+    "VehicleLocalPosition.msg": {
+      "path": "msg/versioned/VehicleLocalPosition.msg",
+      "sha256": "4a24c882529ffaa71d834f0ef75e9cbacbe179db72b9227a13bca35205ccdd53"
+    },
+    "VehicleStatus.msg": {
+      "path": "msg/versioned/VehicleStatus.msg",
+      "sha256": "35984922aa55b55caae393a907ecd1e42a31a2fb94c0cb09a0846d97d69d3e79"
+    }
+  }
+}

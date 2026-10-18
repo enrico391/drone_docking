@@ -165,7 +165,7 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     # PX4 starts its uXRCE-DDS client in rcS. Use the installed v2.4 agent,
-    # compatible with PX4 v1.16, rather than opening a MAVLink control link.
+    # matching RC1's default DDS v2 build on Humble, not a MAVLink control link.
     dds_agent = Node(
         package="micro_ros_agent", executable="micro_ros_agent",
         arguments=["udp4", "-p", LaunchConfiguration("dds_port")],

@@ -1,6 +1,8 @@
 """Exercise native PX4 messages with real Humble nodes and deterministic time."""
 
+import hashlib
 import importlib.util
+import json
 import math
 from pathlib import Path
 import sys
@@ -11,9 +13,11 @@ import rclpy
 from rclpy.context import Context
 from rclpy.parameter import Parameter
 from px4_msgs.msg import (
+    OffboardControlMode, TrajectorySetpoint,
     VehicleCommand, VehicleCommandAck, VehicleLandDetected,
     VehicleLocalPosition, VehicleStatus,
 )
+from rclpy.serialization import deserialize_message, serialize_message
 from std_srvs.srv import Trigger
 
 from flight_cycle_manager.landing_backend import VelocityCommand, VelocityFrame
@@ -22,6 +26,15 @@ from flight_cycle_manager.px4_manager import Px4FlightCycleManager
 
 
 ROOT = Path(__file__).parents[2]
+DDS_MESSAGES = (
+    ("in", "offboard_control_mode", OffboardControlMode, None),
+    ("in", "trajectory_setpoint", TrajectorySetpoint, 0),
+    ("in", "vehicle_command", VehicleCommand, 0),
+    ("out", "vehicle_command_ack", VehicleCommandAck, 1),
+    ("out", "vehicle_land_detected", VehicleLandDetected, 0),
+    ("out", "vehicle_local_position", VehicleLocalPosition, 1),
+    ("out", "vehicle_status", VehicleStatus, 4),
+)
 
 
 @pytest.fixture
@@ -255,10 +268,45 @@ def test_frames_and_yaw_sign(frame, heading, xyz, expected):
     assert velocity_to_ned(VelocityCommand(frame, *xyz, 0.2), heading) == pytest.approx(expected)
 
 
-def test_topic_versions_follow_firmware():
-    assert dds_topic("", "out", "vehicle_status", VehicleStatus) == "/fmu/out/vehicle_status_v1"
-    assert dds_topic("/px4_1/", "out", "vehicle_local_position", VehicleLocalPosition) == (
-        "/px4_1/fmu/out/vehicle_local_position")
+@pytest.mark.parametrize("namespace", ["", "/px4_1/"])
+@pytest.mark.parametrize("direction,name,message_type,version", DDS_MESSAGES)
+def test_topic_versions_follow_rc1(namespace, direction, name, message_type, version):
+    prefix = "/px4_1" if namespace else ""
+    suffix = f"_v{version}" if version else ""
+    assert dds_topic(namespace, direction, name, message_type) == (
+        f"{prefix}/fmu/{direction}/{name}{suffix}")
+
+
+@pytest.mark.parametrize("direction,name,message_type,version", DDS_MESSAGES)
+def test_generated_rc1_interfaces_serialize(direction, name, message_type, version):
+    assert getattr(message_type, "MESSAGE_VERSION", None) == version
+    message = message_type(timestamp=123_456_789)
+    assert deserialize_message(serialize_message(message), message_type) == message
+
+
+def test_manager_uses_rc1_dds_endpoints(manager):
+    assert {publisher.topic_name for publisher in manager._dds_publishers.values()} == {
+        "/fmu/in/offboard_control_mode",
+        "/fmu/in/trajectory_setpoint",
+        "/fmu/in/vehicle_command",
+    }
+    assert {subscription.topic_name for subscription in manager._dds_subscriptions[:4]} == {
+        "/fmu/out/vehicle_status_v4",
+        "/fmu/out/vehicle_local_position_v1",
+        "/fmu/out/vehicle_land_detected",
+        "/fmu/out/vehicle_command_ack_v1",
+    }
+
+
+def test_rc1_status_layout_serializes_new_fields():
+    message = VehicleStatus(
+        timestamp=123_456_789,
+        nav_state_display=VehicleStatus.NAVIGATION_STATE_OFFBOARD,
+        accepts_offboard_setpoints=True,
+        traffic_avoidance_system_present=True,
+    )
+    assert "failure_detector_status" not in message.get_fields_and_field_types()
+    assert deserialize_message(serialize_message(message), VehicleStatus) == message
 
 
 def test_transport_timestamp_tracks_px4_dds_clock_not_wall_or_sim_clock(manager):
@@ -346,15 +394,37 @@ def test_pid_disarm_ack_preserves_request_correlation(manager):
     assert calls == [(7, True, manager._now())]
 
 
-def test_message_snapshot_matches_workspace_firmware():
+def test_message_snapshot_checksums_and_metadata_match_rc1():
+    package = ROOT / "px4_msgs"
+    snapshot = json.loads((package / "firmware_snapshot.json").read_text())
+    assert snapshot["tag"] == "v1.18.0-rc1"
+    assert snapshot["commit"] == "fca3df865af36124a28c9d607e850f111dbaaea9"
+    assert set(snapshot["messages"]) == {
+        f"{message_type.__name__}.msg" for _, _, message_type, _ in DDS_MESSAGES
+    }
+    assert {path.name for path in (package / "msg").glob("*.msg")} == set(snapshot["messages"])
+    for name, origin in snapshot["messages"].items():
+        assert hashlib.sha256((package / "msg" / name).read_bytes()).hexdigest() == origin["sha256"]
+
+
+def test_message_snapshot_matches_pinned_firmware_commit():
     firmware = ROOT.parents[1] / ".worktrees/PX4-Autopilot"
     if not firmware.is_dir():
         pytest.skip("local PX4 checkout unavailable")
-    for path in (ROOT / "px4_msgs/msg").glob("*.msg"):
-        origin = firmware / "msg" / path.name
-        if not origin.is_file():
-            origin = firmware / "msg/versioned" / path.name
-        assert path.read_bytes() == origin.read_bytes()
+    snapshot = json.loads((ROOT / "px4_msgs/firmware_snapshot.json").read_text())
+    commit = snapshot["commit"]
+    available = subprocess.run(
+        ["git", "-C", str(firmware), "cat-file", "-e", f"{commit}^{{commit}}"],
+        capture_output=True, timeout=10,
+    )
+    if available.returncode:
+        pytest.skip("pinned PX4 firmware commit unavailable locally")
+    for name, origin in snapshot["messages"].items():
+        result = subprocess.run(
+            ["git", "-C", str(firmware), "show", f"{commit}:{origin['path']}"],
+            capture_output=True, check=True, timeout=10,
+        )
+        assert (ROOT / "px4_msgs/msg" / name).read_bytes() == result.stdout
 
 
 def test_px4_launch_has_only_native_manager():

@@ -34,12 +34,15 @@ PX4 inputs:
 
 PX4 outputs:
 
-- `/fmu/out/vehicle_status_v1` (PX4 v1.16's version-one status message)
-- `/fmu/out/vehicle_local_position`
+- `/fmu/out/vehicle_status_v4`
+- `/fmu/out/vehicle_local_position_v1`
 - `/fmu/out/vehicle_land_detected`
-- `/fmu/out/vehicle_command_ack`
+- `/fmu/out/vehicle_command_ack_v1`
 
-The included `px4_msgs` subset matches the workspace's PX4 v1.16.2 firmware.
+The included `px4_msgs` subset matches PX4 **v1.18.0-rc1**, commit
+`fca3df865af36124a28c9d607e850f111dbaaea9`. Topic suffixes are derived from the
+generated message versions. Rebuild and source the workspace after changing
+interfaces; topic remapping alone cannot convert incompatible message layouts.
 Set `px4_namespace:=px4_1` on both simulation and manager to prefix DDS topics
 with `/px4_1`. ROS `namespace` is separate from the PX4 DDS namespace.
 
@@ -55,9 +58,15 @@ ros2 launch drone_description px4_docking.launch.py \
   use_flight_cycle_manager:=true use_disturbances:=true initial_point:=dock
 ```
 
+Run an RC1 firmware build: updating these ROS interfaces does not switch or
+rebuild `/home/enri-ubuntu/drone_ws/.worktrees/PX4-Autopilot`, whose existing
+v1.16.2 build does not directly match them. Pass `px4_dir` to the simulation
+launch to select a separately prepared RC1 checkout.
+
 The simulation starts the installed v2.4 `micro_ros_agent` on UDP 8888 for
-PX4's built-in uXRCE-DDS client. Use `use_dds_agent:=false` if an agent already
-owns that port. `dds_port` is forwarded to both PX4 and the agent. Do not run
+PX4's built-in uXRCE-DDS client (RC1's default DDS v2 build on ROS 2 Humble).
+Use `use_dds_agent:=false` if an agent already owns that port. `dds_port` is
+forwarded to both PX4 and the agent. Do not run
 multiple identical Gazebo worlds in the same Gazebo transport partition.
 
 For an already-running PX4 simulation, start only the manager and localizer:
@@ -126,7 +135,8 @@ are not exposed by this manager; the shared PID controller remains reusable.
 
 ## Validation status
 
-A headless PX4 v1.16.2 run confirmed DDS discovery, command ACKs, a 5 m
+A previous headless PX4 v1.16.2 run, using the previous message snapshot,
+confirmed DDS discovery, command ACKs, a 5 m
 dock-relative takeoff, stable hover, visual search acquisition and PID descent
 through central-tag acquisition. Runtime disturbance enable/disable was also
 exercised. The inherited PID touchdown timeout expired before PX4 confirmed
@@ -134,6 +144,9 @@ landing; native LAND fallback then landed and disarmed correctly.
 **Precision touchdown is not yet validated:** PX4 landing response and touchdown
 thresholds still need tuning. The original temporary live-run log is
 `/tmp/px4_dds_sitl4.log`, not a committed artifact.
+
+That flight result is historical, not validation of RC1. The RC1 message
+snapshot requires its own SITL/hardware flight validation.
 
 Run the retained package tests in a sourced ROS environment:
 

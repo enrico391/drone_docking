@@ -33,6 +33,12 @@ def test_package_declares_runtime_dependencies():
     } <= dependencies
 
 
+def test_px4_message_package_identifies_rc1_snapshot():
+    package = ET.parse(ROOT.parent / "px4_msgs/package.xml").getroot()
+    assert package.findtext("version") == "1.18.0"
+    assert "v1.18.0-rc1" in package.findtext("description")
+
+
 def test_package_installs_only_px4_entry_point_without_mavlink(monkeypatch):
     package = ET.parse(ROOT / "package.xml").getroot()
     dependencies = {node.text for node in package.findall("exec_depend")}

@@ -11,5 +11,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/VehicleLocalPosition.msg"
   "msg/VehicleStatus.msg"
 )
+install(FILES README.md firmware_snapshot.json DESTINATION share/${PROJECT_NAME})
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()

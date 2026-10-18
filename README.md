@@ -241,7 +241,11 @@ The DDS agent starts by default. Disturbances start unloaded; enable them with
 `ros2 param set /disturbance_injector enabled true` after takeoff. The PX4
 manager is a DDS-only executable; the ArduPilot manager and debug/tuning
 launches have been removed from this branch. Build the included
-firmware-matched `px4_msgs` subset first.
+`px4_msgs` subset first. It is pinned to **v1.18.0-rc1** (firmware commit
+`fca3df865af36124a28c9d607e850f111dbaaea9`); the running firmware must match,
+or use PX4's message translation node. The existing v1.16.2 SITL checkout/build
+is not upgraded by rebuilding the ROS packages. Use `px4_dir` to select a
+separately prepared RC1 firmware build before running the native manager.
 For build commands, service calls, safety behavior and current PX4 mission
 limitations, see the PX4 section of
 `/home/enri-ubuntu/drone_ws/src/drone_docking/flight_cycle_manager/README.md`.
@@ -253,8 +257,10 @@ physics engines.
 
 ### Layout
 
-- `.worktrees/PX4-Autopilot` holds PX4-Autopilot v1.16.2 (recursive clone of
-  the pinned tag).
+- `/home/enri-ubuntu/drone_ws/.worktrees/PX4-Autopilot` currently holds the
+  historical PX4-Autopilot v1.16.2 SITL checkout. Its Git history also contains
+  the RC1 commit used by the ROS message snapshot, but its existing firmware
+  build does not directly match the new interfaces.
 - `.worktrees/px4-venv` is a dedicated Python virtual environment for the PX4
   build. It is separate from `apriltag_venv` and from the system interpreter so
   PX4's newer `numpy`/`pandas` cannot shadow the ROS 2 or ArduPilot packages.
@@ -356,7 +362,8 @@ python3 /home/enri-ubuntu/drone_ws/src/drone_docking/drone_description/config/px
 
 ### Verification status
 
-Verified against this workspace:
+Historical simulation verification, before the RC1 ROS message update
+(not an RC1 flight validation):
 
 - PX4 v1.16.2 SITL built with the Gazebo Harmonic bridge;
 - `docking_world` loads with the custom dock and the custom `x500` model spawns
