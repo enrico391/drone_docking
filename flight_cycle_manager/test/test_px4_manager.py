@@ -11,6 +11,7 @@ import subprocess
 import pytest
 import rclpy
 from rclpy.context import Context
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 from px4_msgs.msg import (
     OffboardControlMode, TrajectorySetpoint,
@@ -58,10 +59,21 @@ def manager(monkeypatch, request):
         context.shutdown()
 
 
-def telemetry(node, *, armed=False, landed=True, offboard=False, z=0.0):
+@pytest.fixture
+def control_messages(manager, monkeypatch):
+    captured = {name: [] for name in manager._dds_publishers}
+    for name, publisher in manager._dds_publishers.items():
+        monkeypatch.setattr(publisher, "publish", captured[name].append)
+    return captured
+
+
+def telemetry(node, *, armed=False, landed=True, offboard=False, z=0.0, nav_state=None):
+    if nav_state is None:
+        nav_state = (VehicleStatus.NAVIGATION_STATE_OFFBOARD if offboard
+                     else VehicleStatus.NAVIGATION_STATE_POSCTL)
     node._on_status(VehicleStatus(
         arming_state=(VehicleStatus.ARMING_STATE_ARMED if armed else VehicleStatus.ARMING_STATE_DISARMED),
-        nav_state=(VehicleStatus.NAVIGATION_STATE_OFFBOARD if offboard else VehicleStatus.NAVIGATION_STATE_POSCTL),
+        nav_state=nav_state,
         pre_flight_checks_pass=True, system_id=1, component_id=1,
     ))
     node._on_local(VehicleLocalPosition(
@@ -181,6 +193,252 @@ def test_pilot_override_latches_and_stops_stream(manager):
     manager._tick()
     assert manager._state == "PILOT_OVERRIDE"
     assert not manager._start(None, Trigger.Response()).success
+
+
+@pytest.mark.parametrize("nav_state", [
+    VehicleStatus.NAVIGATION_STATE_POSCTL,
+    VehicleStatus.NAVIGATION_STATE_ALTCTL,
+    VehicleStatus.NAVIGATION_STATE_AUTO_LOITER,
+])
+def test_dock_trigger_acquires_offboard_before_search(manager, control_messages, nav_state):
+    telemetry(manager, armed=True, landed=False, z=-3, nav_state=nav_state)
+    assert manager._request_dock(None, Trigger.Response()).success
+    assert manager._state == "WARMUP"
+    assert manager._target == [0.0, 0.0, -3.0]
+    assert manager._velocity is None
+    assert manager._search is None
+    manager._tick()
+    assert control_messages["offboard_control_mode"][-1].position
+    assert not control_messages["vehicle_command"]
+
+    manager.test_clock[0] += 1.6
+    telemetry(manager, armed=True, landed=False, z=-3, nav_state=nav_state)
+    manager._tick()
+    assert manager._state == "SET_OFFBOARD"
+    command, = control_messages["vehicle_command"]
+    assert command.command == VehicleCommand.VEHICLE_CMD_DO_SET_MODE
+    assert (command.param1, command.param2) == (1.0, 6.0)
+    ack(manager)
+    manager._tick()
+    assert manager._state == "SET_OFFBOARD"
+    assert manager._search is None
+
+    telemetry(manager, armed=True, landed=False, offboard=True, z=-3)
+    manager._tick()
+    assert manager._state == "SEARCH_DOCK"
+    assert manager._search is not None
+    assert manager._velocity == (0.0, 0.0, 0.0, 0.0)
+    assert len(control_messages["vehicle_command"]) == 1
+
+
+def test_dock_entry_requires_ack_even_when_offboard_status_arrives_first(manager):
+    telemetry(manager, armed=True, landed=False, z=-3)
+    assert manager._request_dock(None, Trigger.Response()).success
+    manager.test_clock[0] += 1.6
+    telemetry(manager, armed=True, landed=False, z=-3)
+    manager._tick()
+    telemetry(manager, armed=True, landed=False, offboard=True, z=-3)
+    manager._tick()
+    assert manager._state == "SET_OFFBOARD"
+    assert manager._search is None
+    ack(manager)
+    manager._tick()
+    assert manager._state == "SEARCH_DOCK"
+
+
+def test_dock_trigger_in_offboard_skips_mode_request(manager, control_messages):
+    telemetry(manager, armed=True, landed=False, offboard=True, z=-3)
+    assert manager._request_dock(None, Trigger.Response()).success
+    assert manager._state == "SEARCH_DOCK"
+    assert not control_messages["vehicle_command"]
+
+
+@pytest.mark.parametrize("manager", ["/test_dock_entry", "/drone1/test_dock_entry"], indirect=True)
+def test_real_dock_trigger_service_queues_offboard_entry(manager):
+    telemetry(manager, armed=True, landed=False, z=-3)
+    executor = SingleThreadedExecutor(context=manager.context)
+    executor.add_node(manager)
+    client = manager.create_client(Trigger, "~/request_dock")
+    try:
+        assert client.wait_for_service(timeout_sec=2.0)
+        future = client.call_async(Trigger.Request())
+        executor.spin_until_future_complete(future, timeout_sec=3.0)
+        assert future.done()
+        response = future.result()
+        assert response.success, response.message
+        assert manager._state == "WARMUP"
+    finally:
+        manager.destroy_client(client)
+        executor.shutdown()
+
+
+def test_start_already_in_offboard_does_not_send_redundant_mode_command(manager, control_messages):
+    telemetry(manager, offboard=True)
+    assert manager._start(None, Trigger.Response()).success
+    manager.test_clock[0] += 1.6
+    telemetry(manager, offboard=True)
+    manager._tick()
+    assert manager._state == "ARM"
+    command, = control_messages["vehicle_command"]
+    assert command.command == VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
+
+
+@pytest.mark.parametrize("invalid", ["stale", "disarmed", "landed", "heading", "failsafe", "busy"])
+def test_dock_trigger_preserves_safety_gates(manager, control_messages, invalid):
+    telemetry(manager, armed=True, landed=False, z=-3)
+    if invalid == "stale":
+        manager.test_clock[0] += 3.0
+    elif invalid == "disarmed":
+        manager._status.arming_state = VehicleStatus.ARMING_STATE_DISARMED
+    elif invalid == "landed":
+        manager._land.landed = True
+    elif invalid == "heading":
+        manager._local.heading_good_for_control = False
+    elif invalid == "failsafe":
+        manager._status.failsafe = True
+    else:
+        manager._state = "TAKEOFF"
+    assert not manager._request_dock(None, Trigger.Response()).success
+    assert manager._pending is None
+    assert manager._search is None
+    assert not control_messages["vehicle_command"]
+
+
+@pytest.mark.parametrize("stage", ["WARMUP", "SET_OFFBOARD", "OFFBOARD_BEFORE_ACK", "ARM",
+                                   "TAKEOFF", "HOVER", "SEARCH_DOCK", "LANDING_BACKEND"])
+def test_operator_mode_switch_stops_all_control_and_ignores_late_ack(
+        manager, control_messages, stage):
+    telemetry(manager)
+    assert manager._start(None, Trigger.Response()).success
+    if stage != "WARMUP":
+        manager.test_clock[0] += 1.6
+        telemetry(manager)
+        manager._tick()
+    if stage == "OFFBOARD_BEFORE_ACK":
+        telemetry(manager, offboard=True)
+    elif stage not in {"WARMUP", "SET_OFFBOARD"}:
+        ack(manager)
+        telemetry(manager, offboard=True)
+        manager._tick()
+        if stage != "ARM":
+            ack(manager)
+            telemetry(manager, armed=True, offboard=True)
+            manager._tick()
+            if stage != "TAKEOFF":
+                manager._state = stage
+    pending = manager._pending
+    before = {name: len(messages) for name, messages in control_messages.items()}
+    manager._on_status(VehicleStatus(
+        arming_state=manager._status.arming_state,
+        nav_state=VehicleStatus.NAVIGATION_STATE_ALTCTL,
+    ))
+    assert manager._state == "PILOT_OVERRIDE"
+    assert manager._pending is None
+    if pending is not None:
+        manager._on_ack(VehicleCommandAck(
+            command=pending.command, result=VehicleCommandAck.VEHICLE_CMD_RESULT_DENIED,
+            target_system=254, target_component=191,
+        ))
+    # A quick switch back must not hide the override or resume the cycle.
+    telemetry(manager, armed=True, landed=False, offboard=True, z=-3)
+    manager._tick()
+    assert manager._state == "PILOT_OVERRIDE"
+    assert {name: len(messages) for name, messages in control_messages.items()} == before
+
+
+def test_dock_requires_new_trigger_after_pilot_override(manager, control_messages):
+    start_to_hover(manager)
+    telemetry(manager, armed=True, landed=False, z=-5)
+    manager._tick()
+    assert manager._state == "PILOT_OVERRIDE"
+    before = len(control_messages["vehicle_command"])
+    manager._tick()
+    assert len(control_messages["vehicle_command"]) == before
+    assert manager._request_dock(None, Trigger.Response()).success
+    assert manager._state == "WARMUP"
+
+
+@pytest.mark.parametrize("result", [None, VehicleCommandAck.VEHICLE_CMD_RESULT_DENIED])
+def test_dock_offboard_entry_failure_never_starts_search(manager, control_messages, result):
+    telemetry(manager, armed=True, landed=False, z=-3)
+    assert manager._request_dock(None, Trigger.Response()).success
+    manager.test_clock[0] += 1.6
+    telemetry(manager, armed=True, landed=False, z=-3)
+    manager._tick()
+    if result is None:
+        manager.test_clock[0] += 11.0
+        telemetry(manager, armed=True, landed=False, z=-3)
+        manager._tick()
+    else:
+        ack(manager, result=result)
+    assert manager._state == "FC_FALLBACK_LAND"
+    assert manager._search is None
+    assert manager._pending.command == VehicleCommand.VEHICLE_CMD_NAV_LAND
+    assert [message.command for message in control_messages["vehicle_command"]] == [
+        VehicleCommand.VEHICLE_CMD_DO_SET_MODE, VehicleCommand.VEHICLE_CMD_NAV_LAND,
+    ]
+
+
+def test_dock_mode_confirmation_timeout_does_not_retry_offboard(manager, control_messages):
+    telemetry(manager, armed=True, landed=False, z=-3)
+    assert manager._request_dock(None, Trigger.Response()).success
+    manager.test_clock[0] += 1.6
+    telemetry(manager, armed=True, landed=False, z=-3)
+    manager._tick()
+    ack(manager)
+    manager.test_clock[0] += 11.0
+    telemetry(manager, armed=True, landed=False, z=-3)
+    manager._tick()
+    assert manager._state == "FC_FALLBACK_LAND"
+    assert manager._search is None
+    assert [message.command for message in control_messages["vehicle_command"]] == [
+        VehicleCommand.VEHICLE_CMD_DO_SET_MODE, VehicleCommand.VEHICLE_CMD_NAV_LAND,
+    ]
+
+
+@pytest.mark.parametrize("invalid", ["disarmed", "landed", "heading"])
+def test_dock_entry_rechecks_airborne_prerequisites_before_search(manager, invalid):
+    telemetry(manager, armed=True, landed=False, z=-3)
+    assert manager._request_dock(None, Trigger.Response()).success
+    manager.test_clock[0] += 1.6
+    telemetry(manager, armed=True, landed=False, z=-3)
+    manager._tick()
+    ack(manager)
+    telemetry(manager, armed=invalid != "disarmed", landed=invalid == "landed",
+              offboard=True, z=-3)
+    manager._local.heading_good_for_control = invalid != "heading"
+    manager._tick()
+    assert manager._state in {"FAILED", "FC_FALLBACK_LAND"}
+    assert manager._search is None
+
+
+def test_failsafe_during_entry_releases_authority(manager, control_messages):
+    telemetry(manager)
+    assert manager._start(None, Trigger.Response()).success
+    manager._status.failsafe = True
+    manager._tick()
+    assert manager._state == "PILOT_OVERRIDE"
+    assert all(not messages for messages in control_messages.values())
+
+
+def test_operator_takeover_during_fallback_ignores_pending_land_ack(manager, control_messages):
+    start_to_hover(manager)
+    manager._fallback("test")
+    telemetry(manager, armed=True, landed=False,
+              nav_state=VehicleStatus.NAVIGATION_STATE_AUTO_LAND, z=-3)
+    assert manager._state == "FC_FALLBACK_LAND"
+    before = {name: len(messages) for name, messages in control_messages.items()}
+    telemetry(manager, armed=True, landed=False, z=-3)
+    assert manager._state == "PILOT_OVERRIDE"
+    assert manager._pending is None
+    manager._on_ack(VehicleCommandAck(
+        command=VehicleCommand.VEHICLE_CMD_NAV_LAND,
+        result=VehicleCommandAck.VEHICLE_CMD_RESULT_DENIED,
+        target_system=254, target_component=191,
+    ))
+    manager._tick()
+    assert manager._state == "PILOT_OVERRIDE"
+    assert {name: len(messages) for name, messages in control_messages.items()} == before
 
 
 def test_telemetry_loss_stops_even_with_sim_clock_paused(manager):

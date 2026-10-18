@@ -219,20 +219,18 @@ DASHBOARD_HTML = r"""<!doctype html>
 body{font:15px system-ui;background:#111827;color:#e5e7eb;margin:0;padding:20px}
 main{max-width:1200px;margin:auto}.card{background:#1f2937;padding:18px;border-radius:10px;margin:14px 0}
 .row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}.plots{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.axis-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:14px 0}
+.axis-panel{min-width:0;border:1px solid #475569;border-radius:8px;padding:14px}.axis-panel h3{margin-top:0}
+.axis-panel input{width:90px}.axis-panel label{min-width:0}.axis-panel p{overflow-wrap:anywhere}
 label{display:grid;gap:6px}input,select,button{font:inherit;padding:8px;background:#111827;color:white;border:1px solid #64748b;border-radius:5px}
 input{width:110px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}canvas{width:100%;height:auto;background:#0b1020}
 small,p{color:#cbd5e1}strong{color:#60a5fa}.bad{color:#fca5a5}table{width:100%;text-align:left;border-collapse:collapse}td,th{padding:8px}
-@media(max-width:750px){.plots{grid-template-columns:1fr}}
+@media(max-width:750px){.plots,.axis-controls{grid-template-columns:1fr}}
 </style></head><body><main>
 <h1>Dock pose PID tuner</h1><p id="connection" role="status">Waiting for flight_cycle_manager</p>
-<section class="card"><h2>Live gains</h2><div class="row">
-<label>Axis<select id="axis"><option>x</option><option>y</option><option>z</option><option>yaw</option></select></label>
-<label>Gain bank<select id="bank"><option value="base">Base</option><option value="near">Near</option><option value="far">Far</option></select></label>
-<label>Kp<input id="kp" type="number" step="any"></label>
-<label>Ki<input id="ki" type="number" step="any"></label>
-<label>Kd<input id="kd" type="number" step="any"></label>
-<button id="apply" disabled>Apply gains</button><button id="download" disabled>Download YAML</button></div>
-<p id="gain-status" role="status"></p><p id="effective">Effective gains: —</p>
+<section class="card"><h2>Live gains</h2>
+<div class="axis-controls" id="axis-controls"></div>
+<p><button id="download" disabled>Download YAML</button></p>
 <small>Changes apply live, with the controller's existing gain ramp. Near/far banks interpolate by dock distance;
 -1 inherits the base gain. Base changes do not override explicit near/far values. Safety limits are unchanged.</small></section>
 <section class="card"><h2>Dock-relative pose tracking</h2>
@@ -248,22 +246,35 @@ Z has no error when distance control is inactive; missing values are gaps, not z
 const axes=['x','y','z','yaw'], gains=['kp','ki','kd'];
 const $=id=>document.getElementById(id), finite=v=>typeof v==='number'&&Number.isFinite(v);
 const display=(v,a)=>finite(v)?(a==='yaw'?v*180/Math.PI:v).toFixed(3)+(a==='yaw'?' °':' m'):'—';
-let latest=null, dirty=false, applying=false, lastTime=null, samples=[];
+let latest=null, lastTime=null, samples=[];
+const editors=Object.fromEntries(axes.map(a=>[a,{dirty:false,applying:false}]));
 let positionScale=2,yawScale=180;
 axes.forEach(a=>{
+  const editor=document.createElement('section');editor.className='axis-panel';
+  editor.setAttribute('aria-labelledby',`heading-${a}`);
+  editor.innerHTML=`<h3 id="heading-${a}">${a.toUpperCase()} gains</h3><div class="row">
+    <label>Gain bank<select id="bank-${a}"><option value="base">Base</option><option value="near">Near</option><option value="far">Far</option></select></label>
+    ${gains.map(g=>`<label>${g==='kp'?'Kp':g==='ki'?'Ki':'Kd'}<input id="${g}-${a}" type="number" min="0" step="any"></label>`).join('')}
+    <button id="apply-${a}" disabled>Apply ${a.toUpperCase()} gains</button></div>
+    <p id="gain-status-${a}" role="status"></p><p id="effective-${a}">Effective gains: —</p>`;
+  $('axis-controls').appendChild(editor);
+  gains.forEach(g=>$(`${g}-${a}`).oninput=()=>{editors[a].dirty=true});
+  $(`bank-${a}`).onchange=()=>{editors[a].dirty=false;$(`gain-status-${a}`).textContent='';fill();render()};
+  $(`apply-${a}`).onclick=()=>applyGains(a);
   const row=document.createElement('tr');row.innerHTML=`<th>${a.toUpperCase()}</th><td id="measured-${a}">—</td><td id="target-${a}">—</td><td id="error-${a}">—</td>`;
   $('readings').appendChild(row);
   const card=document.createElement('section');card.className='card';
   card.innerHTML=`<h3>${a.toUpperCase()} tracking error (${a==='yaw'?'°':'m'})</h3><canvas id="plot-${a}" width="560" height="240" role="img" aria-label="${a} pose tracking error history"></canvas>`;
   $('plots').appendChild(card);
 });
-function prefix(){return $('bank').value==='base'?`pid_${$('axis').value}`:`pid_gain_${$('bank').value}_${$('axis').value}`}
+function prefix(a){return $(`bank-${a}`).value==='base'?`pid_${a}`:`pid_gain_${$(`bank-${a}`).value}_${a}`}
 function fill(){
-  if(!latest?.parameters||dirty)return;
-  gains.forEach(g=>{$(g).min=$('bank').value==='base'?0:-1;$(g).value=latest.parameters[`${prefix()}_${g}`]??''});
+  axes.forEach(a=>{
+    gains.forEach(g=>{$(`${g}-${a}`).min=$(`bank-${a}`).value==='base'?0:-1});
+    if(!latest?.parameters||editors[a].dirty||editors[a].applying)return;
+    gains.forEach(g=>{$(`${g}-${a}`).value=latest.parameters[`${prefix(a)}_${g}`]??''});
+  });
 }
-gains.forEach(g=>$(g).oninput=()=>dirty=true);
-['axis','bank'].forEach(id=>$(id).onchange=()=>{dirty=false;fill();render()});
 function render(){
   const p=latest?.measured_pose,e=latest?.error;
   axes.forEach(a=>{
@@ -273,9 +284,13 @@ function render(){
     $(`target-${a}`).textContent=a==='z'?display(latest?.distance_setpoint_m,a):'0 (alignment)';
   });
   $('pose-status').textContent=latest?.pose_valid?'Fresh dock pose · receipt age '+latest.dock_age_s.toFixed(2)+' s':'No fresh dock pose; measured pose unavailable';
-  const a=$('axis').value, d=latest?.axes?.[a];
-  $('effective').textContent=d?`Effective ${a.toUpperCase()}: Kp=${d.kp.toFixed(4)} Ki=${d.ki.toFixed(4)} Kd=${d.kd.toFixed(4)} · near ${latest.gain_near_distance_m} m / far ${latest.gain_far_distance_m} m`:'Effective gains: waiting for docking';
-  $('apply').disabled=!latest?.parameters||applying;
+  axes.forEach(a=>{
+    const d=latest?.axes?.[a];
+    $(`effective-${a}`).textContent=d?`Effective ${a.toUpperCase()}: Kp=${d.kp.toFixed(4)} Ki=${d.ki.toFixed(4)} Kd=${d.kd.toFixed(4)} · near ${latest.gain_near_distance_m} m / far ${latest.gain_far_distance_m} m`:'Effective gains: waiting for docking';
+    $(`apply-${a}`).disabled=!latest?.parameters||editors[a].applying;
+    $(`bank-${a}`).disabled=editors[a].applying;
+    gains.forEach(g=>{$(`${g}-${a}`).disabled=editors[a].applying});
+  });
   $('download').disabled=!latest?.parameters;
   draw();
 }
@@ -310,21 +325,22 @@ function draw(){
   $('scale-status').textContent='';draw();
 });
 $('clear').onclick=()=>{samples=[];draw()};
-$('apply').onclick=async()=>{
-  const payload={axis:$('axis').value,bank:$('bank').value};
+async function applyGains(a){
+  if(!latest?.parameters||editors[a].applying)return;
+  const payload={axis:a,bank:$(`bank-${a}`).value};
   for(const gain of gains){
-    const raw=$(gain).value.trim(),value=Number(raw);
-    if(!raw||!finite(value)||(value<0&&!(payload.bank!=='base'&&value===-1))){$('gain-status').textContent='Use nonnegative gains, or -1 to inherit in near/far';return}
+    const raw=$(`${gain}-${a}`).value.trim(),value=Number(raw);
+    if(!raw||!finite(value)||(value<0&&!(payload.bank!=='base'&&value===-1))){$(`gain-status-${a}`).textContent='Use nonnegative gains, or -1 to inherit in near/far';return}
     payload[gain]=value;
   }
-  applying=true;render();
+  editors[a].applying=true;render();
   try{
     const response=await fetch('/api/gains',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    const result=await response.json();$('gain-status').textContent=result.message;
-    if(result.ok)dirty=false;
-  }catch(error){$('gain-status').textContent='Update failed: '+error.message}
-  finally{applying=false;render()}
-};
+    const result=await response.json();$(`gain-status-${a}`).textContent=result.message;
+    if(response.ok&&result.ok)editors[a].dirty=false;
+  }catch(error){$(`gain-status-${a}`).textContent='Update failed: '+error.message}
+  finally{editors[a].applying=false;render()}
+}
 $('download').onclick=()=>{
   if(!latest?.parameters)return;
   let text='flight_cycle_manager:\n  ros__parameters:\n';

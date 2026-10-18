@@ -48,6 +48,7 @@ class Px4FlightCycleManager(Node):
         "WARMUP", "SET_OFFBOARD", "ARM", "TAKEOFF", "HOVER",
         "SEARCH_DOCK", "LANDING_BACKEND",
     })
+    IDLE_STATES = frozenset({"READY", "DOCKED", "FAILED", "PILOT_OVERRIDE", "LINK_LOSS"})
 
     def __init__(self, *, now=time.monotonic, **kwargs):
         super().__init__("flight_cycle_manager", **kwargs)
@@ -96,6 +97,9 @@ class Px4FlightCycleManager(Node):
         self._stable_since = None
         self._search = self._landing = None
         self._reset_counters = None
+        self._entry_action = None
+        self._entry_nav_state = None
+        self._offboard_acquired = False
         self._auto_requested = False
         sensor_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self._dds_publishers = {}
@@ -187,6 +191,40 @@ class Px4FlightCycleManager(Node):
 
     def _on_status(self, message):
         self._status, self._status_at = message, self._now()
+        # Status and land detection are separate DDS topics. On auto-disarm,
+        # let the next tick evaluate their combined touchdown confirmation.
+        if (self._state in {"HOVER", "SEARCH_DOCK", "LANDING_BACKEND"}
+                and not self._armed() and not message.failsafe):
+            return
+        # Latch a takeover on receipt, even if another status restores Offboard
+        # before the next timer tick or an outstanding command ACK arrives.
+        self._check_authority()
+
+    def _check_authority(self):
+        if self._state not in self.STREAM_STATES | {"FC_FALLBACK_LAND"}:
+            return True
+        nav_state = self._status.nav_state
+        offboard = nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
+        if self._state == "FC_FALLBACK_LAND":
+            lost = nav_state not in {
+                VehicleStatus.NAVIGATION_STATE_AUTO_LAND, VehicleStatus.NAVIGATION_STATE_OFFBOARD,
+            }
+        else:
+            # Landed/disarmed completion takes precedence over the normal mode
+            # change PX4 may perform at the end of a cycle.
+            if (self._state in {"HOVER", "SEARCH_DOCK", "LANDING_BACKEND"}
+                    and self._land is not None and self._land.landed and not self._armed()):
+                return True
+            entering = self._state in {"WARMUP", "SET_OFFBOARD"}
+            lost = (self._status.failsafe or (not offboard and (
+                not entering or self._offboard_acquired or nav_state != self._entry_nav_state)))
+            if offboard:
+                self._offboard_acquired = True
+        if lost:
+            self._pending = None
+            self._transition("PILOT_OVERRIDE", "PX4 changed mode or entered failsafe; "
+                             "authority released without re-entry")
+        return not lost
 
     def _on_local(self, message):
         self._local, self._local_at = message, self._now()
@@ -220,7 +258,7 @@ class Px4FlightCycleManager(Node):
     def _start(self, request, response):
         del request
         response.success = False
-        if self._state not in {"READY", "DOCKED", "FAILED", "PILOT_OVERRIDE", "LINK_LOSS"}:
+        if self._state not in self.IDLE_STATES:
             response.message = "a cycle is already active"
         elif not self._fresh():
             response.message = "fresh valid PX4 status, position, heading and land telemetry required"
@@ -229,31 +267,57 @@ class Px4FlightCycleManager(Node):
         elif self._status.failsafe or not self._status.pre_flight_checks_pass:
             response.message = "PX4 preflight checks have not passed"
         else:
-            self._pending = None
-            self._landing = self._search = None
-            self._target = [self._local.x, self._local.y, self._local.z]
-            self._yaw = self._local.heading
-            self._velocity = None
-            self._stable_since = None
-            self._reset_counters = self._counters()
+            self._prepare_entry("TAKEOFF")
             self._transition("WARMUP", "streaming position hold before Offboard request")
             response.success, response.message = True, "one PX4 cycle queued"
         return response
 
     def _request_dock(self, request, response):
         del request
-        response.success = (self._state == "HOVER" and self._fresh()
+        response.success = (self._state in self.IDLE_STATES | {"HOVER"} and self._fresh()
                             and self._armed() and not self._land.landed
                             and self._local.heading_good_for_control
-                            and self._status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD)
-        response.message = "docking requires an airborne Offboard hover"
+                            and not self._status.failsafe)
+        response.message = ("docking requires an idle manager and fresh, armed, airborne PX4 "
+                            "with valid heading and no failsafe")
         if response.success:
-            self._search = DockSearchController(self._search_config)
-            self._search.start(now=self._now(), center_enu_m=self._vehicle().position_enu_m)
-            self._velocity = (0.0, 0.0, 0.0, 0.0)
-            self._transition("SEARCH_DOCK", "explicit docking request accepted")
-            response.message = "dock search started"
+            self._prepare_entry("DOCK")
+            if self._offboard_acquired:
+                self._begin_dock_search()
+                response.message = "dock search started"
+            else:
+                self._transition("WARMUP", "docking queued; streaming position hold before Offboard request")
+                response.message = "docking queued; acquiring PX4 Offboard mode"
         return response
+
+    def _prepare_entry(self, action):
+        self._pending = None
+        self._landing = self._search = None
+        self._target = [self._local.x, self._local.y, self._local.z]
+        self._yaw = self._local.heading
+        self._velocity = None
+        self._stable_since = None
+        self._reset_counters = self._counters()
+        self._entry_action = action
+        self._entry_nav_state = self._status.nav_state
+        self._offboard_acquired = (
+            self._entry_nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD)
+
+    def _begin_dock_search(self):
+        self._search = DockSearchController(self._search_config)
+        self._search.start(now=self._now(), center_enu_m=self._vehicle().position_enu_m)
+        self._velocity = (0.0, 0.0, 0.0, 0.0)
+        self._transition("SEARCH_DOCK", "explicit docking request accepted; Offboard confirmed")
+
+    def _offboard_ready(self):
+        if self._entry_action == "DOCK":
+            if not self._armed() or self._land.landed or not self._local.heading_good_for_control:
+                self._fallback("airborne docking prerequisites lost during Offboard entry")
+                return
+            self._begin_dock_search()
+        else:
+            self._transition("ARM", "Offboard confirmed; requesting arm")
+            self._command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1)
 
     def _counters(self):
         return (self._local.xy_reset_counter, self._local.z_reset_counter,
@@ -328,11 +392,8 @@ class Px4FlightCycleManager(Node):
             self._pending = None
             self._transition("DOCKED", "fresh landed and disarmed telemetry confirmed")
             return
-        if self._state not in {"WARMUP", "SET_OFFBOARD", "ARM", "FC_FALLBACK_LAND"}:
-            if self._status.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD or self._status.failsafe:
-                self._pending = None
-                self._transition("PILOT_OVERRIDE", "PX4 left Offboard; authority released without re-entry")
-                return
+        if not self._check_authority():
+            return
         counters = self._counters()
         if (self._state == "TAKEOFF" and counters[:2] == self._reset_counters[:2]
                 and counters[2] != self._reset_counters[2]):
@@ -357,29 +418,22 @@ class Px4FlightCycleManager(Node):
         if self._state == "FC_FALLBACK_LAND":
             if self._land.landed and not self._armed():
                 self._transition("DOCKED", "PX4 landed and disarmed (fallback; dock not guaranteed)")
-            elif self._status.nav_state not in {
-                VehicleStatus.NAVIGATION_STATE_AUTO_LAND, VehicleStatus.NAVIGATION_STATE_OFFBOARD,
-            }:
-                self._pending = None
-                self._transition("PILOT_OVERRIDE", "PX4 changed mode during fallback; authority released")
             elif (self._status.nav_state != VehicleStatus.NAVIGATION_STATE_AUTO_LAND
                   and now - self._entered > self._p["command_timeout_s"]):
                 self._transition("FAILED", "PX4 did not enter LAND; Offboard stream remains stopped")
             return
         if self._state == "WARMUP" and now - self._entered >= self._p["offboard_warmup_s"]:
-            self._transition("SET_OFFBOARD", "requesting PX4 Offboard mode")
-            self._command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1, param2=6)
+            if self._status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
+                self._offboard_ready()
+            else:
+                self._transition("SET_OFFBOARD", "requesting PX4 Offboard mode")
+                self._command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1, param2=6)
         elif self._state == "SET_OFFBOARD":
             if self._status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD and self._pending is None:
-                self._transition("ARM", "Offboard confirmed; requesting arm")
-                self._command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1)
+                self._offboard_ready()
             elif now - self._entered > self._p["command_timeout_s"]:
                 self._fallback("Offboard mode was not confirmed")
         elif self._state == "ARM":
-            if self._status.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD:
-                self._pending = None
-                self._transition("PILOT_OVERRIDE", "Offboard authority lost before takeoff")
-                return
             if self._armed() and self._pending is None:
                 self._target[2] -= self._p["takeoff_altitude_m"]
                 self._transition("TAKEOFF", "climbing above the cycle's resting position")

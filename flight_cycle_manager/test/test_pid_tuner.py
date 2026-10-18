@@ -2,6 +2,9 @@
 
 import json
 import math
+from pathlib import Path
+import shutil
+import subprocess
 import threading
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
@@ -124,3 +127,29 @@ def test_dashboard_shows_only_pose_tracking_with_fixed_scales_and_gains():
         assert text in DASHBOARD_HTML
     for text in ("command_body_flu", "measured_velocity", "surfaceSamples", "<video", "<img"):
         assert text not in DASHBOARD_HTML
+
+
+def test_dashboard_exposes_all_axis_editors_without_axis_dropdown():
+    assert '<select id="axis">' not in DASHBOARD_HTML
+    assert 'id="axis-controls"' in DASHBOARD_HTML
+    for control in ("bank", "apply", "gain-status", "effective"):
+        assert f'id="{control}-${{a}}"' in DASHBOARD_HTML
+    assert 'id="${g}-${a}"' in DASHBOARD_HTML
+    assert '.plots,.axis-controls{grid-template-columns:1fr}' in DASHBOARD_HTML
+
+
+def test_dashboard_javascript_keeps_axis_edits_and_updates_independent():
+    node = shutil.which("node") or shutil.which("nodejs")
+    if node is None:
+        candidates = sorted((Path.home() / ".vscode-server/bin").glob("*/node"))
+        node = str(candidates[-1]) if candidates else None
+    if node is None:
+        pytest.skip("Node.js unavailable for dashboard JavaScript smoke test")
+    script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    parameters = {name: 0.1 for name in LIVE_PID_PARAMETERS}
+    result = subprocess.run(
+        [node, str(Path(__file__).with_name("test_pid_tuner_dashboard.js"))],
+        input=json.dumps({"script": script, "parameters": parameters}),
+        text=True, capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

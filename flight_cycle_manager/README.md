@@ -28,6 +28,24 @@ An explicit `request_dock` then starts bounded visual search and PID landing.
 Takeoff height is relative to the vehicle's resting position, including starts
 on the dock. This manager owns one explicit cycle; it does not repeat cycles.
 
+`start_cycle` requires a landed, disarmed vehicle. After setpoint warmup it
+requests Offboard only if PX4 is not already in that mode, then arms and takes off.
+`request_dock` also works when the vehicle is already airborne in another mode
+and the manager is idle (including after `PILOT_OVERRIDE`). It captures the
+current position/heading, streams a position hold for the configured warmup,
+requests Offboard and waits for both the command ACK and mode confirmation
+before starting search. It does not arm or command another takeoff. If already
+in Offboard, an accepted docking request starts search directly. Fresh valid
+telemetry, an armed airborne vehicle, valid control heading and no PX4 failsafe
+are required for docking.
+
+An operator mode change cancels execution, including during warmup or pending
+Offboard entry. After Offboard is acquired, any departure from it latches
+`PILOT_OVERRIDE`: setpoint streaming stops, pending commands are abandoned and
+the manager does not request Offboard again automatically. Switching back to
+Offboard alone does not resume execution; a new explicit trigger is required.
+The ROS node remains running so its state and services stay available.
+
 PX4 inputs:
 
 - `/fmu/in/offboard_control_mode`
@@ -130,7 +148,8 @@ In a second sourced terminal:
 
 ```bash
 ros2 service call /flight_cycle_manager/start_cycle std_srvs/srv/Trigger '{}'
-# Wait for HOVER before requesting docking.
+# After this takeoff, wait for HOVER before requesting docking.
+# For a manually flown, already airborne vehicle, request_dock can be called directly.
 ros2 service call /flight_cycle_manager/request_dock std_srvs/srv/Trigger '{}'
 
 ros2 topic echo /flight_cycle_manager/state --qos-durability transient_local
@@ -172,8 +191,11 @@ than stale values or zero. Active control errors can use a frozen target during
 touchdown; those are kept separate from measured camera pose. Stale/lost camera
 pose is hidden, and loss of manager telemetry marks the dashboard disconnected.
 
-Select an axis and **Base**, **Near** or **Far** gain bank, edit Kp/Ki/Kd and click
-**Apply gains**. Updates are atomic and immediately reconfigure the active
+All four axes (**X**, **Y**, **Z** and **yaw**) have visible gain panels, arranged
+side by side on wide screens and stacked on narrow screens. Each panel has its
+own **Base**, **Near** or **Far** gain-bank selector, Kp/Ki/Kd fields, effective
+gains and **Apply** button. Edits and update status are independent per axis.
+Updates are atomic per axis and immediately reconfigure the active
 docking backend without restarting its state machine; the existing PID gain
 ramping and anti-windup remain in effect. Near/far banks interpolate by dock
 distance. `-1` in either scheduled bank inherits the base gain; changing base
@@ -225,7 +247,9 @@ and its configuration belong to `drone_description`, not this package.
   continue running while Gazebo is paused.
 - Telemetry loss stops Offboard streaming, leaving PX4's configured
   Offboard-loss LAND failsafe in charge. Unexpected mode changes latch
-  `PILOT_OVERRIDE` without forcing Offboard re-entry.
+  `PILOT_OVERRIDE` without forcing Offboard re-entry, including mode changes
+  during startup. A manager-requested transition to fallback LAND is expected,
+  not treated as a pilot override.
 - Search or PID failure requests native LAND, which does not guarantee landing
   on the dock. Disarm is never forced and requires PX4 touchdown confirmation.
 - The SITL profile selects no-RC input and Offboard-loss LAND. Real hardware
