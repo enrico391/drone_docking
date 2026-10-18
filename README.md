@@ -243,9 +243,9 @@ manager is a DDS-only executable; the ArduPilot manager and debug/tuning
 launches have been removed from this branch. Build the included
 `px4_msgs` subset first. It is pinned to **v1.18.0-rc1** (firmware commit
 `fca3df865af36124a28c9d607e850f111dbaaea9`); the running firmware must match,
-or use PX4's message translation node. The existing v1.16.2 SITL checkout/build
-is not upgraded by rebuilding the ROS packages. Use `px4_dir` to select a
-separately prepared RC1 firmware build before running the native manager.
+or use PX4's message translation node. The default SITL checkout is now pinned
+to the same RC1 commit. Rebuilding the ROS packages alone does not rebuild PX4;
+use the firmware build commands below after changing its checkout.
 For build commands, service calls, safety behavior and current PX4 mission
 limitations, see the PX4 section of
 `/home/enri-ubuntu/drone_ws/src/drone_docking/flight_cycle_manager/README.md`.
@@ -257,10 +257,13 @@ physics engines.
 
 ### Layout
 
-- `/home/enri-ubuntu/drone_ws/.worktrees/PX4-Autopilot` currently holds the
-  historical PX4-Autopilot v1.16.2 SITL checkout. Its Git history also contains
-  the RC1 commit used by the ROS message snapshot, but its existing firmware
-  build does not directly match the new interfaces.
+- `/home/enri-ubuntu/drone_ws/.worktrees/PX4-Autopilot` is pinned to
+  `v1.18.0-rc1`, commit `fca3df865af36124a28c9d607e850f111dbaaea9`, with
+  recursively pinned submodules and the local docking airframe preserved.
+- `/home/enri-ubuntu/drone_ws/.worktrees/px4-backup-v1.16.2-20261018-133931`
+  preserves the previous build, rootfs (including saved parameters and flight
+  logs), firmware/submodule revisions and docking-airframe changes. RC1 uses
+  a clean build and rootfs instead of importing v1.16.2 saved parameters.
 - `.worktrees/px4-venv` is a dedicated Python virtual environment for the PX4
   build. It is separate from `apriltag_venv` and from the system interpreter so
   PX4's newer `numpy`/`pandas` cannot shadow the ROS 2 or ArduPilot packages.
@@ -275,9 +278,11 @@ physics engines.
 ### Build
 
 ```bash
-cd .worktrees/PX4-Autopilot
-source ../px4-venv/bin/activate
-make px4_sitl_default            # produces build/px4_sitl_default/bin/px4
+cd /home/enri-ubuntu/drone_ws/.worktrees/PX4-Autopilot
+source /home/enri-ubuntu/drone_ws/.worktrees/px4-venv/bin/activate
+git submodule update --init --recursive
+python -m pip install -r /home/enri-ubuntu/drone_ws/.worktrees/PX4-Autopilot/Tools/setup/requirements.txt
+make px4_sitl_default -j4
 ```
 
 The Gazebo (gz/Harmonic) bridge, the `MulticopterMotorModel` support and the PX4
@@ -289,7 +294,7 @@ PX4 Python requirements already installed into `px4-venv`.
 
 ```bash
 source /opt/ros/humble/setup.bash
-source install/setup.bash
+source /home/enri-ubuntu/drone_ws/install/setup.bash
 ros2 launch drone_description px4_docking.launch.py
 ```
 
@@ -361,6 +366,12 @@ python3 /home/enri-ubuntu/drone_ws/src/drone_docking/drone_description/config/px
 ```
 
 ### Verification status
+
+The RC1 firmware build and a disarmed startup/DDS smoke check are validated,
+including valid local position and an accepted prearm-check command ACK.
+Details, the v1.16.2 backup, and known shutdown/test issues are recorded in
+`/home/enri-ubuntu/drone_ws/src/drone_docking/drone_description/PX4_RC1_VALIDATION.md`.
+RC1 takeoff and precision touchdown have not yet been validated.
 
 Historical simulation verification, before the RC1 ROS message update
 (not an RC1 flight validation):

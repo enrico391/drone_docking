@@ -30,8 +30,10 @@ The manager uses these topics with RC1 (before any PX4 namespace prefix):
 | Output | `VehicleLocalPosition` | `/fmu/out/vehicle_local_position_v1` |
 | Output | `VehicleStatus` | `/fmu/out/vehicle_status_v4` |
 
-These interfaces no longer directly match the old v1.16.2 SITL binary. Use an
-RC1 firmware build, or an appropriate PX4 message translation node. Updating this
-package does not switch or rebuild the separate PX4 firmware checkout.
+These interfaces no longer directly match the old v1.16.2 SITL binary. The
+workspace's default firmware checkout is now also pinned to RC1. Firmware and
+ROS interfaces remain separate builds: updating this package alone does not
+switch or rebuild PX4. Use matching firmware, or an appropriate PX4 message
+translation node.
 
 The definitions and accompanying LICENSE originate from PX4-Autopilot.

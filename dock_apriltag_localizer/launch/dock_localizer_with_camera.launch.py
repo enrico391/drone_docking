@@ -63,6 +63,9 @@ def generate_launch_description():
         additional_env=system_camera_environment,
         parameters=[
             {
+                "use_sim_time": ParameterValue(
+                    LaunchConfiguration("use_sim_time"), value_type=bool
+                ),
                 "camera": LaunchConfiguration("camera"),
                 "width": ParameterValue(
                     LaunchConfiguration("camera_width"), value_type=int
@@ -86,14 +89,18 @@ def generate_launch_description():
         name="dock_apriltag_localizer",
         output="screen",
         prefix=[LaunchConfiguration("python_executable")],
+        additional_env={"PYTHONNOUSERSITE": "1"},
         parameters=[
             {
+                "use_sim_time": ParameterValue(
+                    LaunchConfiguration("use_sim_time"), value_type=bool
+                ),
                 "config_file": LaunchConfiguration("config_file"),
                 "image_topic": image_topic,
                 "camera_info_topic": camera_info_topic,
                 "dock_frame": LaunchConfiguration("dock_frame"),
-                "publish_debug_image": LaunchConfiguration(
-                    "publish_debug_image"
+                "publish_debug_image": ParameterValue(
+                    LaunchConfiguration("publish_debug_image"), value_type=bool
                 ),
                 "pose_filter_enabled": ParameterValue(
                     LaunchConfiguration("pose_filter_enabled"),
@@ -125,6 +132,7 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument("camera", default_value="0"),
             DeclareLaunchArgument("camera_width", default_value="800"),
             DeclareLaunchArgument("camera_height", default_value="600"),

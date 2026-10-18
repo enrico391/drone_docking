@@ -58,10 +58,11 @@ ros2 launch drone_description px4_docking.launch.py \
   use_flight_cycle_manager:=true use_disturbances:=true initial_point:=dock
 ```
 
-Run an RC1 firmware build: updating these ROS interfaces does not switch or
-rebuild `/home/enri-ubuntu/drone_ws/.worktrees/PX4-Autopilot`, whose existing
-v1.16.2 build does not directly match them. Pass `px4_dir` to the simulation
-launch to select a separately prepared RC1 checkout.
+The default firmware checkout at
+`/home/enri-ubuntu/drone_ws/.worktrees/PX4-Autopilot` is pinned to the same RC1
+commit. Firmware and ROS interfaces are separate builds; rebuilding these ROS
+packages does not rebuild PX4. Pass `px4_dir` only when selecting another
+compatible firmware checkout.
 
 The simulation starts the installed v2.4 `micro_ros_agent` on UDP 8888 for
 PX4's built-in uXRCE-DDS client (RC1's default DDS v2 build on ROS 2 Humble).
@@ -77,6 +78,49 @@ ros2 launch flight_cycle_manager px4_flight_cycle.launch.py
 
 Use `start_localizer:=false` if another launch owns `/dock/pose` and `/dock/mode`.
 The localizer uses the workspace's AprilTag virtual environment when available.
+Its tag geometry is selected with `localizer_config`; `config_file` is only for
+the flight manager. Both nodes use simulation time by default; set
+`use_sim_time:=false` for a hardware-time setup (with a separate hardware
+manager profile). The localizer excludes user-site Python packages so unrelated
+`~/.local` NumPy installations cannot shadow its ROS/OpenCV dependencies.
+
+### Raspberry Pi camera driver
+
+To select the existing `dock_localizer_with_camera.launch.py` instead of the
+topic-only localizer launch, use:
+
+```bash
+ros2 launch flight_cycle_manager px4_flight_cycle.launch.py \
+  use_real_camera:=true auto_start:=false
+```
+
+This starts `camera_ros/camera_node` and one dock localizer, using the existing
+Pi libcamera environment workaround. With this standalone launch,
+`use_real_camera:=true` defaults `use_sim_time` to `false` for the manager,
+camera and localizer. The normal topic-only/SITL default is unchanged. An
+explicit `use_sim_time` override takes precedence. `start_localizer:=false`
+disables both the camera and localizer.
+
+Camera arguments are `camera` (default `0`), `camera_width` (`800`),
+`camera_height` (`600`), `camera_format` (`RGB888`) and `camera_info_url`
+(the installed OV5647 800x600 calibration). Use calibration matching the real
+camera and selected resolution; `localizer_config` selects the tag geometry.
+
+**This selects the camera, not a flight-safe hardware profile.** The default
+manager YAML remains SITL-only (`simulation_mode: true`, 5 m takeoff). Supply a
+separately reviewed hardware configuration before a flight test. The DDS agent
+and PX4 client must already be configured/running; this standalone launch does
+not start them. Start with propellers removed and do not call `start_cycle`
+during a camera/telemetry bench test.
+
+When using `px4_docking.launch.py`, `start_localizer:=true` only takes effect
+with `use_flight_cycle_manager:=true`; the top-level manager remains disabled
+by default. To add the manager and localizer to an already running simulation,
+use the standalone `px4_flight_cycle.launch.py` command above, not a second
+Gazebo launch.
+The top-level SITL launch forwards the real-camera arguments too, but retains
+`use_sim_time:=true` by default and still launches simulation; use the
+standalone flight-cycle launch on the Pi, not the Gazebo launch.
 Start near/above the dock (`initial_point:=dock`): the bounded search is not
 autonomous navigation from the free-ground spawn point to the docking station.
 
@@ -94,7 +138,8 @@ ros2 topic echo /flight_cycle_manager/pid_debug
 
 `auto_start:=true` queues one simulation takeoff only; it does not request
 docking automatically. The manager launch also accepts `config_file`,
-`pid_config`, `image_topic`, `camera_info_topic` and `localizer_python`.
+`pid_config`, `localizer_config`, `use_real_camera`, `use_sim_time`, `image_topic`,
+`camera_info_topic` and `localizer_python`.
 Controller settings are loaded at startup; a live tuning UI is not provided.
 
 ### Disturbances
@@ -145,8 +190,11 @@ landing; native LAND fallback then landed and disarmed correctly.
 thresholds still need tuning. The original temporary live-run log is
 `/tmp/px4_dds_sitl4.log`, not a committed artifact.
 
-That flight result is historical, not validation of RC1. The RC1 message
-snapshot requires its own SITL/hardware flight validation.
+That flight result is historical, not validation of RC1 flight behavior. The
+RC1 SITL build and disarmed startup/DDS check now pass, including valid local
+position and an accepted prearm-check command ACK. See
+`/home/enri-ubuntu/drone_ws/src/drone_docking/drone_description/PX4_RC1_VALIDATION.md`.
+RC1 takeoff, Offboard tracking and precision touchdown still require validation.
 
 Run the retained package tests in a sourced ROS environment:
 

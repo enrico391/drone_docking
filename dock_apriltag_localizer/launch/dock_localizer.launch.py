@@ -19,6 +19,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('config_file', default_value=default_cfg),
         DeclareLaunchArgument('image_topic', default_value='/camera/image_raw'),
         DeclareLaunchArgument('camera_info_topic', default_value='/camera/camera_info'),
@@ -46,7 +47,12 @@ def generate_launch_description():
             name='dock_apriltag_localizer',
             output='screen',
             prefix=[LaunchConfiguration('python_executable')],
+            # Keep ~/.local NumPy/OpenCV installs out of the ROS/venv runtime.
+            additional_env={'PYTHONNOUSERSITE': '1'},
             parameters=[{
+                'use_sim_time': ParameterValue(
+                    LaunchConfiguration('use_sim_time'), value_type=bool,
+                ),
                 'config_file': LaunchConfiguration('config_file'),
                 'image_topic': LaunchConfiguration('image_topic'),
                 'camera_info_topic': LaunchConfiguration('camera_info_topic'),

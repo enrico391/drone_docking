@@ -68,8 +68,7 @@ MPC_THR_HOVER        0.38
 # idle offset and renormalising to 1 at u=1) gives 0.26*u + 0.74*u^2.
 THR_MDL_FAC          0.74
 
-# Let PX4 keep adapting the hover thrust from the estimate in flight.
-MPC_USE_HTE          1
+# RC1 always uses a valid hover-thrust estimate; MPC_USE_HTE was removed.
 
 # ---------------------------------------------------------------------------
 # Control allocation geometry

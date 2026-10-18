@@ -1,7 +1,9 @@
 """Guard PX4's physics backend and airframe parameter application."""
 
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -121,6 +123,18 @@ def test_px4_launch_wires_agent_disturbance_and_native_cycle():
     assert any('px4_flight_cycle.launch.py' in ''.join(
                    sub.perform(context) for sub in action.launch_description_source._LaunchDescriptionSource__location)
                for action in includes)
+    cycle = next(action for action in includes if any(
+        'px4_flight_cycle.launch.py' in sub.perform(context)
+        for sub in action.launch_description_source._LaunchDescriptionSource__location))
+    assert context.launch_configurations['start_localizer'] == 'true'
+    assert not cycle.condition.evaluate(context)
+    context.launch_configurations['use_flight_cycle_manager'] = 'true'
+    assert cycle.condition.evaluate(context)
+    arguments = dict(cycle.launch_arguments)
+    for name in ('start_localizer', 'localizer_config', 'localizer_python', 'use_sim_time',
+                 'use_real_camera', 'camera', 'camera_width', 'camera_height',
+                 'camera_format', 'camera_info_url'):
+        assert arguments[name].perform(context) == context.launch_configurations[name]
 
 
 def test_sitl_passes_dds_port_and_namespace(tmp_path, monkeypatch):
@@ -142,3 +156,29 @@ def test_sitl_passes_dds_port_and_namespace(tmp_path, monkeypatch):
     assert captured['additional_env']['PX4_UXRCE_DDS_PORT'] == '9999'
     assert captured['additional_env']['PX4_UXRCE_DDS_NS'] == 'px4_1'
     assert captured['additional_env']['PX4_PARAM_COM_OBL_RC_ACT'] == '4'
+
+
+def test_default_sitl_checkout_matches_message_snapshot():
+    firmware = ROOT.parents[2] / '.worktrees/PX4-Autopilot'
+    if not firmware.is_dir():
+        pytest.skip('local PX4 checkout unavailable')
+    snapshot = json.loads((ROOT.parent / 'px4_msgs/firmware_snapshot.json').read_text())
+    result = subprocess.run(
+        ['git', '-C', str(firmware), 'rev-parse', 'HEAD'],
+        capture_output=True, text=True, check=True, timeout=10,
+    )
+    assert result.stdout.strip() == snapshot['commit']
+    for name, origin in snapshot['messages'].items():
+        assert (firmware / origin['path']).read_bytes() == (
+            ROOT.parent / 'px4_msgs/msg' / name).read_bytes()
+
+
+def test_docking_profile_parameters_exist_in_sitl_build():
+    metadata = ROOT.parents[2] / (
+        '.worktrees/PX4-Autopilot/build/px4_sitl_default/parameters.json')
+    if not metadata.is_file():
+        pytest.skip('local PX4 build unavailable')
+    parameters = {entry['name'] for entry in json.loads(metadata.read_text())['parameters']}
+    module = load_launch('sitl_px4.launch.py')
+    profile = module._parameter_environment(ROOT / 'config/px4_sitl_docking.parm')
+    assert {name.removeprefix('PX4_PARAM_') for name in profile} <= parameters

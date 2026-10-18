@@ -78,6 +78,13 @@ ros2 launch dock_apriltag_localizer dock_localizer.launch.py \
   camera_info_topic:=/camera/camera_info
 ```
 
+The launch excludes Python user-site packages (`PYTHONNOUSERSITE=1`) so an
+unrelated `~/.local` NumPy installation cannot shadow the ROS/OpenCV runtime.
+Install localizer dependencies into `apriltag_venv`, not the user site.
+`use_sim_time` defaults to `false`; set it to `true` when using Gazebo `/clock`.
+When included by the PX4 manager, tag geometry is passed explicitly through
+`localizer_config`, separately from the manager's `config_file`.
+
 ## Raspberry Pi camera and ROS libcamera workaround
 
 On the Raspberry Pi target, sourcing ROS 2 Lyrical puts the ROS-vendored
@@ -114,6 +121,12 @@ ros2 launch dock_apriltag_localizer \
   dock_localizer_with_camera.launch.py
 ```
 
+The PX4 manager can select this combined launch with
+`ros2 launch flight_cycle_manager px4_flight_cycle.launch.py use_real_camera:=true`.
+It starts exactly one localizer plus the driver, defaults to wall-clock time,
+and forwards the camera settings and tag configuration. This is only a camera
+selection; the manager's default flight profile remains SITL-only.
+
 The combined launch modifies the environment of `camera_node` only. It:
 
 - prepends `/usr/lib/<multiarch>` to the camera process's
@@ -121,7 +134,11 @@ The combined launch modifies the environment of `camera_node` only. It:
 - selects the system IPA module and proxy under `/usr/lib` and
   `/usr/libexec`;
 - selects tuning data from `/usr/share/libcamera/ipa`;
-- leaves the localizer in the normal ROS and Python virtual-environment setup.
+- leaves the localizer in the ROS and Python virtual-environment setup, with
+  user-site Python packages excluded to avoid NumPy/OpenCV ABI conflicts.
+
+Both nodes use wall-clock time by default. `use_sim_time:=true` explicitly
+selects ROS simulation time for both.
 
 The camera log should therefore report the working system version and paths,
 for example:
