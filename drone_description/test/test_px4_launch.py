@@ -112,6 +112,8 @@ def test_px4_launch_wires_agent_disturbance_and_native_cycle():
     assert context.launch_configurations['dds_port'] == '8888'
     assert context.launch_configurations['disturbance_enabled'] == 'false'
     assert context.launch_configurations['use_flight_cycle_manager'] == 'false'
+    assert context.launch_configurations['pid_tuner'] == 'true'
+    assert context.launch_configurations['pid_tuner_port'] == '8765'
     nodes = [action for action in entities if isinstance(action, Node)]
     agent = next(node for node in nodes if node._Node__package == 'micro_ros_agent')
     assert agent.condition.evaluate(context)
@@ -133,7 +135,7 @@ def test_px4_launch_wires_agent_disturbance_and_native_cycle():
     arguments = dict(cycle.launch_arguments)
     for name in ('start_localizer', 'localizer_config', 'localizer_python', 'use_sim_time',
                  'use_real_camera', 'camera', 'camera_width', 'camera_height',
-                 'camera_format', 'camera_info_url'):
+                 'camera_format', 'camera_info_url', 'pid_tuner', 'pid_tuner_port', 'pid_tuner_host'):
         assert arguments[name].perform(context) == context.launch_configurations[name]
 
 

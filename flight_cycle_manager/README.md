@@ -2,7 +2,8 @@
 
 This branch contains only the native PX4 ROS 2/uXRCE-DDS flight-cycle path.
 It does not depend on pymavlink or include the old ArduPilot manager, mission
-tools, precision-landing backend, PID tuner, debug launches or CSV loggers.
+tools, precision-landing backend, debug launches or CSV loggers. A lightweight
+pose-only PID tuning dashboard is available for docking.
 
 ## Package layout
 
@@ -11,6 +12,7 @@ tools, precision-landing backend, PID tuner, debug launches or CSV loggers.
 - `config/pid_landing.yaml`: transport-independent PID landing settings.
 - `px4_manager.py`: ROS node and non-blocking flight lifecycle.
 - `px4_control.py`: DDS topic naming, frame conversion and PID configuration.
+- `pid_tuner.py`: local HTTP dashboard, pose tracking and live ROS PID updates.
 - `dock_search.py`, `pid.py`, `pid_landing.py`, `pid_landing_backend.py`:
   reusable, transport-independent controllers.
 - `landing_backend.py`, `landing_target.py`: observations and camera/body helpers.
@@ -140,7 +142,63 @@ ros2 topic echo /flight_cycle_manager/pid_debug
 docking automatically. The manager launch also accepts `config_file`,
 `pid_config`, `localizer_config`, `use_real_camera`, `use_sim_time`, `image_topic`,
 `camera_info_topic` and `localizer_python`.
-Controller settings are loaded at startup; a live tuning UI is not provided.
+Controller settings are loaded at startup; PID gains can also be tuned live below.
+
+### Real-time docking PID dashboard
+
+The manager launch (including the simulation launch above) starts the tuner at
+**http://127.0.0.1:8765** by default. Change the port with `pid_tuner_port:=8766`,
+or disable it with `pid_tuner:=false`:
+
+```bash
+ros2 launch flight_cycle_manager px4_flight_cycle.launch.py pid_tuner_port:=8765
+```
+
+If the manager is already running without the dashboard, start it separately:
+
+```bash
+ros2 run flight_cycle_manager pid_tuner --ros-args -p port:=8765
+# For a manager in a ROS namespace:
+ros2 run flight_cycle_manager pid_tuner --ros-args -r __ns:=/drone1 -p port:=8766
+```
+
+The dashboard shows **only pose tracking**: measured dock-relative X (forward),
+Y (left), Z (distance to the dock), yaw and the active PID tracking errors over
+the last 60 seconds. There are no camera, velocity, command or estimated-surface
+panels. Position errors are in metres and yaw is displayed in degrees. Z error
+is distance setpoint minus measured distance, **not absolute height**. During
+alignment Z control may be inactive; unavailable errors appear as gaps rather
+than stale values or zero. Active control errors can use a frozen target during
+touchdown; those are kept separate from measured camera pose. Stale/lost camera
+pose is hidden, and loss of manager telemetry marks the dashboard disconnected.
+
+Select an axis and **Base**, **Near** or **Far** gain bank, edit Kp/Ki/Kd and click
+**Apply gains**. Updates are atomic and immediately reconfigure the active
+docking backend without restarting its state machine; the existing PID gain
+ramping and anti-windup remain in effect. Near/far banks interpolate by dock
+distance. `-1` in either scheduled bank inherits the base gain; changing base
+alone does not override explicit near/far values. The dashboard also reports
+the effective gains, which may differ during interpolation/ramping.
+
+Gains can be prepared before docking; tuning does not start takeoff or docking.
+Flight limits, watchdogs and touchdown/disarm requirements are unchanged.
+Invalid/nonfinite gains are rejected before any controller change. Non-PID
+settings require a restart rather than silently appearing to apply live.
+
+**Download YAML** exports configured gains, both scheduled banks and supporting
+PID settings (not the transient interpolated gains). Changes are otherwise
+in-memory only. Load the downloaded file via `pid_config:=/absolute/path/pid_tuned.yaml`
+on the next launch; unspecified landing settings retain package defaults.
+
+The server binds to loopback by default and has no authentication. For tuning
+on a remote drone, forward the port rather than exposing it to an untrusted LAN:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 user@drone
+```
+
+`pid_tuner_host` can override the launch bind address on a trusted network.
+Use a distinct port per manager when launching multiple namespaces.
 
 ### Disturbances
 
@@ -175,7 +233,7 @@ and its configuration belong to `drone_description`, not this package.
 
 The old ArduPilot onboard-mission download/reset and AUTO handoff contract is
 not implemented. PX4's default DDS topics do not expose an equivalent mission
-download protocol. Debug launch modes, live tuning and touchdown CSV logging
+download protocol. Debug launch modes and touchdown CSV logging
 are not exposed by this manager; the shared PID controller remains reusable.
 
 ## Validation status

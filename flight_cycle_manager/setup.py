@@ -30,6 +30,7 @@ setup(
     entry_points={
         "console_scripts": [
             "px4_flight_cycle_manager = flight_cycle_manager.px4_manager:main",
+            "pid_tuner = flight_cycle_manager.pid_tuner:main",
         ],
     },
 )

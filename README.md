@@ -239,8 +239,12 @@ ros2 launch drone_description px4_docking.launch.py \
 
 The DDS agent starts by default. Disturbances start unloaded; enable them with
 `ros2 param set /disturbance_injector enabled true` after takeoff. The PX4
-manager is a DDS-only executable; the ArduPilot manager and debug/tuning
-launches have been removed from this branch. Build the included
+manager is a DDS-only executable; the ArduPilot manager and legacy debug
+launches have been removed from this branch. A pose-only live PID dashboard
+starts at **http://127.0.0.1:8765** when the manager is launched; set
+`pid_tuner_port:=8766` to change the port or `pid_tuner:=false` to disable it.
+It plots dock-relative pose tracking errors and supports live base/near/far
+PID gain updates during docking. Build the included
 `px4_msgs` subset first. It is pinned to **v1.18.0-rc1** (firmware commit
 `fca3df865af36124a28c9d607e850f111dbaaea9`); the running firmware must match,
 or use PX4's message translation node. The default SITL checkout is now pinned

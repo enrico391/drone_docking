@@ -38,7 +38,7 @@ DDS_MESSAGES = (
 
 
 @pytest.fixture
-def manager(monkeypatch):
+def manager(monkeypatch, request):
     monkeypatch.setattr('flight_cycle_manager.px4_manager.get_package_share_directory',
                         lambda _: str(ROOT / 'flight_cycle_manager'))
     context = Context()
@@ -46,6 +46,7 @@ def manager(monkeypatch):
     clock = [100.0]
     node = Px4FlightCycleManager(
         context=context, now=lambda: clock[0],
+        namespace=getattr(request, "param", ""),
         parameter_overrides=[Parameter("use_sim_time", value=False)],
     )
     node._timer.cancel()
@@ -441,5 +442,7 @@ def test_px4_launch_has_only_native_manager():
         if isinstance(action, DeclareLaunchArgument):
             action.execute(context)
     nodes = [action for action in description.entities if isinstance(action, Node)]
-    assert [node._Node__node_executable for node in nodes] == ["px4_flight_cycle_manager"]
+    assert [node._Node__node_executable for node in nodes] == ["px4_flight_cycle_manager", "pid_tuner"]
     assert context.launch_configurations["auto_start"] == "false"
+    assert context.launch_configurations["pid_tuner"] == "true"
+    assert context.launch_configurations["pid_tuner_port"] == "8765"

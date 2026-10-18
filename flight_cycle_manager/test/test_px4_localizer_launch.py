@@ -8,6 +8,7 @@ from launch import LaunchContext
 from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.utilities import normalize_to_list_of_substitutions, perform_substitutions
 from launch_ros.utilities import evaluate_parameters, normalize_parameters
+from launch_ros.actions import Node
 
 
 ROOT = Path(__file__).parents[2]
@@ -19,6 +20,25 @@ def load_launch(package, filename):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize('enabled', ['true', 'false'])
+def test_tuner_launch_condition_and_port(enabled):
+    module = load_launch('flight_cycle_manager', 'px4_flight_cycle.launch.py')
+    context = LaunchContext()
+    context.launch_configurations.update({
+        'pid_tuner': enabled, 'pid_tuner_port': '9876', 'pid_tuner_host': '127.0.0.1',
+        'namespace': 'drone1',
+    })
+    entities = module.generate_launch_description().entities
+    for action in entities:
+        if isinstance(action, DeclareLaunchArgument):
+            action.execute(context)
+    tuner = next(action for action in entities if isinstance(action, Node)
+                 and action._Node__node_executable == 'pid_tuner')
+    assert tuner.condition.evaluate(context) is (enabled == 'true')
+    parameters = evaluate_parameters(context, tuner._Node__parameters)[0]
+    assert parameters == {'port': 9876, 'host': '127.0.0.1'}
 
 
 @pytest.mark.parametrize('use_sim_time', ['true', 'false'])

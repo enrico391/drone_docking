@@ -91,22 +91,23 @@ flight_cycle_manager:
     pid_x_k_v: 0.0
     pid_y_k_v: 0.0
     pid_z_k_v: 0.0
-    pid_x_kp: 0.40
-    pid_x_ki: 0.00
+
+    pid_x_kp: 0.60
+    pid_x_ki: 0.01
     pid_x_kd: 0.00
     pid_x_integral_limit: 0.1
     pid_x_derivative_filter_time_constant_s: 0.1
-    pid_y_kp: 0.40
-    pid_y_ki: 0.00
+    pid_y_kp: 0.60
+    pid_y_ki: 0.01
     pid_y_kd: 0.00
     pid_y_integral_limit: 0.1
     pid_y_derivative_filter_time_constant_s: 0.1
-    pid_z_kp: 0.5
-    pid_z_ki: 0.00
+    pid_z_kp: 0.60
+    pid_z_ki: 0.01
     pid_z_kd: 0.00
     pid_z_integral_limit: 0.5
     pid_z_derivative_filter_time_constant_s: 0.1
-    pid_yaw_kp: 0.7
+    pid_yaw_kp: 0.60
     pid_yaw_ki: 0.0
     pid_yaw_kd: 0.0
     pid_yaw_integral_limit: 0.5

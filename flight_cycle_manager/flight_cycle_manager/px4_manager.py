@@ -12,6 +12,7 @@ from px4_msgs.msg import (
     OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleCommandAck,
     VehicleLandDetected, VehicleLocalPosition, VehicleStatus,
 )
+from rcl_interfaces.msg import SetParametersResult
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException
@@ -27,7 +28,10 @@ from .landing_backend import (
 )
 from .landing_target import camera_dock_orientation_to_body_yaw_error
 from .pid_landing_backend import PidLandingBackend
-from .px4_control import dds_topic, pid_config, velocity_to_ned
+from .px4_control import (
+    LIVE_PID_PARAMETERS, PID_AXES, dds_topic, pid_config,
+    pose_tracking_telemetry, velocity_to_ned,
+)
 
 
 @dataclass
@@ -125,7 +129,50 @@ class Px4FlightCycleManager(Node):
         self._dock_service = self.create_service(Trigger, "~/request_dock", self._request_dock)
         self._timer = self.create_timer(
             1.0 / self._p["update_rate_hz"], self._tick, clock=self._watchdog_clock)
+        self.add_on_set_parameters_callback(self._on_parameters_changed)
         self._transition("READY", "PX4 DDS ready; waiting for fresh telemetry and start_cycle")
+
+    def _on_parameters_changed(self, parameters):
+        updates = {parameter.name: parameter.value for parameter in parameters}
+        changed = {name: value for name, value in updates.items()
+                   if name not in self._p or value != self._p[name]}
+        unsupported = changed.keys() - LIVE_PID_PARAMETERS
+        if unsupported:
+            return SetParametersResult(
+                successful=False, reason="restart required for: " + ", ".join(sorted(unsupported)))
+        if not changed:
+            return SetParametersResult(successful=True)
+        try:
+            for name, value in changed.items():
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"{name} must be a number")
+                if not math.isfinite(value):
+                    raise ValueError(f"{name} must be finite")
+            candidate = dict(self._p, **changed)
+            config = pid_config(candidate)
+            # Validate the complete candidate before touching a running controller.
+            if self._landing is not None and self._state == "LANDING_BACKEND":
+                self._landing.reconfigure_pids(
+                    tuple(getattr(config, f"{axis}_pid") for axis in PID_AXES),
+                    config.near_pids, config.far_pids,
+                    config.gain_near_distance_m, config.gain_far_distance_m,
+                )
+                self._landing.reconfigure_velocity_feedback(
+                    x=config.x_k_v, y=config.y_k_v, z=config.z_k_v)
+        except (TypeError, ValueError, OverflowError) as error:
+            return SetParametersResult(successful=False, reason=str(error))
+        self._p, self._pid_config = candidate, config
+        return SetParametersResult(successful=True)
+
+    def _publish_pid_debug(self, now, dock=None, substate=None):
+        active = self._state == "LANDING_BACKEND" and self._landing is not None
+        diagnostics = self._landing.diagnostics() if active else {}
+        data = pose_tracking_telemetry(
+            now=now, state=substate or self._state, dock=dock,
+            diagnostics=diagnostics, parameters=self._p,
+        )
+        data["cycle_state"] = self._state
+        self._debug_pub.publish(String(data=json.dumps(data, allow_nan=False)))
 
     def _topic(self, direction, name, message_type):
         return dds_topic(self._p["px4_namespace"], direction, name, message_type)
@@ -135,6 +182,8 @@ class Px4FlightCycleManager(Node):
         self._state_pub.publish(String(data=state))
         self._reason_pub.publish(String(data=reason))
         self.get_logger().info(f"{state}: {reason}")
+        if state != "LANDING_BACKEND":
+            self._publish_pid_debug(self._now())
 
     def _on_status(self, message):
         self._status, self._status_at = message, self._now()
@@ -263,6 +312,8 @@ class Px4FlightCycleManager(Node):
 
     def _tick(self):
         now = self._now()
+        if self._state != "LANDING_BACKEND":
+            self._publish_pid_debug(now)
         if self._p["auto_start"] and not self._auto_requested and self._state == "READY":
             result = self._start(None, Trigger.Response())
             self._auto_requested = result.success
@@ -424,7 +475,7 @@ class Px4FlightCycleManager(Node):
             decision = self._landing.update(now=now, dock=dock, vehicle=vehicle)
             if decision.velocity is not None:
                 self._velocity = velocity_to_ned(decision.velocity, self._local.heading)
-            self._debug_pub.publish(String(data=json.dumps(self._landing.diagnostics())))
+            self._publish_pid_debug(now, dock, decision.substate)
             if decision.request_disarm and self._pending is None:
                 # Never force-disarm: PX4 must independently confirm touchdown.
                 if self._land.landed:

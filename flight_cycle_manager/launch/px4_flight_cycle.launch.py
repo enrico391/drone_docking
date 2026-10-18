@@ -20,6 +20,10 @@ def generate_launch_description():
         DeclareLaunchArgument("namespace", default_value=""),
         DeclareLaunchArgument("px4_namespace", default_value=""),
         DeclareLaunchArgument("auto_start", default_value="false", choices=["true", "false"]),
+        DeclareLaunchArgument("pid_tuner", default_value="true", choices=["true", "false"]),
+        DeclareLaunchArgument("pid_tuner_port", default_value="8765"),
+        DeclareLaunchArgument("pid_tuner_host", default_value="127.0.0.1",
+                              description="Local-only by default; use SSH forwarding for remote tuning."),
         DeclareLaunchArgument("start_localizer", default_value="true", choices=["true", "false"]),
         DeclareLaunchArgument(
             "use_real_camera", default_value="false", choices=["true", "false"],
@@ -47,6 +51,15 @@ def generate_launch_description():
                 "px4_namespace": LaunchConfiguration("px4_namespace"),
                 "auto_start": ParameterValue(LaunchConfiguration("auto_start"), value_type=bool),
                 "use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool),
+            }],
+        ),
+        Node(
+            package="flight_cycle_manager", executable="pid_tuner", name="pid_tuner",
+            namespace=LaunchConfiguration("namespace"), output="screen",
+            condition=IfCondition(LaunchConfiguration("pid_tuner")),
+            parameters=[{
+                "port": ParameterValue(LaunchConfiguration("pid_tuner_port"), value_type=int),
+                "host": LaunchConfiguration("pid_tuner_host"),
             }],
         ),
         # Scope the include: its config_file is tag geometry, not manager settings.

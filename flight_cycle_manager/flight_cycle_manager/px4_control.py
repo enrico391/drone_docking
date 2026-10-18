@@ -8,6 +8,31 @@ from .pid import PIDConfig
 from .pid_landing import PidLandingConfig
 
 
+PID_AXES = ("x", "y", "z", "yaw")
+LIVE_PID_PARAMETERS = frozenset(
+    [f"pid_{axis}_{field}" for axis in PID_AXES for field in (
+        "kp", "ki", "kd", "integral_limit", "derivative_filter_time_constant_s",
+    )]
+    + [f"pid_gain_{side}_{axis}_{gain}" for side in ("near", "far")
+       for axis in PID_AXES for gain in ("kp", "ki", "kd")]
+    + ["pid_gain_near_distance_m", "pid_gain_far_distance_m"]
+    + [f"pid_{axis}_k_v" for axis in ("x", "y", "z")]
+)
+
+
+def pose_tracking_telemetry(*, now, state, dock, diagnostics, parameters):
+    """Keep measured camera pose distinct from active (possibly frozen) PID errors."""
+    errors = diagnostics.get("control_error") or {}
+    return dict(diagnostics, time_s=now, state=state,
+                pose_valid=dock is not None,
+                measured_pose=({"x": dock.forward_m, "y": dock.left_m,
+                                "z": dock.distance_m, "yaw": dock.yaw_error_rad}
+                               if dock is not None else None),
+                dock_age_s=max(0.0, now - dock.received_at) if dock is not None else None,
+                error={axis: errors.get(axis) for axis in PID_AXES},
+                parameters={name: parameters[name] for name in sorted(LIVE_PID_PARAMETERS)})
+
+
 def dds_topic(namespace, direction, name, message_type):
     """PX4 appends _vN only for nonzero message versions."""
     version = getattr(message_type, "MESSAGE_VERSION", 0)
