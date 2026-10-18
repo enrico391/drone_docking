@@ -1,4 +1,4 @@
-"""Tests for native ArduPilot precision-landing message generation."""
+"""Tests for transport-independent camera/body frame and timestamp helpers."""
 
 import math
 

@@ -1,4 +1,4 @@
-"""Frame and timestamp helpers for pymavlink precision landing."""
+"""Transport-independent camera/body frame and acquisition-time helpers."""
 
 import math
 from typing import Tuple
@@ -44,7 +44,7 @@ def camera_dock_orientation_to_body_yaw_error(
     The quaternion describes the dock frame in the downward camera optical
     frame. Optical +X is vehicle right and optical +Y is vehicle rear, so the
     dock X axis can be projected directly into the vehicle's horizontal plane.
-    Positive errors command a clockwise/right yaw in MAVLink's Body-FRD frame.
+    Positive errors describe clockwise/right yaw in the Body-FRD frame.
     """
     norm = math.sqrt(
         quaternion_x**2

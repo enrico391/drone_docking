@@ -1,0 +1,30 @@
+flight_cycle_manager:
+  ros__parameters:
+    # This profile is for SITL. Real hardware needs a separately reviewed profile.
+    simulation_mode: true
+    use_sim_time: true
+    auto_start: false
+    px4_namespace: ""
+    update_rate_hz: 20.0
+    offboard_warmup_s: 1.5
+    command_timeout_s: 10.0
+    telemetry_timeout_s: 2.0
+    takeoff_timeout_s: 45.0
+    takeoff_altitude_m: 5.0
+    takeoff_altitude_tolerance_m: 0.25
+    takeoff_vertical_speed_tolerance_m_s: 0.15
+    takeoff_stable_time_s: 1.0
+    dock_pose_timeout_s: 1.0
+    dock_pose_topic: /dock/pose
+    dock_mode_topic: /dock/mode
+    search_radius_m: 1.0
+    search_tangential_speed_m_s: 0.3
+    search_radial_gain: 0.7
+    search_altitude_gain: 0.7
+    search_max_horizontal_speed_m_s: 0.5
+    search_max_vertical_speed_m_s: 0.5
+    search_target_stable_time_s: 0.5
+    search_timeout_s: 30.0
+    search_max_displacement_m: 2.0
+    source_system: 254
+    source_component: 191

@@ -10,8 +10,8 @@ the packages below it.
 - `drone_description`: Gazebo models, worlds, resource-path hooks, and the
   simulation launch file.
 - `dock_apriltag_localizer`: Existing camera-to-dock localization package.
-- `flight_cycle_manager`: Typed, non-blocking takeoff-to-dock cycles that
-  validate a stored ArduPilot mission before each explicit start request.
+- `flight_cycle_manager`: Native PX4 DDS takeoff-to-dock cycles, bounded dock
+  search and PID landing. This branch no longer ships the ArduPilot manager.
 - `drone_bringup`: Top-level launch package for the project-owned stack.
 
 The grouping directory is deliberate. Upstream packages remain directly under
@@ -74,8 +74,8 @@ the bridge exposes `/camera/image_raw` and `/camera/camera_info` with
 5. **Dock perception:** add dock tag visuals and validate detector output and
    camera-to-dock transforms independently of flight control.
 6. **Mission control:** enable `flight_cycle_manager` only after the preceding
-   simulation and perception gates pass and ArduPilot already stores a valid
-   docking mission.
+   simulation and perception gates pass. On this branch it controls PX4 through
+   native ROS 2 DDS topics, not the historical ArduPilot mission workflow.
 
 ## Build
 
@@ -115,8 +115,9 @@ ros2 launch drone_bringup docking_sim.launch.py use_mavproxy:=true
 ```
 
 `use_mavproxy:=true` keeps SITL's TCP serial endpoint connected for a
-standalone simulation. Leave it false when `flight_cycle_manager` or the
-direct pymavlink dock-pose bridge owns `tcp:127.0.0.1:5760`.
+standalone ArduPilot simulation. Leave it false when the direct pymavlink
+dock-pose bridge owns `tcp:127.0.0.1:5760`. The PX4-only flight-cycle manager
+does not connect to that endpoint.
 
 Set `use_gz_sim_gui:=false` for a server-only run. Set `spawn_robot:=false`
 to inspect only the docking world and station without starting SITL. Select
@@ -137,12 +138,12 @@ SITL state is stored in the instance-specific directory (for instance `0/`)
 instead of reusing the workspace-root EEPROM. This keeps X500 parameters
 separate from existing Iris runs.
 
-When the simulator is up, start the canonical flight-cycle workflow from a
-second sourced terminal. ArduPilot must already hold a valid docking mission:
+The flight-cycle manager on this branch is PX4-only. Start its integrated
+simulation instead of attaching it to the ArduPilot simulation above:
 
 ```bash
-ros2 launch flight_cycle_manager flight_cycle.launch.py \
-  landing_backend:=pid simulation_mode:=true
+ros2 launch drone_description px4_docking.launch.py \
+  use_flight_cycle_manager:=true initial_point:=dock
 ros2 service call /flight_cycle_manager/start_cycle std_srvs/srv/Trigger "{}"
 ```
 
@@ -228,6 +229,22 @@ ros2 service call /ap/v1/arm_motors ardupilot_msgs/srv/ArmMotors \
 ```
 
 ## PX4 SITL comparison stack
+
+The native DDS flight-cycle path is now available alongside the simulation:
+
+```bash
+ros2 launch drone_description px4_docking.launch.py \
+  use_flight_cycle_manager:=true use_disturbances:=true initial_point:=dock
+```
+
+The DDS agent starts by default. Disturbances start unloaded; enable them with
+`ros2 param set /disturbance_injector enabled true` after takeoff. The PX4
+manager is a DDS-only executable; the ArduPilot manager and debug/tuning
+launches have been removed from this branch. Build the included
+firmware-matched `px4_msgs` subset first.
+For build commands, service calls, safety behavior and current PX4 mission
+limitations, see the PX4 section of
+`/home/enri-ubuntu/drone_ws/src/drone_docking/flight_cycle_manager/README.md`.
 
 The same world, airframe, camera and docking platform can be driven by PX4
 instead of ArduPilot. The PX4 launch uses DART physics; the ArduPilot launch

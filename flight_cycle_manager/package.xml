@@ -2,7 +2,7 @@
 <package format="3">
   <name>flight_cycle_manager</name>
   <version>0.1.0</version>
-  <description>Takeoff, ArduPilot mission handoff, and precision docking manager.</description>
+  <description>Native PX4 DDS flight-cycle and PID docking manager.</description>
   <maintainer email="user@example.com">Enrico</maintainer>
   <license>MIT</license>
   <buildtool_depend>ament_python</buildtool_depend>
@@ -11,10 +11,9 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>python3-pymavlink</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>px4_msgs</exec_depend>
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
   <test_depend>ament_flake8</test_depend>

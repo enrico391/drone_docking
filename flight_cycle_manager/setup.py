@@ -20,17 +20,16 @@ setup(
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
     ],
-    install_requires=["setuptools", "pymavlink>=2.4.49,<3"],
+    install_requires=["setuptools"],
     zip_safe=True,
     maintainer="Enrico",
     maintainer_email="user@example.com",
-    description="Takeoff, ArduPilot mission handoff, and precision docking manager.",
+    description="Native PX4 DDS flight-cycle and PID docking manager.",
     license="MIT",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "flight_cycle_manager = flight_cycle_manager.manager:main",
-            "pid_tuner = flight_cycle_manager.pid_tuner:main",
+            "px4_flight_cycle_manager = flight_cycle_manager.px4_manager:main",
         ],
     },
 )

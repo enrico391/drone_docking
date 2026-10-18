@@ -21,6 +21,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 # Model spawned for PX4. It is the PX4 counterpart of the ArduPilot
 # x500_with_ardupilot chain: same airframe, camera and docking platform.
@@ -157,8 +158,40 @@ def generate_launch_description() -> LaunchDescription:
             "home_lat": LaunchConfiguration("home_lat"),
             "home_lon": LaunchConfiguration("home_lon"),
             "home_alt": LaunchConfiguration("home_alt"),
+            "dds_port": LaunchConfiguration("dds_port"),
+            "px4_namespace": LaunchConfiguration("px4_namespace"),
         }.items(),
         condition=IfCondition(LaunchConfiguration("spawn_robot")),
+    )
+
+    # PX4 starts its uXRCE-DDS client in rcS. Use the installed v2.4 agent,
+    # compatible with PX4 v1.16, rather than opening a MAVLink control link.
+    dds_agent = Node(
+        package="micro_ros_agent", executable="micro_ros_agent",
+        arguments=["udp4", "-p", LaunchConfiguration("dds_port")],
+        output="screen", condition=IfCondition(LaunchConfiguration("use_dds_agent")),
+    )
+    disturbances = Node(
+        package="drone_description", executable="disturbance_injector",
+        name="disturbance_injector", namespace=LaunchConfiguration("namespace"),
+        output="screen", parameters=[LaunchConfiguration("disturbance_config"), {
+            "target_model": LaunchConfiguration("robot_name"),
+            "enabled": ParameterValue(LaunchConfiguration("disturbance_enabled"), value_type=bool),
+        }], condition=IfCondition(LaunchConfiguration("use_disturbances")),
+    )
+    flight_cycle = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(str(
+            Path(get_package_share_directory("flight_cycle_manager"))
+            / "launch/px4_flight_cycle.launch.py")),
+        condition=IfCondition(LaunchConfiguration("use_flight_cycle_manager")),
+        launch_arguments={
+            "namespace": LaunchConfiguration("namespace"),
+            "px4_namespace": LaunchConfiguration("px4_namespace"),
+            "auto_start": LaunchConfiguration("auto_start"),
+            "start_localizer": LaunchConfiguration("start_localizer"),
+            "image_topic": LaunchConfiguration("image_topic"),
+            "camera_info_topic": LaunchConfiguration("camera_info_topic"),
+        }.items(),
     )
 
     return LaunchDescription(
@@ -207,6 +240,18 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("use_ros_gz_bridge", default_value="true"),
             DeclareLaunchArgument("use_gz_tf", default_value="true"),
             DeclareLaunchArgument("spawn_robot", default_value="true"),
+            DeclareLaunchArgument("use_dds_agent", default_value="true"),
+            DeclareLaunchArgument("dds_port", default_value="8888"),
+            DeclareLaunchArgument("px4_namespace", default_value=""),
+            DeclareLaunchArgument("use_disturbances", default_value="false"),
+            DeclareLaunchArgument("disturbance_enabled", default_value="false"),
+            DeclareLaunchArgument("disturbance_config", default_value=str(
+                Path(description_share) / "config/disturbances.yaml")),
+            DeclareLaunchArgument("use_flight_cycle_manager", default_value="false"),
+            DeclareLaunchArgument("auto_start", default_value="false"),
+            DeclareLaunchArgument("start_localizer", default_value="true"),
+            DeclareLaunchArgument("image_topic", default_value="/camera/image_raw"),
+            DeclareLaunchArgument("camera_info_topic", default_value="/camera/camera_info"),
             # Must match the docking world's spherical_coordinates block.
             DeclareLaunchArgument("home_lat", default_value="45.3821944"),
             DeclareLaunchArgument("home_lon", default_value="12.0005833"),
@@ -214,6 +259,9 @@ def generate_launch_description() -> LaunchDescription:
             gz_server,
             gz_gui,
             OpaqueFunction(function=create_robot_actions),
+            dds_agent,
             px4_sitl,
+            disturbances,
+            flight_cycle,
         ]
     )

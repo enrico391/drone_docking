@@ -15,6 +15,12 @@
 # GCS, so the datalink-loss action is disabled here.
 NAV_DLL_ACT          0
 
+# DDS Offboard control has no RC transmitter. Keep all other arming checks.
+COM_RC_IN_MODE      4
+# On loss of the ROS Offboard stream, let PX4 land independently of ROS.
+COM_OF_LOSS_T       1.0
+COM_OBL_RC_ACT      4
+
 # Do not auto-disarm while sitting armed on the ground before a scripted
 # takeoff (PX4 default disarms after COM_DISARM_PRFLT seconds).
 COM_DISARM_PRFLT     0

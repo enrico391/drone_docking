@@ -84,6 +84,10 @@ def start_px4(context: LaunchContext):
         Path(get_package_share_directory("drone_description"))
         / "config" / "px4_sitl_docking.parm"
     ))
+    environment["PX4_UXRCE_DDS_PORT"] = LaunchConfiguration(
+        "dds_port", default="8888").perform(context)
+    environment["PX4_UXRCE_DDS_NS"] = LaunchConfiguration(
+        "px4_namespace", default="").perform(context).strip("/")
     return [
         ExecuteProcess(
             cmd=[str(binary)],
@@ -109,6 +113,8 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("robot_name", default_value="x500"),
             DeclareLaunchArgument("world_name", default_value="docking_world"),
+            DeclareLaunchArgument("dds_port", default_value="8888"),
+            DeclareLaunchArgument("px4_namespace", default_value=""),
             DeclareLaunchArgument(
                 "headless",
                 default_value="true",

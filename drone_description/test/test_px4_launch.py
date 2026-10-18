@@ -95,3 +95,50 @@ def test_profile_parser_rejects_invalid_values(tmp_path, text):
     profile.write_text(text)
     with pytest.raises(ValueError):
         module._parameter_environment(profile)
+
+
+def test_px4_launch_wires_agent_disturbance_and_native_cycle():
+    from launch.actions import IncludeLaunchDescription
+    from launch_ros.actions import Node
+    module = load_launch('px4_docking.launch.py')
+    entities = module.generate_launch_description().entities
+    context = LaunchContext()
+    for action in entities:
+        if isinstance(action, DeclareLaunchArgument):
+            action.execute(context)
+    assert context.launch_configurations['use_dds_agent'] == 'true'
+    assert context.launch_configurations['dds_port'] == '8888'
+    assert context.launch_configurations['disturbance_enabled'] == 'false'
+    assert context.launch_configurations['use_flight_cycle_manager'] == 'false'
+    nodes = [action for action in entities if isinstance(action, Node)]
+    agent = next(node for node in nodes if node._Node__package == 'micro_ros_agent')
+    assert agent.condition.evaluate(context)
+    injector = next(node for node in nodes if node._Node__node_executable == 'disturbance_injector')
+    assert not injector.condition.evaluate(context)
+    context.launch_configurations['use_disturbances'] = 'true'
+    assert injector.condition.evaluate(context)
+    includes = [action for action in entities if isinstance(action, IncludeLaunchDescription)]
+    assert any('px4_flight_cycle.launch.py' in ''.join(
+                   sub.perform(context) for sub in action.launch_description_source._LaunchDescriptionSource__location)
+               for action in includes)
+
+
+def test_sitl_passes_dds_port_and_namespace(tmp_path, monkeypatch):
+    module = load_launch('sitl_px4.launch.py')
+    build = tmp_path / 'build/px4_sitl_default'
+    (build / 'bin').mkdir(parents=True)
+    (build / 'bin/px4').touch()
+    monkeypatch.setattr(module, 'get_package_share_directory', lambda _: str(ROOT))
+    context = LaunchContext()
+    context.launch_configurations.update({
+        'px4_dir': str(tmp_path), 'robot_name': 'x500',
+        'world_name': 'docking_world', 'headless': 'true',
+        'home_lat': '45.3821944', 'home_lon': '12.0005833', 'home_alt': '2.0',
+        'dds_port': '9999', 'px4_namespace': '/px4_1/',
+    })
+    captured = {}
+    monkeypatch.setattr(module, 'ExecuteProcess', lambda **kwargs: captured.update(kwargs))
+    module.start_px4(context)
+    assert captured['additional_env']['PX4_UXRCE_DDS_PORT'] == '9999'
+    assert captured['additional_env']['PX4_UXRCE_DDS_NS'] == 'px4_1'
+    assert captured['additional_env']['PX4_PARAM_COM_OBL_RC_ACT'] == '4'
