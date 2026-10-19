@@ -813,6 +813,7 @@ class PidLandingController:
         if control_dock is None:
             return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
         if self._touchdown_is_ready(now, dock, control_dock, vehicle):
+            
             # used only for debug hold, not for normal landing
             if self._hold_at_state is PidLandingState.HOLD_CENTRAL:
                 # Hold the approach height, including after a small undershoot.
@@ -920,9 +921,11 @@ class PidLandingController:
             Freeze the last aligned tag observation as the touchdown reference.
             If a fixed reference is configured, use that instead of the tag.
         """
+        # used only for debug with already fixed reference tracked in a previous state
         if self._fixed_reference_enu_m is not None:
             self._touchdown_reference_enu_m = self._fixed_reference_enu_m
             self._touchdown_reference_heading_rad = self._fixed_reference_heading_rad
+        # used for normal landing with tag as reference
         else:
             self._latch_touchdown_reference(dock, vehicle)
 

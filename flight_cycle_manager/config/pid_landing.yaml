@@ -15,8 +15,8 @@ flight_cycle_manager:
     pid_approach_vertical_response_time_s: 0.5
     pid_approach_braking_accel_m_s2: 0.5
     # Arrival band around the approach height; debug hold targets the exact height.
-    pid_approach_height_tolerance_m: 0.01
-    pid_touchdown_speed_m_s: 0.10
+    pid_approach_height_tolerance_m: 0.02
+    pid_touchdown_speed_m_s: 0.15
     pid_touchdown_timeout_s: 15.0
     pid_landed_state_timeout_s: 1.0
     pid_landed_stable_time_s: 0.5
