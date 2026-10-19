@@ -42,6 +42,16 @@ PID_HOLD_STATES = frozenset({
 })
 
 
+# Only these transition settings may be changed without rebuilding the backend.
+TOUCHDOWN_TRANSITION_FIELDS = (
+    "touchdown_commit_height_m", "approach_height_tolerance_m", "touchdown_speed_m_s",
+    "touchdown_horizontal_tolerance_m", "touchdown_yaw_tolerance_rad",
+    "alignment_stable_time_s", "touchdown_horizontal_speed_tolerance_m_s",
+    "touchdown_horizontal_speed_stable_time_s",
+    "central_horizontal_tolerance_m", "central_yaw_tolerance_rad",
+)
+
+
 class PidLandingOutcome(Enum):
     """Terminal status carried by a PID landing decision."""
 
@@ -276,6 +286,8 @@ class PidLandingController:
         self._velocity_feedback_terms: dict = {}
         self._applied_horizontal_limit_m_s: Optional[float] = None
         self._approach_height_guard: Optional[dict] = None
+        self._touchdown_transition: Optional[dict] = None
+        self._touchdown_dwell_reset: Optional[dict] = None
 
     def start_after_acquisition(self, now: float) -> None:
         """Begin at PID alignment after the shared search acquired the dock."""
@@ -286,6 +298,8 @@ class PidLandingController:
         self._state_started_at = now
         self._alignment_stable_started_at = None
         self._touchdown_speed_stable_started_at = None
+        self._touchdown_transition = None
+        self._touchdown_dwell_reset = None
         self._central_stable_started_at = None
         self._central_loss_started_at = None
         self._distance_setpoint_m = None
@@ -414,7 +428,15 @@ class PidLandingController:
         vehicle: VehicleObservation,
     ) -> PidLandingDecision:
         self._approach_height_guard = None
+        self._touchdown_transition = None
+        previous_state = self._state
         decision = self._update_decision(now, dock, vehicle)
+        if (self._touchdown_transition is None and previous_state in (
+                PidLandingState.DESCEND_CENTRAL, PidLandingState.HOLD_CENTRAL)):
+            usable, _ = self._usable_dock(dock)
+            control = self._control_dock(dock, vehicle) if usable else None
+            self._capture_touchdown_transition(now, dock, control, vehicle, evaluated=False)
+            self._touchdown_transition["reason"] = decision.reason
         usable, _ = self._usable_dock(dock)
         if (decision.outcome is PidLandingOutcome.RUNNING
                 and decision.state in PID_HOLD_STATES and usable):
@@ -654,8 +676,7 @@ class PidLandingController:
         control_dock = self._control_dock(dock, vehicle)
         if control_dock is None:
             return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
-        fine_alignment_stable = self._touchdown_alignment_is_stable(now, control_dock, vehicle)
-        if (self._touchdown_height_is_ready(dock, vehicle) and fine_alignment_stable):
+        if self._touchdown_is_ready(now, dock, control_dock, vehicle):
             self._enter_state(PidLandingState.TOUCHDOWN_APPROACH, now)
             self._latch_touchdown_or_fixed_reference(dock, vehicle)
             return PidLandingDecision(self._state, _zero_body_command())
@@ -791,13 +812,7 @@ class PidLandingController:
         control_dock = self._control_dock(dock, vehicle)
         if control_dock is None:
             return self._handle_target_loss(now, vehicle, "vehicle heading unavailable for fixed reference")
-        fine_alignment_stable = self._touchdown_alignment_is_stable(
-            now, control_dock, vehicle,
-        )
-        if (
-            self._touchdown_height_is_ready(dock, vehicle)
-            and fine_alignment_stable
-        ):
+        if self._touchdown_is_ready(now, dock, control_dock, vehicle):
             # used only for debug hold, not for normal landing
             if self._hold_at_state is PidLandingState.HOLD_CENTRAL:
                 # Hold the approach height, including after a small undershoot.
@@ -1185,6 +1200,101 @@ class PidLandingController:
     def reconfigure_velocity_feedback(self, *, x: float, y: float, z: float) -> None:
         self._config = replace(self._config, x_k_v=x, y_k_v=y, z_k_v=z)
 
+    def validate_touchdown_transition(self, config: PidLandingConfig) -> None:
+        changed = any(getattr(config, name) != getattr(self._config, name)
+                      for name in TOUCHDOWN_TRANSITION_FIELDS)
+        if changed and self._state in (
+                PidLandingState.TOUCHDOWN_APPROACH, PidLandingState.DISARM,
+                PidLandingState.COMPLETE, PidLandingState.FAILED):
+            raise ValueError("cannot change touchdown transition after commitment or completion")
+
+    def reconfigure_touchdown_transition(self, config: PidLandingConfig) -> None:
+        """Apply validated thresholds; require new dwell evidence, not a new attempt."""
+        self.validate_touchdown_transition(config)
+        updates = {name: getattr(config, name) for name in TOUCHDOWN_TRANSITION_FIELDS}
+        if all(value == getattr(self._config, name) for name, value in updates.items()):
+            return
+        if config.touchdown_commit_height_m != self._config.touchdown_commit_height_m:
+            self._distance_setpoint_m = None
+            self._descent_last_updated_at = None
+            self._z_pid.reset()
+        self._config = replace(self._config, **updates)
+        self._alignment_stable_started_at = None
+        self._touchdown_speed_stable_started_at = None
+        self._touchdown_transition = None
+        self._touchdown_dwell_reset = None
+
+    def _touchdown_is_ready(self, now, dock, control_dock, vehicle) -> bool:
+        fine_alignment_stable = self._touchdown_alignment_is_stable(now, control_dock, vehicle)
+        height_ready = self._touchdown_height_is_ready(dock, vehicle)
+        self._capture_touchdown_transition(now, dock, control_dock, vehicle, evaluated=True)
+        self._touchdown_transition["fine_alignment_stable"] = fine_alignment_stable
+        return height_ready and fine_alignment_stable
+
+    def _capture_touchdown_transition(self, now, dock, control_dock, vehicle, *, evaluated):
+        """Snapshot the actual gate inputs/timers without advancing or resetting them."""
+        config = self._config
+        usable, reason = self._usable_dock(dock)
+        central = usable and dock.mode is DockTargetMode.CENTRAL
+        control = control_dock if central else None
+        checks = {}
+
+        def numeric(key, label, value, limit, unit, field, *, dwell=False):
+            value = value if value is not None and math.isfinite(value) else None
+            checks[key] = dict(label=label, value=value, limit=limit, unit=unit,
+                               parameter=f"pid_{field}", comparison=">=" if dwell else "<=",
+                               passed=value is not None and (value >= limit if dwell else value <= limit))
+
+        def elapsed(start):
+            return max(0.0, now - start) if evaluated and start is not None else 0.0
+
+        checks["central_vision"] = dict(label="Usable central vision", passed=central,
+                                        detail=("central" if central else
+                                                "central tag required" if usable else reason))
+        checks["control_reference"] = dict(label="Control reference available",
+                                           passed=control is not None,
+                                           detail="fixed reference" if self._fixed_reference_enu_m is not None
+                                           else "camera pose")
+        numeric("x", "|X error|", abs(control.forward_m) if control else None,
+                config.touchdown_horizontal_tolerance_m, "m", "touchdown_horizontal_tolerance_m")
+        numeric("y", "|Y error|", abs(control.left_m) if control else None,
+                config.touchdown_horizontal_tolerance_m, "m", "touchdown_horizontal_tolerance_m")
+        numeric("yaw", "|Wrapped yaw error|", abs(self._wrap_yaw(control.yaw_error_rad)) if control else None,
+                config.touchdown_yaw_tolerance_rad, "rad", "touchdown_yaw_tolerance_rad")
+        vx, vy, vz = vehicle.velocity_enu_m_s
+        numeric("horizontal_speed", "Measured horizontal speed", math.hypot(vx, vy),
+                config.touchdown_horizontal_speed_tolerance_m_s, "m/s",
+                "touchdown_horizontal_speed_tolerance_m_s")
+        numeric("alignment_dwell", "Alignment dwell", elapsed(self._alignment_stable_started_at),
+                config.alignment_stable_time_s, "s", "alignment_stable_time_s", dwell=True)
+        numeric("speed_dwell", "Low-speed dwell", elapsed(self._touchdown_speed_stable_started_at),
+                config.touchdown_horizontal_speed_stable_time_s, "s",
+                "touchdown_horizontal_speed_stable_time_s", dwell=True)
+        numeric("height", "|Distance − approach height|", abs(dock.distance_m - config.touchdown_commit_height_m)
+                if usable else None, config.approach_height_tolerance_m, "m", "approach_height_tolerance_m")
+        numeric("vertical_speed", "|Measured vertical speed|", abs(vz),
+                config.touchdown_speed_m_s, "m/s", "touchdown_speed_m_s")
+        checks["debug_hold"] = dict(label="Debug hold released", passed=self._hold_at_state not in (
+            PidLandingState.DESCEND_CENTRAL, PidLandingState.HOLD_CENTRAL),
+            detail=self._hold_at_state.name if self._hold_at_state else "none")
+        fine = evaluated and all(checks[key]["passed"] for key in (
+            "x", "y", "yaw", "horizontal_speed", "alignment_dwell", "speed_dwell"))
+        interrupted = [key for key in ("central_vision", "control_reference", "x", "y", "yaw",
+                                       "horizontal_speed") if not checks[key]["passed"]]
+        if interrupted:
+            self._touchdown_dwell_reset = dict(
+                time_s=now, checks={key: dict(checks[key]) for key in interrupted},
+            )
+        self._touchdown_transition = dict(
+            evaluated=evaluated, fine_alignment_stable=fine,
+            height_ready=checks["height"]["passed"] and checks["vertical_speed"]["passed"],
+            ready=evaluated and all(check["passed"] for check in checks.values()),
+            blockers=[key for key, check in checks.items() if not check["passed"]],
+            checks=checks, distance_m=dock.distance_m if usable else None,
+            approach_height_m=config.touchdown_commit_height_m,
+            last_dwell_interruption=self._touchdown_dwell_reset,
+        )
+
     def _touchdown_height_is_ready(
         self, dock: DockObservation, vehicle: VehicleObservation,
     ) -> bool:
@@ -1549,6 +1659,7 @@ class PidLandingController:
 
     def diagnostics(self) -> dict:
         return {
+            "touchdown_transition": self._touchdown_transition,
             "approach_height_guard": self._approach_height_guard,
             "approach_height_m": self._config.touchdown_commit_height_m,
             "velocity_feedback_terms": dict(self._velocity_feedback_terms),

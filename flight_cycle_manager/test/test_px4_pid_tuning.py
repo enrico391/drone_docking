@@ -75,6 +75,59 @@ def test_ready_tuning_is_used_by_next_landing(manager):
     assert manager._landing._controller._base_pids()[1].kp == 0.9
 
 
+def test_live_transition_update_preserves_backend_and_resets_dwell(manager):
+    from flight_cycle_manager.pid_landing import PidLandingState
+
+    landing(manager)
+    backend = manager._landing
+    backend._controller._enter_state(PidLandingState.DESCEND_CENTRAL, manager._now())
+    backend._controller._alignment_stable_started_at = manager._now()
+    backend._controller._touchdown_speed_stable_started_at = manager._now()
+    assert manager.set_parameters_atomically([
+        Parameter("pid_touchdown_horizontal_tolerance_m", value=0.04),
+        Parameter("pid_alignment_stable_time_s", value=0.6),
+    ]).successful
+    assert manager._landing is backend
+    assert backend._controller._state.name == "DESCEND_CENTRAL"
+    assert backend._controller._config.touchdown_horizontal_tolerance_m == 0.04
+    assert backend._controller._config.alignment_stable_time_s == 0.6
+    assert backend._controller._alignment_stable_started_at is None
+    assert backend._controller._touchdown_speed_stable_started_at is None
+
+
+@pytest.mark.parametrize("name,value", [
+    ("pid_touchdown_horizontal_tolerance_m", 0.0),
+    ("pid_touchdown_yaw_tolerance_rad", math.nan),
+    ("pid_touchdown_horizontal_tolerance_m", 0.5),
+    ("pid_touchdown_commit_height_m", 5.0),
+])
+def test_invalid_transition_batch_does_not_mutate_running_controller(manager, name, value):
+    landing(manager)
+    config = manager._pid_config
+    before = manager._landing.diagnostics()
+    assert not manager.set_parameters_atomically([
+        Parameter("pid_x_kp", value=0.9), Parameter(name, value=value),
+    ]).successful
+    assert manager._pid_config is config
+    assert manager._landing.diagnostics() == before
+
+
+def test_transition_edit_after_commitment_rejects_entire_batch(manager):
+    from flight_cycle_manager.pid_landing import PidLandingState
+
+    landing(manager)
+    manager._landing._controller._enter_state(PidLandingState.TOUCHDOWN_APPROACH, manager._now())
+    before = manager._landing.diagnostics()
+    result = manager.set_parameters_atomically([
+        Parameter("pid_x_kp", value=0.9),
+        Parameter("pid_alignment_stable_time_s", value=0.6),
+    ])
+    assert not result.successful and "commitment" in result.reason
+    assert manager._landing.diagnostics() == before
+    # Existing live gains remain supported after commitment.
+    assert manager.set_parameters_atomically([Parameter("pid_x_kp", value=0.9)]).successful
+
+
 def test_pose_debug_clears_errors_after_docking_stops(manager):
     dock = landing(manager)
     captured = []
@@ -137,6 +190,16 @@ def test_real_http_tuner_applies_gains_via_ros_service(manager, tmp_path):
             assert status == 200, result
             assert manager.get_parameter("pid_gain_near_x_kp").value == .72
             assert manager._pid_config.near_pids[0].kp == .72
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                future = workers.submit(request_json, url + "/api/transition", {
+                    "parameters": {"pid_alignment_stable_time_s": .65,
+                                   "pid_touchdown_horizontal_speed_tolerance_m_s": .08}})
+                while not future.done():
+                    executor.spin_once(timeout_sec=.05)
+                status, result = future.result()
+            assert status == 200, result
+            assert manager.get_parameter("pid_alignment_stable_time_s").value == .65
+            assert manager._landing._controller._config.alignment_stable_time_s == .65
         finally:
             executor.shutdown()
             process.terminate()

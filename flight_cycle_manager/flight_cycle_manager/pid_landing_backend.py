@@ -53,6 +53,12 @@ class PidLandingBackend:
     def diagnostics(self) -> dict:
         return self._controller.diagnostics()
 
+    def validate_touchdown_transition(self, config: PidLandingConfig) -> None:
+        self._controller.validate_touchdown_transition(config)
+
+    def reconfigure_touchdown_transition(self, config: PidLandingConfig) -> None:
+        self._controller.reconfigure_touchdown_transition(config)
+
     def reconfigure_velocity_feedback(self, *, x: float, y: float, z: float) -> None:
         self._controller.reconfigure_velocity_feedback(x=x, y=y, z=z)
 

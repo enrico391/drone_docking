@@ -19,6 +19,7 @@ class Element {
   get value() { return this._value; }
   set innerHTML(html) {
     this.html = html;
+    this.children = [];
     for (const match of html.matchAll(/<(\w+)\b[^>]*\bid="([^"]+)"[^>]*>/g)) {
       const element = new Element(match[1]);
       element.disabled = /\bdisabled\b/.test(match[0]);
@@ -31,7 +32,9 @@ class Element {
   getContext() { return canvasContext; }
 }
 for (const id of ['axis-controls', 'readings', 'plots', 'pose-status', 'download',
-                  'position-scale', 'yaw-scale', 'clear', 'scale-status', 'connection']) {
+                  'position-scale', 'yaw-scale', 'clear', 'scale-status', 'connection',
+                  'transition-controls', 'transition-checks', 'transition-summary',
+                  'apply-transition', 'reset-transition', 'transition-status', 'transition-reset']) {
   elements.set(id, new Element('div'));
 }
 const requests = [];
@@ -43,7 +46,7 @@ const context = vm.createContext({
   },
   fetch: async (url, options) => {
     if (url === '/api/state') return {ok: true, json: async () => ({connected: false})};
-    assert.equal(url, '/api/gains');
+    assert.ok(['/api/gains', '/api/transition'].includes(url));
     requests.push(JSON.parse(options.body));
     return new Promise(resolve => pending.push(resolve));
   },
@@ -52,7 +55,7 @@ const context = vm.createContext({
 });
 vm.runInContext(script + `
 globalThis.dashboard = {
-  editors, applyGains,
+  editors, applyGains, transitionEditor,
   setTelemetry(value) { latest=value; fill(); render(); },
 };`, context);
 const $ = id => {
@@ -75,6 +78,8 @@ async function main() {
   assert.ok(!elements.has('axis'));
   for (const a of ['x', 'y', 'z', 'yaw']) assert.equal($(`apply-${a}`).disabled, true);
   context.dashboard.setTelemetry(sample());
+  assert.equal($('transition-controls').children.length, 10);
+  assert.equal($('apply-transition').disabled, false);
   for (const a of ['x', 'y', 'z', 'yaw']) {
     assert.equal($(`kp-${a}`).value, '0.1');
     assert.equal($(`apply-${a}`).disabled, false);
@@ -121,19 +126,73 @@ async function main() {
   assert.equal($('kp-y').value, '-1');
   assert.equal($('apply-y').disabled, false);
 
+  // Gate diagnostics show actual measured values and configured limits, not pose errors.
+  const data = sample();
+  data.state = 'DESCEND_CENTRAL';
+  data.touchdown_transition = {
+    evaluated: true, ready: false, fine_alignment_stable: false, height_ready: true,
+    blockers: ['horizontal_speed'], checks: {
+      horizontal_speed: {label: 'Measured horizontal speed', value: 0.12, limit: 0.07,
+        unit: 'm/s', comparison: '<=', parameter: 'pid_touchdown_horizontal_speed_tolerance_m_s', passed: false},
+      alignment_dwell: {label: 'Alignment dwell', value: 0, limit: 1, unit: 's',
+        comparison: '>=', parameter: 'pid_alignment_stable_time_s', passed: false},
+    },
+    last_dwell_interruption: {time_s: 1, checks: {
+      x: {label: '|X error|', value: 0.09, limit: 0.03, unit: 'm'},
+    }},
+  };
+  context.dashboard.setTelemetry(data);
+  assert.ok($('transition-summary').textContent.includes('fine_alignment_stable: false'));
+  assert.ok($('transition-summary').textContent.includes('Measured horizontal speed'));
+  assert.ok($('transition-reset').textContent.includes('0.090000 m; required <= 0.030000 m'));
+  const rows = $('transition-checks').children;
+  assert.ok(rows.some(row => row.children.some(cell => cell.textContent.includes('0.120000 m/s'))));
+
+  // Dirty transition fields survive polling and independent gain edits.
+  const field = $('transition-alignment_stable_time_s');
+  field.value = '0.6';field.oninput();
+  context.dashboard.setTelemetry(sample());
+  assert.equal(field.value, '0.6');
+  const transitionUpdate = $('apply-transition').onclick();
+  assert.equal(requests.length, 3);
+  assert.deepEqual(requests[2], {parameters: {pid_alignment_stable_time_s: 0.6}});
+  assert.equal($('apply-transition').disabled, true);
+  assert.equal($('apply-x').disabled, false);
+  pending[2]({ok: false, json: async () => ({ok: false, message: 'transition rejected'})});
+  await transitionUpdate;
+  assert.equal(field.value, '0.6');
+  assert.equal(context.dashboard.transitionEditor.dirty.size, 1);
+  assert.equal($('transition-status').textContent, 'transition rejected');
+  const retry = $('apply-transition').onclick();
+  pending[3]({ok: true, json: async () => ({ok: true, message: 'parameters applied'})});
+  await retry;
+  assert.equal(context.dashboard.transitionEditor.dirty.size, 0);
+  field.value = '0';field.oninput();
+  await $('apply-transition').onclick();
+  assert.equal(requests.length, 4);
+  assert.equal($('transition-status').textContent, 'Use finite positive values');
+  $('reset-transition').onclick();
+  assert.equal(field.value, '0.1');
+  context.dashboard.setTelemetry({...sample(), state: 'TOUCHDOWN_APPROACH'});
+  assert.equal($('apply-transition').disabled, true);
+  assert.equal(field.disabled, true);
+
   // Base-bank validation is local to the edited axis, and disconnect disables all updates.
   $('kp-z').value = '-1';
   $('kp-z').oninput();
   await $('apply-z').onclick();
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 4);
   assert.ok($('gain-status-z').textContent.includes('Use nonnegative gains'));
   assert.equal($('gain-status-x').textContent, 'X applied');
   assert.equal($('download').disabled, false);
   context.dashboard.setTelemetry(null);
   for (const a of ['x', 'y', 'z', 'yaw']) assert.equal($(`apply-${a}`).disabled, true);
   assert.equal($('download').disabled, true);
+  assert.equal($('apply-transition').disabled, true);
+  assert.equal($('transition-checks').html, '');
+  assert.equal($('transition-checks').children.length, 0);
   await context.dashboard.applyGains('yaw');
-  assert.equal(requests.length, 2);
-  console.log('Four-axis dashboard JavaScript smoke test passed');
+  assert.equal(requests.length, 4);
+  console.log('Four-axis and transition dashboard JavaScript smoke test passed');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

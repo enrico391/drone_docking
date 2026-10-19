@@ -5,10 +5,11 @@ import math
 
 from .landing_backend import VelocityFrame
 from .pid import PIDConfig
-from .pid_landing import PidLandingConfig
+from .pid_landing import PidLandingConfig, TOUCHDOWN_TRANSITION_FIELDS
 
 
 PID_AXES = ("x", "y", "z", "yaw")
+LIVE_TRANSITION_PARAMETERS = frozenset(f"pid_{name}" for name in TOUCHDOWN_TRANSITION_FIELDS)
 LIVE_PID_PARAMETERS = frozenset(
     [f"pid_{axis}_{field}" for axis in PID_AXES for field in (
         "kp", "ki", "kd", "integral_limit", "derivative_filter_time_constant_s",
@@ -17,7 +18,7 @@ LIVE_PID_PARAMETERS = frozenset(
        for axis in PID_AXES for gain in ("kp", "ki", "kd")]
     + ["pid_gain_near_distance_m", "pid_gain_far_distance_m"]
     + [f"pid_{axis}_k_v" for axis in ("x", "y", "z")]
-)
+) | LIVE_TRANSITION_PARAMETERS
 
 
 def pose_tracking_telemetry(*, now, state, dock, diagnostics, parameters):

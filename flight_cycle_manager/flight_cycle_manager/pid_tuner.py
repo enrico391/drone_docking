@@ -9,7 +9,7 @@ import queue
 import threading
 import time
 
-from .px4_control import PID_AXES
+from .px4_control import LIVE_TRANSITION_PARAMETERS, PID_AXES
 
 
 def parse_gain_request(payload):
@@ -29,6 +29,20 @@ def parse_gain_request(payload):
             raise ValueError(f"{gain} must be finite and nonnegative (-1 inherits base in near/far)")
         parameters[f"{prefix}_{gain}"] = float(value)
     return parameters
+
+
+def parse_transition_request(payload):
+    """Allow only explicitly selected positive transition settings, never arbitrary ROS params."""
+    parameters = payload.get("parameters") if isinstance(payload, dict) else None
+    if not isinstance(parameters, dict) or not parameters:
+        raise ValueError("parameters must be a nonempty object")
+    if parameters.keys() - LIVE_TRANSITION_PARAMETERS:
+        raise ValueError("unsupported transition parameter")
+    for name, value in parameters.items():
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0):
+            raise ValueError(f"{name} must be finite and positive")
+    return {name: float(value) for name, value in parameters.items()}
 
 
 class TelemetryStore:
@@ -86,7 +100,7 @@ def _handler_for(telemetry, submit):
                 self.send_error(404)
 
         def do_POST(self):  # noqa: N802
-            if self.path != "/api/gains":
+            if self.path not in ("/api/gains", "/api/transition"):
                 self.send_error(404)
                 return
             # Do not let another website issue control requests to localhost.
@@ -99,7 +113,8 @@ def _handler_for(telemetry, submit):
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= 4096:
                     raise ValueError("invalid request size")
-                parameters = parse_gain_request(json.loads(self.rfile.read(length)))
+                parse = parse_gain_request if self.path == "/api/gains" else parse_transition_request
+                parameters = parse(json.loads(self.rfile.read(length)))
             except (TypeError, ValueError, OverflowError, OSError) as error:
                 self._reply(400, {"ok": False, "message": str(error)})
                 return
@@ -153,7 +168,7 @@ def main(args=None):
             except queue.Full:
                 return {"ok": False, "message": "tuner busy; retry"}
             if not work.done.wait(3.0):
-                return {"ok": False, "message": "update timed out; check live gains before retrying"}
+                return {"ok": False, "message": "update timed out; check live parameters before retrying"}
             return work.result
 
         def _process_work(self):
@@ -164,10 +179,10 @@ def main(args=None):
                 try:
                     if not future.done():
                         future.cancel()
-                        raise TimeoutError("parameter service timed out; check live gains")
+                        raise TimeoutError("parameter service timed out; check live parameters")
                     outcome = future.result().result
                     work.result = {"ok": outcome.successful,
-                                   "message": "gains applied" if outcome.successful else outcome.reason}
+                                   "message": "parameters applied" if outcome.successful else outcome.reason}
                 except Exception as error:  # ROS transport failure must not stop the HTTP server.
                     work.result = {"ok": False, "message": str(error)}
                 work.done.set()
@@ -232,7 +247,25 @@ small,p{color:#cbd5e1}strong{color:#60a5fa}.bad{color:#fca5a5}table{width:100%;t
 <div class="axis-controls" id="axis-controls"></div>
 <p><button id="download" disabled>Download YAML</button></p>
 <small>Changes apply live, with the controller's existing gain ramp. Near/far banks interpolate by dock distance;
--1 inherits the base gain. Base changes do not override explicit near/far values. Safety limits are unchanged.</small></section>
+-1 inherits the base gain. Base changes do not override explicit near/far values.</small></section>
+<section class="card"><h2>DESCEND_CENTRAL → TOUCHDOWN_APPROACH</h2>
+<p id="transition-summary" role="status">Waiting for transition diagnostics</p>
+<p id="transition-reset">No dwell interruption recorded</p>
+<table><thead><tr><th>Gate</th><th>Measured / elapsed</th><th>Required</th><th>Status</th></tr></thead>
+<tbody id="transition-checks"></tbody></table>
+<small>X/Y/yaw use the active control reference, which can differ from camera pose. Speeds are measured, not commanded.
+X and Y each must be within tolerance. A pose or horizontal-speed excursion, or loss of central vision, resets BOTH dwell timers.
+Height and vertical speed are separate gates and do not reset the fine-alignment dwell.</small>
+<h3>Live transition parameters</h3><div class="row" id="transition-controls"></div>
+<p><button id="apply-transition" disabled>Apply transition parameters</button>
+<button id="reset-transition" disabled>Reload live values</button></p>
+<p id="transition-status" role="status"></p>
+<small>WARNING: these settings change landing acceptance criteria on real hardware. Apply only deliberate changes.
+All edits apply atomically, with existing configuration constraints; both dwell timers restart.
+Changes after touchdown commitment are rejected. Yaw inputs are radians (diagnostics also show degrees).
+Commit height is camera-to-dock distance, not absolute altitude. Touchdown speed also sets the committed descent speed.
+Alignment dwell is shared with earlier alignment stages; central tolerances also control descent pausing.
+Use Download YAML to persist these values; live changes alone are not saved.</small></section>
 <section class="card"><h2>Dock-relative pose tracking</h2>
 <p id="pose-status">No fresh dock pose</p><table><thead><tr><th>Axis</th><th>Measured pose</th><th>Target</th><th>Tracking error</th></tr></thead><tbody id="readings"></tbody></table>
 <small>X forward · Y left · Z measured dock distance, not absolute altitude · yaw counter-clockwise.
@@ -248,6 +281,25 @@ const $=id=>document.getElementById(id), finite=v=>typeof v==='number'&&Number.i
 const display=(v,a)=>finite(v)?(a==='yaw'?v*180/Math.PI:v).toFixed(3)+(a==='yaw'?' °':' m'):'—';
 let latest=null, lastTime=null, samples=[];
 const editors=Object.fromEntries(axes.map(a=>[a,{dirty:false,applying:false}]));
+const transitionFields=[
+  ['touchdown_commit_height_m','Approach height (m)'],
+  ['approach_height_tolerance_m','Height arrival tolerance (m)'],
+  ['touchdown_speed_m_s','Vertical speed limit / touchdown descent (m/s)'],
+  ['touchdown_horizontal_tolerance_m','Fine X/Y tolerance (m)'],
+  ['touchdown_yaw_tolerance_rad','Fine yaw tolerance (rad)'],
+  ['alignment_stable_time_s','Alignment dwell (s)'],
+  ['touchdown_horizontal_speed_tolerance_m_s','Horizontal speed limit (m/s)'],
+  ['touchdown_horizontal_speed_stable_time_s','Low-speed dwell (s)'],
+  ['central_horizontal_tolerance_m','Central descent X/Y tolerance (m)'],
+  ['central_yaw_tolerance_rad','Central descent yaw tolerance (rad)'],
+];
+const transitionEditor={dirty:new Set(),applying:false};
+transitionFields.forEach(([field,label])=>{
+  const control=document.createElement('label');
+  control.innerHTML=`${label}<input id="transition-${field}" type="number" min="0" step="any" title="pid_${field}">`;
+  $('transition-controls').appendChild(control);
+  $(`transition-${field}`).oninput=()=>transitionEditor.dirty.add(field);
+});
 let positionScale=2,yawScale=180;
 axes.forEach(a=>{
   const editor=document.createElement('section');editor.className='axis-panel';
@@ -274,6 +326,41 @@ function fill(){
     if(!latest?.parameters||editors[a].dirty||editors[a].applying)return;
     gains.forEach(g=>{$(`${g}-${a}`).value=latest.parameters[`${prefix(a)}_${g}`]??''});
   });
+  transitionFields.forEach(([field])=>{
+    if(!latest?.parameters||transitionEditor.applying||transitionEditor.dirty.has(field))return;
+    $(`transition-${field}`).value=latest.parameters[`pid_${field}`]??'';
+  });
+}
+function renderTransition(){
+  const d=latest?.touchdown_transition;
+  const committed=['TOUCHDOWN_APPROACH','DISARM','COMPLETE','FAILED'].includes(latest?.state);
+  const available=!!latest?.parameters&&transitionFields.every(([f])=>finite(latest.parameters[`pid_${f}`]));
+  $('apply-transition').disabled=!available||committed||transitionEditor.applying;
+  $('reset-transition').disabled=!available||transitionEditor.applying;
+  transitionFields.forEach(([field])=>$(`transition-${field}`).disabled=!available||committed||transitionEditor.applying);
+  $('transition-checks').innerHTML='';
+  if(!d){$('transition-summary').textContent=latest?'Transition diagnostics inactive in '+latest.state:'Waiting for fresh manager telemetry';$('transition-reset').textContent='No live dwell diagnostics';return}
+  const checks=d.checks??{};
+  const blockers=(d.blockers??[]).map(key=>checks[key]?.label??key);
+  $('transition-summary').textContent=`fine_alignment_stable: ${d.fine_alignment_stable} · height_ready: ${d.height_ready} · `+
+    (d.ready?'READY':`BLOCKED: ${blockers.join(', ')||'gate evaluation pending'}`)+
+    (d.evaluated?'':' · not evaluated this cycle')+
+    (finite(d.distance_m)?` · distance ${d.distance_m.toFixed(3)} m / approach ${d.approach_height_m.toFixed(3)} m`:'')+
+    (d.reason?' · '+d.reason:'');
+  $('transition-summary').className=d.ready?'':'bad';
+  const fmt=(value,unit)=>finite(value)?value.toFixed(6)+' '+unit+(unit==='rad'?` (${(value*180/Math.PI).toFixed(3)} °)`:''):'unavailable';
+  const interruption=d.last_dwell_interruption;
+  $('transition-reset').textContent=interruption?'Last dwell interruption: '+Object.values(interruption.checks).map(c=>
+    c.label+(c.unit?` ${fmt(c.value,c.unit)}; required <= ${fmt(c.limit,c.unit)}`:': '+c.detail)).join('; ')+
+    (finite(latest.time_s)?` · ${Math.max(0,latest.time_s-interruption.time_s).toFixed(2)} s ago`:''):'No dwell interruption recorded';
+  Object.values(checks).forEach(check=>{
+    const row=document.createElement('tr');
+    const values=[check.label,check.unit?fmt(check.value,check.unit):check.detail??'—',
+      check.unit?`${check.comparison} ${fmt(check.limit,check.unit)} (${check.parameter})`:'required',
+      check.passed?'PASS':'BLOCKED'];
+    values.forEach(text=>{const cell=document.createElement('td');cell.textContent=text;row.appendChild(cell)});
+    row.className=check.passed?'':'bad';$('transition-checks').appendChild(row);
+  });
 }
 function render(){
   const p=latest?.measured_pose,e=latest?.error;
@@ -292,6 +379,7 @@ function render(){
     gains.forEach(g=>{$(`${g}-${a}`).disabled=editors[a].applying});
   });
   $('download').disabled=!latest?.parameters;
+  renderTransition();
   draw();
 }
 function draw(){
@@ -341,6 +429,24 @@ async function applyGains(a){
   }catch(error){$(`gain-status-${a}`).textContent='Update failed: '+error.message}
   finally{editors[a].applying=false;render()}
 }
+$('reset-transition').onclick=()=>{transitionEditor.dirty.clear();$('transition-status').textContent='';fill()};
+$('apply-transition').onclick=async()=>{
+  if($('apply-transition').disabled||transitionEditor.applying)return;
+  const parameters={};
+  for(const field of transitionEditor.dirty){
+    const raw=$(`transition-${field}`).value.trim(),value=Number(raw);
+    if(!raw||!finite(value)||value<=0){$('transition-status').textContent='Use finite positive values';return}
+    parameters[`pid_${field}`]=value;
+  }
+  if(!Object.keys(parameters).length){$('transition-status').textContent='No edited transition parameters';return}
+  transitionEditor.applying=true;render();
+  try{
+    const response=await fetch('/api/transition',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parameters})});
+    const result=await response.json();$('transition-status').textContent=result.message;
+    if(response.ok&&result.ok)transitionEditor.dirty.clear();
+  }catch(error){$('transition-status').textContent='Update failed: '+error.message}
+  finally{transitionEditor.applying=false;render()}
+};
 $('download').onclick=()=>{
   if(!latest?.parameters)return;
   let text='flight_cycle_manager:\n  ros__parameters:\n';

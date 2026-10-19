@@ -181,10 +181,10 @@ ros2 run flight_cycle_manager pid_tuner --ros-args -p port:=8765
 ros2 run flight_cycle_manager pid_tuner --ros-args -r __ns:=/drone1 -p port:=8766
 ```
 
-The dashboard shows **only pose tracking**: measured dock-relative X (forward),
+The dashboard shows measured dock-relative X (forward),
 Y (left), Z (distance to the dock), yaw and the active PID tracking errors over
-the last 60 seconds. There are no camera, velocity, command or estimated-surface
-panels. Position errors are in metres and yaw is displayed in degrees. Z error
+the last 60 seconds, plus touchdown-transition diagnostics. There are no camera,
+command or estimated-surface panels. Position errors are in metres and yaw is displayed in degrees. Z error
 is distance setpoint minus measured distance, **not absolute height**. During
 alignment Z control may be inactive; unavailable errors appear as gaps rather
 than stale values or zero. Active control errors can use a frozen target during
@@ -203,12 +203,54 @@ alone does not override explicit near/far values. The dashboard also reports
 the effective gains, which may differ during interpolation/ramping.
 
 Gains can be prepared before docking; tuning does not start takeoff or docking.
-Flight limits, watchdogs and touchdown/disarm requirements are unchanged.
-Invalid/nonfinite gains are rejected before any controller change. Non-PID
-settings require a restart rather than silently appearing to apply live.
+Gain edits do not change flight limits, watchdogs or touchdown/disarm requirements.
+Invalid/nonfinite gains are rejected before any controller change. Settings outside
+the live gain and transition allowlists require a restart.
+
+#### Diagnosing DESCEND_CENTRAL → TOUCHDOWN_APPROACH
+
+The transition panel displays **`fine_alignment_stable`**, **`height_ready`** and
+every blocking gate with its current measurement, configured limit, parameter name
+and PASS/BLOCKED status. It includes:
+
+- Usable central vision and availability of the camera/frozen control reference.
+- Absolute X and Y errors (each checked separately), wrapped yaw error, and
+  **measured** horizontal speed `hypot(vx, vy)` in the local ENU frame.
+- Alignment and low-speed dwell elapsed/required seconds. **Either a pose or
+  horizontal-speed excursion resets both timers**, as does central-tag loss.
+  A retained **last dwell interruption** shows the offending value and limit even
+  if the excursion happened between browser polls.
+- Absolute camera-to-dock distance error around the approach height, and measured
+  absolute vertical speed. Both must pass, independently of fine alignment;
+  neither resets its dwell timers.
+- Debug holds, which deliberately prevent commitment. Diagnostics do not run
+  dwell checks behind a debug hold or reuse stale camera measurements.
+
+The panel's **Live transition parameters** editor applies just the edited fields
+as one atomic ROS update, without restarting the backend or changing its state.
+It exposes `pid_touchdown_commit_height_m`, `pid_approach_height_tolerance_m`,
+`pid_touchdown_speed_m_s`, `pid_touchdown_horizontal_tolerance_m`,
+`pid_touchdown_yaw_tolerance_rad`, `pid_alignment_stable_time_s`,
+`pid_touchdown_horizontal_speed_tolerance_m_s`,
+`pid_touchdown_horizontal_speed_stable_time_s`,
+`pid_central_horizontal_tolerance_m` and `pid_central_yaw_tolerance_rad`.
+Yaw editor values are **radians**; gate diagnostics show radians and degrees.
+Unsaved edits survive telemetry polling and independent gain edits; **Reload live
+values** discards them. Disconnect disables updates and removes stale gate data.
+
+**Hardware caution:** these edits change landing acceptance criteria. In particular,
+`pid_touchdown_speed_m_s` is both the pre-commit vertical-speed gate and the
+post-commit descent speed; alignment dwell also affects earlier alignment stages,
+and central tolerances affect descent pausing. Existing positive-value and
+cross-parameter constraints are enforced (fine tolerances cannot exceed central
+tolerances, and the arrival band must stay below central transition distance).
+Threshold edits restart both dwell timers; height edits also rebase the Z target.
+Transition edits are rejected after touchdown commitment, while gain edits remain
+available. No default thresholds, vision-loss recovery, watchdogs or PX4
+touchdown/disarm confirmation requirements are bypassed.
 
 **Download YAML** exports configured gains, both scheduled banks and supporting
-PID settings (not the transient interpolated gains). Changes are otherwise
+PID and transition settings (not the transient interpolated gains). Changes are otherwise
 in-memory only. Load the downloaded file via `pid_config:=/absolute/path/pid_tuned.yaml`
 on the next launch; unspecified landing settings retain package defaults.
 

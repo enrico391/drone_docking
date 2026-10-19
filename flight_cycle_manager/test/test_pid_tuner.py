@@ -14,7 +14,7 @@ import pytest
 
 from flight_cycle_manager.landing_backend import DockObservation, DockTargetMode
 from flight_cycle_manager.pid_tuner import (
-    DASHBOARD_HTML, TelemetryStore, _handler_for, parse_gain_request,
+    DASHBOARD_HTML, TelemetryStore, _handler_for, parse_gain_request, parse_transition_request,
 )
 from flight_cycle_manager.px4_control import LIVE_PID_PARAMETERS, pose_tracking_telemetry
 
@@ -46,6 +46,29 @@ def test_invalid_gains_are_rejected(override):
 def test_incomplete_gain_requests_are_rejected(payload):
     with pytest.raises(ValueError):
         parse_gain_request(payload)
+
+
+@pytest.mark.parametrize("payload", [
+    None, [], {}, {"parameters": {}}, {"parameters": []},
+    {"parameters": {"takeoff_altitude_m": 1}},
+    *[{"parameters": {"pid_alignment_stable_time_s": value}}
+      for value in (True, "1", 0, -1, math.nan, math.inf)],
+])
+def test_invalid_transition_requests_are_rejected(payload):
+    with pytest.raises(ValueError):
+        parse_transition_request(payload)
+
+
+def test_http_transition_updates_are_allowlisted_atomic_and_same_origin(web_server):
+    url, received, _ = web_server
+    parameters = {"pid_alignment_stable_time_s": 0.7,
+                  "pid_touchdown_horizontal_speed_tolerance_m_s": 0.08}
+    assert request_json(url + "/api/transition", {"parameters": parameters})[0] == 200
+    assert received == [parameters]
+    assert request_json(url + "/api/transition", {"parameters": {"pid_x_kp": 1}})[0] == 400
+    assert request_json(url + "/api/transition", {"parameters": parameters},
+                        Origin="http://evil.example")[0] == 403
+    assert len(received) == 1
 
 
 def test_telemetry_is_thread_safe_and_expires_without_showing_stale_pose():

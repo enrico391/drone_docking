@@ -156,6 +156,7 @@ class Px4FlightCycleManager(Node):
             config = pid_config(candidate)
             # Validate the complete candidate before touching a running controller.
             if self._landing is not None and self._state == "LANDING_BACKEND":
+                self._landing.validate_touchdown_transition(config)
                 self._landing.reconfigure_pids(
                     tuple(getattr(config, f"{axis}_pid") for axis in PID_AXES),
                     config.near_pids, config.far_pids,
@@ -163,6 +164,7 @@ class Px4FlightCycleManager(Node):
                 )
                 self._landing.reconfigure_velocity_feedback(
                     x=config.x_k_v, y=config.y_k_v, z=config.z_k_v)
+                self._landing.reconfigure_touchdown_transition(config)
         except (TypeError, ValueError, OverflowError) as error:
             return SetParametersResult(successful=False, reason=str(error))
         self._p, self._pid_config = candidate, config
