@@ -163,6 +163,28 @@ docking automatically. The manager launch also accepts `config_file`,
 `camera_info_topic` and `localizer_python`.
 Controller settings are loaded at startup; PID gains can also be tuned live below.
 
+### Flight actions from the dashboard
+
+The dashboard includes a separate **Flight actions** panel with:
+
+- **Start cycle — arm & take off**, calling the manager's existing
+  `~/start_cycle` ROS service.
+- **Request dock — search & land**, calling the existing `~/request_dock`
+  ROS service.
+
+Both buttons require an additional confirmation in the browser. They reuse the
+manager's own safety checks unchanged; eligibility and the exact rejection
+reason are shown beside each button. A request may remain **pending** while one
+action finishes, and no request is ever retried automatically. For a timeout or
+transport failure the status is explicitly marked **OUTCOME UNKNOWN** because
+the service may have executed despite the missing response.
+
+**Accepted means queued or started, not completed.** Use the manager's state,
+the vehicle and the retained service reply to assess the actual outcome. These
+controls initiate motion and are not emergency-stop buttons; use the configured
+pilot override to intervene. Keep the flight area clear and RC override
+available.
+
 ### Real-time docking PID dashboard
 
 The manager launch (including the simulation launch above) starts the tuner at

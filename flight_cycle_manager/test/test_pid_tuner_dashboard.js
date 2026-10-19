@@ -34,11 +34,15 @@ class Element {
 for (const id of ['axis-controls', 'readings', 'plots', 'pose-status', 'download',
                   'position-scale', 'yaw-scale', 'clear', 'scale-status', 'connection',
                   'transition-controls', 'transition-checks', 'transition-summary',
-                  'apply-transition', 'reset-transition', 'transition-status', 'transition-reset']) {
+                  'apply-transition', 'reset-transition', 'transition-status', 'transition-reset',
+                  'action-start_cycle', 'action-request_dock', 'action-status', 'action-acknowledge',
+                  'action-availability-start_cycle', 'action-availability-request_dock']) {
   elements.set(id, new Element('div'));
 }
 const requests = [];
 const pending = [];
+const actionRequests = [], actionPending = [], confirmations = [];
+let confirmAnswer = true;
 const context = vm.createContext({
   document: {
     getElementById: id => elements.get(id) ?? null,
@@ -46,16 +50,21 @@ const context = vm.createContext({
   },
   fetch: async (url, options) => {
     if (url === '/api/state') return {ok: true, json: async () => ({connected: false})};
+    if (url === '/api/action') {
+      actionRequests.push(JSON.parse(options.body));
+      return new Promise((resolve, reject) => actionPending.push({resolve, reject}));
+    }
     assert.ok(['/api/gains', '/api/transition'].includes(url));
     requests.push(JSON.parse(options.body));
     return new Promise(resolve => pending.push(resolve));
   },
   AbortSignal: {timeout: () => undefined},
   setTimeout: () => {},
+  window: {confirm: text => {confirmations.push(text);return confirmAnswer;}},
 });
 vm.runInContext(script + `
 globalThis.dashboard = {
-  editors, applyGains, transitionEditor,
+  editors, applyGains, transitionEditor, requestFlightAction,
   setTelemetry(value) { latest=value; fill(); render(); },
 };`, context);
 const $ = id => {
@@ -78,6 +87,7 @@ async function main() {
   assert.ok(!elements.has('axis'));
   for (const a of ['x', 'y', 'z', 'yaw']) assert.equal($(`apply-${a}`).disabled, true);
   context.dashboard.setTelemetry(sample());
+  assert.equal($('action-start_cycle').disabled, true, 'missing eligibility fails closed');
   assert.equal($('transition-controls').children.length, 10);
   assert.equal($('apply-transition').disabled, false);
   for (const a of ['x', 'y', 'z', 'yaw']) {
@@ -185,12 +195,70 @@ async function main() {
   assert.ok($('gain-status-z').textContent.includes('Use nonnegative gains'));
   assert.equal($('gain-status-x').textContent, 'X applied');
   assert.equal($('download').disabled, false);
+  // Flight buttons are confirmed, mutually disabled while pending, and never auto-retried.
+  const ready = {...sample(), cycle_state: 'READY', flight_actions: {
+    start_cycle: {allowed: true, reason: ''},
+    request_dock: {allowed: false, reason: 'not airborne'},
+  }};
+  context.dashboard.setTelemetry(ready);
+  assert.equal($('action-start_cycle').disabled, false);
+  assert.equal($('action-request_dock').disabled, true);
+  assert.ok($('action-availability-request_dock').textContent.includes('not airborne'));
+  confirmAnswer = false;
+  await $('action-start_cycle').onclick();
+  assert.equal(actionRequests.length, 0);
+  assert.ok(confirmations[0].includes('ARM AND TAKE OFF'));
+  confirmAnswer = true;
+  const start = $('action-start_cycle').onclick();
+  assert.equal($('action-start_cycle').disabled, true);
+  assert.equal($('action-request_dock').disabled, true);
+  await context.dashboard.requestFlightAction('start_cycle');
+  assert.equal(actionRequests.length, 1);
+  assert.deepEqual(actionRequests[0], {action: 'start_cycle', confirmed: true});
+  actionPending[0].resolve({ok: true, json: async () => ({ok: true, message: 'one PX4 cycle queued'})});
+  await start;
+  assert.ok($('action-status').textContent.includes('ACCEPTED (not completed)'));
+  context.dashboard.setTelemetry({...ready, cycle_state: 'WARMUP', flight_actions: {
+    start_cycle: {allowed: false, reason: 'a cycle is already active'},
+    request_dock: {allowed: false, reason: 'busy'},
+  }});
+  assert.equal($('action-start_cycle').disabled, true);
+  const airborne = {...ready, cycle_state: 'HOVER', flight_actions: {
+    start_cycle: {allowed: false, reason: 'not landed'},
+    request_dock: {allowed: true, reason: ''},
+  }};
+  context.dashboard.setTelemetry(airborne);
+  const dock = $('action-request_dock').onclick();
+  assert.ok(confirmations.at(-1).includes('START DOCKING'));
+  assert.deepEqual(actionRequests[1], {action: 'request_dock', confirmed: true});
+  actionPending[1].resolve({ok: false, json: async () => ({ok: false, message: 'PX4 failsafe'})});
+  await dock;
+  assert.ok($('action-status').textContent.includes('NOT ACCEPTED: PX4 failsafe'));
+  const unknown = $('action-request_dock').onclick();
+  actionPending[2].reject(new Error('network lost'));
+  await unknown;
+  assert.ok($('action-status').textContent.includes('OUTCOME UNKNOWN'));
+  context.dashboard.setTelemetry(airborne);
+  assert.equal($('action-request_dock').disabled, true, 'uncertain outcomes latch across polls');
+  assert.equal($('action-acknowledge').hidden, false);
+  assert.equal(actionRequests.length, 3, 'no automatic retry');
+  $('action-acknowledge').onclick();
+  assert.equal($('action-request_dock').disabled, false);
+  const timedOut = $('action-request_dock').onclick();
+  actionPending[3].resolve({ok: false, json: async () => ({ok: false, uncertain: true, message: 'inspect state'})});
+  await timedOut;
+  assert.equal($('action-request_dock').disabled, true);
+  $('action-acknowledge').onclick();
   context.dashboard.setTelemetry(null);
   for (const a of ['x', 'y', 'z', 'yaw']) assert.equal($(`apply-${a}`).disabled, true);
   assert.equal($('download').disabled, true);
   assert.equal($('apply-transition').disabled, true);
   assert.equal($('transition-checks').html, '');
   assert.equal($('transition-checks').children.length, 0);
+  assert.equal($('action-start_cycle').disabled, true);
+  assert.equal($('action-request_dock').disabled, true);
+  await context.dashboard.requestFlightAction('start_cycle');
+  assert.equal(actionRequests.length, 4);
   await context.dashboard.applyGains('yaw');
   assert.equal(requests.length, 4);
   console.log('Four-axis and transition dashboard JavaScript smoke test passed');

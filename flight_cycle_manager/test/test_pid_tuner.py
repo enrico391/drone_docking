@@ -106,7 +106,8 @@ def web_server():
     received = []
     store = TelemetryStore()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_for(
-        store, lambda parameters: received.append(parameters) or {"ok": True, "message": "applied"}))
+        store, lambda parameters: received.append(parameters) or {"ok": True, "message": "applied"},
+        lambda action: received.append({"action": action}) or {"ok": True, "message": "queued"}))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -142,6 +143,21 @@ def test_http_serves_dashboard_state_and_atomic_gain_requests(web_server):
     with pytest.raises(HTTPError) as error:
         urlopen(url + "/camera")
     assert error.value.code == 404
+
+
+def test_http_flight_actions_require_post_confirmation_and_same_origin(web_server):
+    url, received, _ = web_server
+    for action in ("start_cycle", "request_dock"):
+        payload = {"action": action, "confirmed": True}
+        assert request_json(url + "/api/action", payload)[0] == 200
+        assert request_json(url + "/api/action", payload, Origin="http://evil.example")[0] == 403
+        assert request_json(url + "/api/action", payload, **{"Sec-Fetch-Site": "cross-site"})[0] == 403
+    for payload in ({"action": "start_cycle"}, {"action": "arm", "confirmed": True}):
+        assert request_json(url + "/api/action", payload)[0] == 400
+    with pytest.raises(HTTPError) as error:
+        urlopen(url + "/api/action")
+    assert error.value.code == 404
+    assert received == [{"action": "start_cycle"}, {"action": "request_dock"}]
 
 
 def test_dashboard_shows_only_pose_tracking_with_fixed_scales_and_gains():

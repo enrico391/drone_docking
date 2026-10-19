@@ -22,6 +22,7 @@ from rclpy.serialization import deserialize_message, serialize_message
 from std_srvs.srv import Trigger
 
 from flight_cycle_manager.landing_backend import VelocityCommand, VelocityFrame
+from flight_cycle_manager.pid_tuner import FLIGHT_ACTIONS, FlightActionBridge, parse_action_request
 from flight_cycle_manager.px4_control import dds_topic, velocity_to_ned
 from flight_cycle_manager.px4_manager import Px4FlightCycleManager
 
@@ -124,7 +125,8 @@ def test_cycle_uses_acks_and_status_before_climbing(manager):
 
 
 def test_start_requires_fresh_disarmed_landed_preflight(manager):
-    assert not manager._start(None, Trigger.Response()).success
+    assert manager._start(None, Trigger.Response()).message == \
+        "waiting for initial PX4 status, position and land telemetry"
     telemetry(manager, armed=True)
     assert not manager._start(None, Trigger.Response()).success
     telemetry(manager, landed=False)
@@ -135,6 +137,27 @@ def test_start_requires_fresh_disarmed_landed_preflight(manager):
     telemetry(manager)
     manager._local.xy_valid = False
     assert not manager._start(None, Trigger.Response()).success
+
+
+def test_dashboard_actions_report_identical_manager_prerequisites(manager):
+    assert manager._start_cycle_blocker() == \
+        "waiting for initial PX4 status, position and land telemetry"
+    assert manager._request_dock_blocker() == \
+        "waiting for initial PX4 status, position and land telemetry"
+    assert manager._start(None, Trigger.Response()).message == \
+        "waiting for initial PX4 status, position and land telemetry"
+    start_to_hover(manager)
+    assert manager._state == "HOVER"
+    assert manager._start_cycle_blocker() == "a cycle is already active"
+    assert manager._request_dock_blocker() == ""
+    captured = []
+    manager._debug_pub.publish = captured.append
+    manager._publish_pid_debug(manager._now(), None, "HOVER")
+    actions = json.loads(captured[-1].data)["flight_actions"]
+    assert actions == {
+        "start_cycle": {"allowed": False, "reason": "a cycle is already active"},
+        "request_dock": {"allowed": True, "reason": ""},
+    }
 
 
 def test_ground_heading_waits_for_px4_inflight_alignment(manager):
@@ -447,6 +470,72 @@ def test_telemetry_loss_stops_even_with_sim_clock_paused(manager):
     manager._tick()
     assert manager._state == "LINK_LOSS"
     assert manager._state not in manager.STREAM_STATES
+
+
+class _TriggerClient:
+    def __init__(self, node, action):
+        self._node = node
+        self._service = getattr(node, "_start_service" if action == "start_cycle" else "_dock_service")
+        self.calls = 0
+
+    def service_is_ready(self):
+        return True
+
+    def call_async(self, request):
+        self.calls += 1
+
+        class Completed:
+            @staticmethod
+            def done():
+                return True
+
+            @staticmethod
+            def result():
+                return self._service.callback(request, Trigger.Response())
+
+        return Completed()
+
+
+def test_bridge_triggers_real_manager_services_with_identical_safety_checks(manager):
+    from concurrent.futures import ThreadPoolExecutor
+    from flight_cycle_manager.pid_tuner import TelemetryStore
+
+    assert FLIGHT_ACTIONS == ("start_cycle", "request_dock")
+    telemetry(manager)
+    store = TelemetryStore(now=lambda: manager._now())
+    store.update('{"flight_actions":{"start_cycle":{"allowed":true,"reason":""},"request_dock":{"allowed":true,"reason":""}}}')
+    clients = {action: _TriggerClient(manager, action) for action in FLIGHT_ACTIONS}
+    bridge = FlightActionBridge(store, clients, Trigger.Request, now=lambda: manager._now())
+    assert parse_action_request({"action": "start_cycle", "confirmed": True}) == "start_cycle"
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        result = workers.submit(bridge.submit, "start_cycle")
+        while bridge._work is None:
+            bridge.process()
+        assert clients["start_cycle"].calls == 0  # HTTP thread never executes ROS calls.
+        bridge.process()
+        assert clients["start_cycle"].calls == 1
+        bridge.process()
+        assert result.result(timeout=1) == {"ok": True, "message": "one PX4 cycle queued"}
+        bridge.process()
+    assert manager._state == "WARMUP"
+    store.update('{"flight_actions":{"start_cycle":{"allowed":false,"reason":"a cycle is already active"},'
+                 '"request_dock":{"allowed":false,"reason":"a cycle is already active"}}}')
+    assert bridge.submit("request_dock")["message"] == "a cycle is already active"
+    manager._state = "HOVER"
+    manager.test_clock[0] += 0.05
+    telemetry(manager, armed=True, landed=False, offboard=True, z=-1)
+    store.update('{"flight_actions":{"start_cycle":{"allowed":false,"reason":"a cycle is already active"},'
+                 '"request_dock":{"allowed":true,"reason":""}}}')
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        result = workers.submit(bridge.submit, "request_dock")
+        while bridge._work is None:
+            bridge.process()
+        bridge.process()
+        assert result.result(timeout=1) == {"ok": True, "message": "dock search started"}
+        bridge.process()
+    assert manager._state == "SEARCH_DOCK"
+    assert clients["start_cycle"].calls == 1
+    assert clients["request_dock"].calls == 1
 
 
 def test_estimator_reset_requests_native_land(manager):

@@ -178,6 +178,11 @@ class Px4FlightCycleManager(Node):
             diagnostics=diagnostics, parameters=self._p,
         )
         data["cycle_state"] = self._state
+        data["flight_actions"] = {
+            name: {"allowed": not reason, "reason": reason}
+            for name, reason in (("start_cycle", self._start_cycle_blocker()),
+                                 ("request_dock", self._request_dock_blocker()))
+        }
         self._debug_pub.publish(String(data=json.dumps(data, allow_nan=False)))
 
     def _topic(self, direction, name, message_type):
@@ -257,18 +262,37 @@ class Px4FlightCycleManager(Node):
     def _armed(self):
         return self._status.arming_state == VehicleStatus.ARMING_STATE_ARMED
 
+    def _telemetry_missing(self):
+        return self._status is None or self._local is None or self._land is None
+
+    def _start_cycle_blocker(self):
+        if self._state not in self.IDLE_STATES:
+            return "a cycle is already active"
+        if self._telemetry_missing():
+            return "waiting for initial PX4 status, position and land telemetry"
+        if not self._fresh():
+            return "fresh valid PX4 status, position, heading and land telemetry required"
+        if self._armed() or not self._land.landed:
+            return "start requires disarmed and landed PX4"
+        if self._status.failsafe or not self._status.pre_flight_checks_pass:
+            return "PX4 preflight checks have not passed"
+        return ""
+
+    def _request_dock_blocker(self):
+        if self._telemetry_missing():
+            return "waiting for initial PX4 status, position and land telemetry"
+        if not (self._state in self.IDLE_STATES | {"HOVER"} and self._fresh()
+                and self._armed() and not self._land.landed
+                and self._local.heading_good_for_control and not self._status.failsafe):
+            return ("docking requires an idle manager and fresh, armed, airborne PX4 "
+                    "with valid heading and no failsafe")
+        return ""
+
     def _start(self, request, response):
         del request
-        response.success = False
-        if self._state not in self.IDLE_STATES:
-            response.message = "a cycle is already active"
-        elif not self._fresh():
-            response.message = "fresh valid PX4 status, position, heading and land telemetry required"
-        elif self._armed() or not self._land.landed:
-            response.message = "start requires disarmed and landed PX4"
-        elif self._status.failsafe or not self._status.pre_flight_checks_pass:
-            response.message = "PX4 preflight checks have not passed"
-        else:
+        response.message = self._start_cycle_blocker()
+        response.success = not response.message
+        if response.success:
             self._prepare_entry("TAKEOFF")
             self._transition("WARMUP", "streaming position hold before Offboard request")
             response.success, response.message = True, "one PX4 cycle queued"
@@ -276,12 +300,8 @@ class Px4FlightCycleManager(Node):
 
     def _request_dock(self, request, response):
         del request
-        response.success = (self._state in self.IDLE_STATES | {"HOVER"} and self._fresh()
-                            and self._armed() and not self._land.landed
-                            and self._local.heading_good_for_control
-                            and not self._status.failsafe)
-        response.message = ("docking requires an idle manager and fresh, armed, airborne PX4 "
-                            "with valid heading and no failsafe")
+        response.message = self._request_dock_blocker()
+        response.success = not response.message
         if response.success:
             self._prepare_entry("DOCK")
             if self._offboard_acquired:

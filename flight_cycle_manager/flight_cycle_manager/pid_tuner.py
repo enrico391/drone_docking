@@ -12,6 +12,16 @@ import time
 from .px4_control import LIVE_TRANSITION_PARAMETERS, PID_AXES
 
 
+FLIGHT_ACTIONS = ("start_cycle", "request_dock")
+
+
+def parse_action_request(payload):
+    if (not isinstance(payload, dict) or set(payload) != {"action", "confirmed"}
+            or payload["action"] not in FLIGHT_ACTIONS or payload["confirmed"] is not True):
+        raise ValueError("a supported flight action and confirmed: true are required")
+    return payload["action"]
+
+
 def parse_gain_request(payload):
     """Update one complete axis in the base, near or far gain bank."""
     if not isinstance(payload, dict) or payload.get("axis") not in PID_AXES:
@@ -74,7 +84,7 @@ class TelemetryStore:
                     "telemetry": deepcopy(self._telemetry) if fresh else None}
 
 
-def _handler_for(telemetry, submit):
+def _handler_for(telemetry, submit, submit_action=None):
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
             super().setup()
@@ -100,7 +110,7 @@ def _handler_for(telemetry, submit):
                 self.send_error(404)
 
         def do_POST(self):  # noqa: N802
-            if self.path not in ("/api/gains", "/api/transition"):
+            if self.path not in ("/api/gains", "/api/transition", "/api/action"):
                 self.send_error(404)
                 return
             # Do not let another website issue control requests to localhost.
@@ -113,12 +123,17 @@ def _handler_for(telemetry, submit):
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= 4096:
                     raise ValueError("invalid request size")
-                parse = parse_gain_request if self.path == "/api/gains" else parse_transition_request
+                parse = {"/api/gains": parse_gain_request, "/api/transition": parse_transition_request,
+                         "/api/action": parse_action_request}[self.path]
                 parameters = parse(json.loads(self.rfile.read(length)))
             except (TypeError, ValueError, OverflowError, OSError) as error:
                 self._reply(400, {"ok": False, "message": str(error)})
                 return
-            result = submit(parameters)
+            if self.path == "/api/action":
+                result = (submit_action(parameters) if submit_action else
+                          {"ok": False, "message": "flight actions unavailable"})
+            else:
+                result = submit(parameters)
             self._reply(200 if result.get("ok") else 503, result)
 
         def log_message(self, _format, *_args):
@@ -135,6 +150,94 @@ class _GainWork:
     result: dict | None = None
 
 
+class FlightActionBridge:
+    """Single-flight HTTP-to-ROS Trigger bridge; dispatch only in the ROS executor."""
+
+    def __init__(self, telemetry, clients, request_factory, *, now=time.monotonic):
+        self._telemetry, self._clients = telemetry, clients
+        self._request_factory, self._now = request_factory, now
+        self._lock = threading.RLock()
+        self._work = self._action = self._future = None
+
+    def _blocker(self, action):
+        state = self._telemetry.snapshot()
+        if not state["connected"]:
+            return "fresh manager telemetry required"
+        info = (state["telemetry"].get("flight_actions") or {}).get(action) or {}
+        if info.get("allowed") is not True:
+            return info.get("reason") or "manager has not enabled this action"
+        return ""
+
+    def submit(self, action):
+        if action not in FLIGHT_ACTIONS:
+            return {"ok": False, "message": "unsupported flight action"}
+        with self._lock:
+            if self._work is not None:
+                return {"ok": False, "message": "a flight request is already pending; do not retry"}
+            reason = self._blocker(action)
+            if reason:
+                return {"ok": False, "message": reason}
+            work = _GainWork({}, deadline=self._now() + 3.0)
+            self._work, self._action = work, action
+        try:
+            got = work.done.wait(3.2)
+        except Exception:
+            got = False
+        if not got:
+            with self._lock:
+                terminal = (
+                    work.result is not None
+                    or (self._work is work and self._now() >= work.deadline and self._future is None)
+                )
+            if terminal:
+                return work.result
+            return self._unknown_result()
+        if work.result is None:
+            return self._unknown_result()
+        return work.result
+
+    @staticmethod
+    def _unknown_result():
+        return {"ok": False, "uncertain": True,
+                "message": "Flight request outcome unknown; inspect vehicle and manager state. "
+                           "Do not retry automatically."}
+
+    def process(self):
+        with self._lock:
+            work = self._work
+            if work is None:
+                return
+            if self._future is None:
+                reason = self._blocker(self._action)
+                client = self._clients[self._action]
+                if self._now() >= work.deadline or reason or not client.service_is_ready():
+                    work.result = {"ok": False, "message": reason or "service unavailable or request expired; not sent"}
+                else:
+                    try:
+                        self._future = client.call_async(self._request_factory())
+                    except Exception:
+                        work.result = self._unknown_result()
+            if self._future is not None:
+                if not self._future.done() and self._now() < work.deadline:
+                    return
+                try:
+                    if not self._future.done():
+                        self._future.cancel()
+                        work.result = self._unknown_result()
+                    else:
+                        response = self._future.result()
+                        if response is None or not hasattr(response, "success"):
+                            work.result = self._unknown_result()
+                        else:
+                            work.result = {"ok": bool(response.success),
+                                           "message": getattr(response, "message", "") or ""}
+                except Exception:
+                    work.result = self._unknown_result()
+            if work.result is not None:
+                work.done.set()
+                self._work = self._action = self._future = None
+
+
 def main(args=None):
     import rclpy
     from rcl_interfaces.srv import SetParametersAtomically
@@ -143,6 +246,7 @@ def main(args=None):
     from rclpy.node import Node
     from rclpy.parameter import Parameter
     from std_msgs.msg import String
+    from std_srvs.srv import Trigger
 
     class PidTunerNode(Node):
         def __init__(self):
@@ -156,9 +260,15 @@ def main(args=None):
             self._active = None
             self._client = self.create_client(
                 SetParametersAtomically, target + "/set_parameters_atomically")
+            self.actions = FlightActionBridge(self.telemetry, {
+                action: self.create_client(Trigger, target + "/" + action)
+                for action in FLIGHT_ACTIONS
+            }, Trigger.Request)
             self.create_subscription(String, target + "/pid_debug",
                                      lambda message: self.telemetry.update(message.data), 10)
             self.create_timer(0.05, self._process_work,
+                              clock=Clock(clock_type=ClockType.STEADY_TIME))
+            self.create_timer(0.05, self.actions.process,
                               clock=Clock(clock_type=ClockType.STEADY_TIME))
 
         def submit(self, parameters):
@@ -208,7 +318,8 @@ def main(args=None):
         if not 1 <= port <= 65535:
             raise ValueError("port must be in [1, 65535]")
         host = node.get_parameter("host").value
-        server = ThreadingHTTPServer((host, port), _handler_for(node.telemetry, node.submit))
+        server = ThreadingHTTPServer((host, port), _handler_for(
+            node.telemetry, node.submit, node.actions.submit))
         server.daemon_threads = True
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -243,6 +354,17 @@ small,p{color:#cbd5e1}strong{color:#60a5fa}.bad{color:#fca5a5}table{width:100%;t
 @media(max-width:750px){.plots,.axis-controls{grid-template-columns:1fr}}
 </style></head><body><main>
 <h1>Dock pose PID tuner</h1><p id="connection" role="status">Waiting for flight_cycle_manager</p>
+<section class="card"><h2>Flight actions</h2>
+<p class="bad">WARNING: these controls initiate real vehicle movement. Keep the flight area clear and the RC override available.</p>
+<div class="row"><button id="action-start_cycle" disabled>Start cycle — arm &amp; take off</button>
+<button id="action-request_dock" disabled>Request dock — search &amp; land</button></div>
+<p id="action-availability-start_cycle">Waiting for manager prerequisites</p>
+<p id="action-availability-request_dock">Waiting for manager prerequisites</p>
+<p id="action-status" role="status">No flight request sent</p>
+<button id="action-acknowledge" hidden>Acknowledge: I checked the vehicle and manager state</button>
+<small>Start cycle takes off and hovers; docking requires a separate request. Request dock can acquire Offboard from manual flight.
+Each action requires confirmation. Acceptance means queued/started, NOT completed. No automatic retries.
+These are not emergency-stop controls; use the configured pilot override for intervention.</small></section>
 <section class="card"><h2>Live gains</h2>
 <div class="axis-controls" id="axis-controls"></div>
 <p><button id="download" disabled>Download YAML</button></p>
@@ -280,6 +402,38 @@ const axes=['x','y','z','yaw'], gains=['kp','ki','kd'];
 const $=id=>document.getElementById(id), finite=v=>typeof v==='number'&&Number.isFinite(v);
 const display=(v,a)=>finite(v)?(a==='yaw'?v*180/Math.PI:v).toFixed(3)+(a==='yaw'?' °':' m'):'—';
 let latest=null, lastTime=null, samples=[];
+const flightActions={start_cycle:'Start cycle — arm & take off',request_dock:'Request dock — search & land'};
+const flightRequest={pending:false,uncertain:false};
+function renderFlightActions(){
+  Object.entries(flightActions).forEach(([action,label])=>{
+    const info=latest?.flight_actions?.[action];
+    $(`action-${action}`).disabled=!latest||info?.allowed!==true||flightRequest.pending||flightRequest.uncertain;
+    $(`action-availability-${action}`).textContent=label+': '+(!latest?'Disconnected / stale telemetry':
+      info?.allowed===true?'Manager prerequisites satisfied':info?.reason||'Action eligibility unavailable');
+  });
+  $('action-acknowledge').hidden=!flightRequest.uncertain;
+}
+async function requestFlightAction(action){
+  if(!Object.hasOwn(flightActions,action)||$(`action-${action}`).disabled)return;
+  const warning=action==='start_cycle'?
+    'ARM AND TAKE OFF? The vehicle will acquire Offboard, arm, take off and hover. Confirm the area is clear and RC override is ready.':
+    'START DOCKING? The airborne vehicle may switch to Offboard, search for the dock and land. Confirm the area is clear and RC override is ready.';
+  if(!window.confirm(warning))return;
+  flightRequest.pending=true;renderFlightActions();
+  $('action-status').textContent='Sending '+flightActions[action]+'; do not repeat the request.';
+  try{
+    const response=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action,confirmed:true}),signal:AbortSignal.timeout(5000)});
+    const result=await response.json();
+    flightRequest.uncertain=result.uncertain===true;
+    $('action-status').textContent=(result.uncertain?'OUTCOME UNKNOWN: ':response.ok&&result.ok?'ACCEPTED (not completed): ':'NOT ACCEPTED: ')+result.message;
+  }catch(error){
+    flightRequest.uncertain=true;
+    $('action-status').textContent='OUTCOME UNKNOWN: '+error.message+'. Inspect vehicle and manager state before any further request; do not retry automatically.';
+  }finally{flightRequest.pending=false;renderFlightActions()}
+}
+Object.keys(flightActions).forEach(action=>$(`action-${action}`).onclick=()=>requestFlightAction(action));
+$('action-acknowledge').onclick=()=>{flightRequest.uncertain=false;renderFlightActions()};
 const editors=Object.fromEntries(axes.map(a=>[a,{dirty:false,applying:false}]));
 const transitionFields=[
   ['touchdown_commit_height_m','Approach height (m)'],
@@ -363,6 +517,7 @@ function renderTransition(){
   });
 }
 function render(){
+  renderFlightActions();
   const p=latest?.measured_pose,e=latest?.error;
   axes.forEach(a=>{
     $(`measured-${a}`).textContent=display(p?.[a],a);

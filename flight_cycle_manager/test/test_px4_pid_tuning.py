@@ -200,6 +200,27 @@ def test_real_http_tuner_applies_gains_via_ros_service(manager, tmp_path):
             assert status == 200, result
             assert manager.get_parameter("pid_alignment_stable_time_s").value == .65
             assert manager._landing._controller._config.alignment_stable_time_s == .65
+            manager._publish_pid_debug(manager._now(), dock, "HOVER")
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                # Report the manager's own decision to the browser, then dispatch the ROS trigger.
+                future = workers.submit(request_json, url + "/api/action",
+                                        {"action": "request_dock", "confirmed": True})
+                while not future.done():
+                    executor.spin_once(timeout_sec=.05)
+                status, result = future.result()
+            assert status == 503, result
+            assert "docking requires an idle manager" in result["message"]
+            manager._state = "HOVER"
+            telemetry(manager, armed=True, landed=False, offboard=True, z=-3)
+            manager._publish_pid_debug(manager._now(), dock, "HOVER")
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                future = workers.submit(request_json, url + "/api/action",
+                                        {"action": "request_dock", "confirmed": True})
+                while not future.done():
+                    executor.spin_once(timeout_sec=.05)
+                status, result = future.result()
+            assert status == 200, result
+            assert manager._state == "SEARCH_DOCK"
         finally:
             executor.shutdown()
             process.terminate()
