@@ -5,9 +5,13 @@
   <description>Gazebo models, worlds, and launch files for autonomous drone docking.</description>
   <maintainer email="user@example.com">Enrico</maintainer>
   <license>MIT</license>
+  <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <depend>gz-sim8</depend>
+  <depend>gz-plugin2</depend>
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>ardupilot_gazebo</exec_depend>

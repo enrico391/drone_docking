@@ -16,8 +16,9 @@
       name="gz::sim::systems::UserCommands"/>
     <plugin filename="gz-sim-apply-link-wrench-system"
       name="gz::sim::systems::ApplyLinkWrench"/>
-    <plugin filename="gz-sim-scene-broadcaster-system"
-      name="gz::sim::systems::SceneBroadcaster"/>
+    <!-- GUI state throttling must not use the host's adjustable UTC clock. -->
+    <plugin filename="drone_scene_broadcaster"
+      name="drone_description::MonotonicSceneBroadcaster"/>
     <plugin filename="gz-sim-air-pressure-system"
       name="gz::sim::systems::AirPressure"/>
     <plugin filename="gz-sim-air-speed-system"

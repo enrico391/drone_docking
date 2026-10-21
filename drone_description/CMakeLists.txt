@@ -3,6 +3,21 @@ project(drone_description)
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
+find_package(gz-sim8 REQUIRED)
+find_package(gz-plugin2 REQUIRED COMPONENTS register)
+
+# Keep GUI state flowing when WSL or NTP steps CLOCK_REALTIME backwards.
+# Use a distinct library and plugin alias; never replace the system plugin.
+add_library(drone_scene_broadcaster SHARED
+  vendor/gz_sim8_8_15_0/SceneBroadcaster.cc)
+target_compile_features(drone_scene_broadcaster PRIVATE cxx_std_17)
+target_link_libraries(drone_scene_broadcaster PRIVATE
+  gz-sim8::gz-sim8 gz-plugin2::gz-plugin2-register)
+install(TARGETS drone_scene_broadcaster
+  LIBRARY DESTINATION lib/${PROJECT_NAME})
+install(FILES vendor/gz_sim8_8_15_0/LICENSE
+  vendor/gz_sim8_8_15_0/README.md
+  DESTINATION share/${PROJECT_NAME}/vendor/gz_sim8_8_15_0)
 
 ament_python_install_package(${PROJECT_NAME})
 
@@ -92,6 +107,8 @@ if(BUILD_TESTING)
     test/test_camera_latency_launch.py TIMEOUT 30)
   ament_add_pytest_test(px4_launch_test
     test/test_px4_launch.py TIMEOUT 30)
+  ament_add_pytest_test(scene_broadcaster_test
+    test/test_scene_broadcaster.py TIMEOUT 90)
 endif()
 
 ament_package()

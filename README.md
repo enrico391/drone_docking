@@ -147,6 +147,32 @@ ros2 launch drone_description px4_docking.launch.py \
 ros2 service call /flight_cycle_manager/start_cycle std_srvs/srv/Trigger "{}"
 ```
 
+## Drone appears frozen despite 100% real-time factor
+
+The docking world uses the package-local `MonotonicSceneBroadcaster`. Gazebo
+8.15's original broadcaster schedules GUI state updates with the adjustable
+wall clock. Backwards WSL/NTP clock steps can suppress these updates for seconds
+even while physics, motor commands and the camera run normally. This makes the
+drone jump between positions and its propellers appear stopped.
+
+The local broadcaster preserves upstream behavior except that its publication
+timer uses a monotonic clock. It does not change PX4, flight dynamics, camera
+rendering or the system clock, and does not overwrite Gazebo's installed library.
+The vendored source and license are documented under
+`drone_description/vendor/gz_sim8_8_15_0`.
+
+After rebuilding `drone_description`, source the workspace again before launching
+so Gazebo can find the local plugin:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/enri-ubuntu/drone_ws
+colcon build --symlink-install --packages-select drone_description
+source /home/enri-ubuntu/drone_ws/install/setup.bash
+ros2 launch drone_description px4_docking.launch.py \
+  initial_point:=dock use_flight_cycle_manager:=true auto_start:=false
+```
+
 ## Downward camera
 
 The active vehicle publishes the simulated camera through the ROS-Gazebo
