@@ -372,6 +372,12 @@ after importing saved BSON parameters and before starting the simulator and
 controllers. This prevents fresh or previously configured rootfs directories
 from silently using stock-x500 thrust scaling and allocation geometry.
 
+The profile also sets `UXRCE_DDS_SYNCT=0`, keeping DDS timestamps in PX4
+boot/simulation time. The ROS docking manager and `px4_sysid` stamp commands
+from local-position telemetry. This avoids WSL/NTP wall-clock corrections
+entering the identification timebase. Restart PX4 after changing this setting;
+ROS clients using this profile must use FC-domain timestamps for commands.
+
 ```text
 MPC_THR_HOVER     0.38      # docking airframe, normalised thrust domain
 THR_MDL_FAC       0.74      # quadratic motor thrust curve

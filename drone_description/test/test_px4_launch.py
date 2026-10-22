@@ -64,6 +64,9 @@ def test_px4_applies_profile_before_starting_controllers(tmp_path, monkeypatch):
     assert environment['PX4_PARAM_MPC_THR_HOVER'] == '0.38'
     assert environment['PX4_PARAM_THR_MDL_FAC'] == '0.74'
     assert environment['PX4_PARAM_NAV_DLL_ACT'] == '0'
+    # The controller echoes boot-time telemetry timestamps. Translating them
+    # through WSL's wall clock corrupts the experiment when UTC steps.
+    assert environment['PX4_PARAM_UXRCE_DDS_SYNCT'] == '0'
 
     model = ET.parse(ROOT / 'models/x500_px4_base/model.sdf')
     for rotor in range(4):

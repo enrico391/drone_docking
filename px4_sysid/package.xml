@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>px4_sysid</name>
+  <version>0.1.0</version>
+  <description>PX4 Offboard velocity system identification for the outer docking PID.</description>
+  <maintainer email="user@example.com">Enrico</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>px4_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>builtin_interfaces</test_depend>
+  <test_depend>rosgraph_msgs</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

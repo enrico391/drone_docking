@@ -306,7 +306,8 @@ and its configuration belong to `drone_description`, not this package.
 - Position-mode takeoff allows PX4's expected in-flight magnetic yaw alignment;
   body-velocity docking requires final heading alignment.
 - ENU/body-FLU commands and yaw rates are converted to PX4 local NED.
-- Transport timestamps follow PX4's adjusted DDS telemetry clock. Pose-age
+- Transport timestamps follow PX4's DDS telemetry clock (boot/simulation time
+  with `UXRCE_DDS_SYNCT=0` in the docking SITL profile). Pose-age
   checks use Gazebo time; command/telemetry watchdogs use monotonic time and
   continue running while Gazebo is paused.
 - Telemetry loss stops Offboard streaming, leaving PX4's configured

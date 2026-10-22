@@ -21,6 +21,13 @@ COM_RC_IN_MODE      4
 COM_OF_LOSS_T       1.0
 COM_OBL_RC_ACT      4
 
+# Keep DDS timestamps in PX4 boot/simulation time. Both ROS controllers echo
+# VehicleLocalPosition timestamps for commands; px4_sysid also uses this clock
+# for excitation and fitting. DDS's default UTC translation jumps when WSL/NTP
+# corrects the Agent clock, causing false FC resets and skipped signal phases.
+# This parameter requires a PX4 restart; do not change it during a flight.
+UXRCE_DDS_SYNCT     0
+
 # Do not auto-disarm while sitting armed on the ground before a scripted
 # takeoff (PX4 default disarms after COM_DISARM_PRFLT seconds).
 COM_DISARM_PRFLT     0

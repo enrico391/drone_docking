@@ -79,6 +79,13 @@ def load_run(directory, dt=.02, timebase="auto", max_gap=.15, allow_partial=Fals
         timebase="fc"
         sync={"mode":"simulation","command_clock":"fc_boot_s"}
         notices.append("Simulation run: durations, frequencies and model parameters use FC seconds.")
+    elif meta.get("transport") == "px4_offboard_dds" and timebase in ("auto", "fc"):
+        ct=column(commands,"fc_boot_s")
+        increasing(ct,"command FC")
+        timebase="fc"
+        sync={"mode":"px4_dds","command_clock":"fc_boot_s",
+              "note":"VehicleLocalPosition.timestamp is FC time; no TIMESYNC required"}
+        notices.append("PX4 DDS run: fc_boot_s is VehicleLocalPosition.timestamp/1e6.")
     elif timebase in ("auto","fc"):
         try:
             offset,sync=sync_offset(meta,th,tf)
