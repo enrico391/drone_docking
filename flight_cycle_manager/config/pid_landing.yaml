@@ -17,7 +17,10 @@ flight_cycle_manager:
     # Arrival band around the approach height; debug hold targets the exact height.
     pid_approach_height_tolerance_m: 0.02
     pid_touchdown_speed_m_s: 0.15
-    pid_touchdown_timeout_s: 15.0
+    # Allow PX4's velocity integrator to reduce thrust after physical contact,
+    # then complete land detection and the stable-landed dwell. In the RC1 log
+    # this reduction alone took about 11 simulation seconds at 0.15 m/s.
+    pid_touchdown_timeout_s: 30.0
     pid_landed_state_timeout_s: 1.0
     pid_landed_stable_time_s: 0.5
     pid_disarm_retry_period_s: 1.0
@@ -92,13 +95,13 @@ flight_cycle_manager:
     pid_y_k_v: 0.0
     pid_z_k_v: 0.0
 
-    pid_x_kp: 0.60
-    pid_x_ki: 0.01
+    pid_x_kp: 1.2242
+    pid_x_ki: 0.021439
     pid_x_kd: 0.00
     pid_x_integral_limit: 0.1
     pid_x_derivative_filter_time_constant_s: 0.1
-    pid_y_kp: 0.60
-    pid_y_ki: 0.01
+    pid_y_kp: 1.1592
+    pid_y_ki: 0.020302
     pid_y_kd: 0.00
     pid_y_integral_limit: 0.1
     pid_y_derivative_filter_time_constant_s: 0.1
