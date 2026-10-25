@@ -45,7 +45,7 @@ The hardware setup uses:
 - Pixhawk 6c
 - Raspberry Pi 4 
 - Downward-facing camera (pi camera v2 clone) 
-- custom docking base with magnetic landing pad
+- custom docking base with magnetic landing pad with charging contacts and UART communication contact to communicate between the drone and the docking station
 - BMS for Li-on battery adapted to be used with Lipo battery (4s 5000mAh)
 
 Here are some pictures of the current hardware setup:
@@ -60,6 +60,10 @@ Here are some pictures of the current hardware setup:
 - ROS 2 Lyrical : I'm using this ROS2 version because I need ubuntu 26.04 for the camera driver.
 - PX4 v1.18.0-rc1 : Compatible with ROS2 Lyrical and the `px4_msgs` definitions in this repository.
 
+
+## Next steps in the hardware setup:
+- Finish the system identification and PID tuning to get a reliable landing on the dock.
+- Start the building of the docking station with a magnetic landing pad and electronics
 
 
 ## Build
