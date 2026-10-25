@@ -7,6 +7,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 import pytest
+import yaml
 from launch import LaunchContext
 from launch.actions import DeclareLaunchArgument
 
@@ -88,6 +89,19 @@ def test_profile_parser_accepts_whitespace_and_comments(tmp_path):
     profile.write_text('# header\nMPC_THR_HOVER\t0.38 # hover\n\n')
     assert module._parameter_environment(profile) == {
         'PX4_PARAM_MPC_THR_HOVER': '0.38'}
+
+
+def test_pid_touchdown_speed_satisfies_px4_land_detector_descent_gate():
+    module = load_launch('sitl_px4.launch.py')
+    profile = module._parameter_environment(ROOT / 'config/px4_sitl_docking.parm')
+    pid = yaml.safe_load((
+        ROOT.parent / 'flight_cycle_manager/config/pid_landing.yaml'
+    ).read_text())['flight_cycle_manager']['ros__parameters']
+    # RC1 MulticopterLandDetector requires a downward setpoint >= 1.1 times
+    # LNDMC_Z_VEL_MAX before ground contact can latch. Its default is 0.25 m/s.
+    vertical_motion_threshold = float(profile.get('PX4_PARAM_LNDMC_Z_VEL_MAX', 0.25))
+    assert 0 < vertical_motion_threshold
+    assert pid['pid_touchdown_speed_m_s'] >= 1.1 * vertical_motion_threshold
 
 
 @pytest.mark.parametrize('text', [

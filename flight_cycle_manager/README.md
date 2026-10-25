@@ -320,6 +320,15 @@ and its configuration belong to `drone_description`, not this package.
 - The SITL profile selects no-RC input and Offboard-loss LAND. Real hardware
   requires a separately reviewed profile.
 
+The final PID descent remains 0.15 m/s. The paired PX4 SITL profile sets
+`LNDMC_Z_VEL_MAX=0.10`: RC1 requires commanded downward speed to be at least
+`1.1 * LNDMC_Z_VEL_MAX` before it can detect ground contact. The stock 0.25
+threshold prevents landing detection at this descent speed. Keep these two
+profiles consistent when tuning. The touchdown deadline is 30 seconds to allow
+thrust to fall after contact, PX4's landing hysteresis and the manager's stable
+landed dwell. Restart SITL and the manager after changing these profiles;
+disarm still requires fresh PX4 landed telemetry.
+
 The old ArduPilot onboard-mission download/reset and AUTO handoff contract is
 not implemented. PX4's default DDS topics do not expose an equivalent mission
 download protocol. Debug launch modes and touchdown CSV logging
@@ -341,7 +350,12 @@ That flight result is historical, not validation of RC1 flight behavior. The
 RC1 SITL build and disarmed startup/DDS check now pass, including valid local
 position and an accepted prearm-check command ACK. See
 `/home/enri-ubuntu/drone_ws/src/drone_docking/drone_description/PX4_RC1_VALIDATION.md`.
-RC1 takeoff, Offboard tracking and precision touchdown still require validation.
+On 2026-10-24, a headless RC1 run with the matched land-detector threshold and
+30-second touchdown deadline completed takeoff, visual docking, PX4 landing
+detection and ordinary external disarm, reaching `DOCKED` without fallback.
+Touchdown approach to `DISARM` took 16.445 seconds. This is one nominal SITL
+cycle, not hardware or disturbance validation; see
+[`drone_description/PX4_TOUCHDOWN_VALIDATION.md`](../drone_description/PX4_TOUCHDOWN_VALIDATION.md).
 
 Run the retained package tests in a sourced ROS environment:
 

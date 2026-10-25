@@ -32,6 +32,12 @@ UXRCE_DDS_SYNCT     0
 # takeoff (PX4 default disarms after COM_DISARM_PRFLT seconds).
 COM_DISARM_PRFLT     0
 
+# The PID final descent is 0.15 m/s. RC1's land detector requires a downward
+# velocity setpoint >= 1.1 * LNDMC_Z_VEL_MAX to recognize ground contact.
+# The stock 0.25 m/s threshold requires >=0.275 m/s and blocks this landing.
+# Keep this below pid_touchdown_speed_m_s / 1.1 when changing either profile.
+LNDMC_Z_VEL_MAX      0.10
+
 # Warning threshold for the controller gains/actuator effectiveness warnings;
 # the default is fine, kept explicit for reproducibility.
 # COM_CPU_MAX / COM_RAM_MAX are intentionally left at their defaults (-1 =
