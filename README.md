@@ -46,6 +46,15 @@ The hardware setup uses:
 - Raspberry Pi 4 
 - Downward-facing camera (pi camera v2 clone) 
 - custom docking base with magnetic landing pad
+- BMS for Li-on battery adapted to be used with Lipo battery (4s 5000mAh)
+
+Here are some pictures of the current hardware setup:
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/a987ca67-990d-4e20-9960-6f9bd79e9cbf" width="320" alt="Docking setup, first view" />
+  <img src="https://github.com/user-attachments/assets/950823d8-ae23-458a-aacf-92ad67502005" width="320" alt="Docking setup, second view" />
+</p>
+
+
 
 #### Software setup on the Raspberry Pi and pixhawk:
 - ROS 2 Lyrical : I'm using this ROS2 version because I need ubuntu 26.04 for the camera driver.
