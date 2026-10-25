@@ -1052,6 +1052,33 @@ def test_touchdown_reference_is_the_last_aligned_tag_position():
     assert holding.velocity.yaw_rate_rad_s == pytest.approx(0.05)
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_touchdown_xy_yaw_commands_can_be_disabled(enabled):
+    backend = start_backend(pid_config(enable_vel_command_x_y_yaw=enabled))
+    committed = enter_touchdown_commitment_with_reference(backend, heading_rad=0.0)
+    assert committed.substate == "TOUCHDOWN_APPROACH"
+
+    decision = backend.update(
+        now=2.9,
+        dock=None,
+        vehicle=vehicle_observation(
+            heading_rad=0.1,
+            position_enu_m=(4.08, -2.02, 4.0),
+        ),
+    )
+
+    assert decision.velocity.velocity_z == pytest.approx(-0.05)
+    if enabled:
+        assert decision.velocity.velocity_x > 0.0
+        assert decision.velocity.velocity_y > 0.0
+        assert decision.velocity.yaw_rate_rad_s == pytest.approx(0.15)
+    else:
+        assert decision.velocity == VelocityCommand(
+            VelocityFrame.BODY_FLU, 0.0, 0.0, -0.05, 0.0,
+        )
+        assert backend.diagnostics()["control_error"] is None
+
+
 def test_touchdown_pulls_the_vehicle_back_onto_the_aperture_axis():
     """Break caught: a disturbance pushes the vehicle off the entry axis."""
     backend = start_backend()

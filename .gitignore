@@ -6,3 +6,6 @@ docs
 */matlab
 drone_sysid/models/*
 drone_sysid/runs/*
+.superpowers
+.pytest_cache
+docs

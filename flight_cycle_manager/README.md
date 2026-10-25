@@ -17,6 +17,13 @@ pose-only PID tuning dashboard is available for docking.
   reusable, transport-independent controllers.
 - `landing_backend.py`, `landing_target.py`: observations and camera/body helpers.
 
+In `config/pid_landing.yaml`, `pid_enable_vel_command_x_y_yaw` controls the final
+`TOUCHDOWN_APPROACH` descent. The shipped value is `false`: X/Y velocity and yaw
+rate are zero, while Z uses `-pid_touchdown_speed_m_s` in body FLU. Set it to `true`
+to use the latched dock position and heading for X/Y/yaw PID commands. Earlier
+visual alignment and descent stages keep their existing control. Restart the
+manager after changing this parameter.
+
 The installed executable remains `px4_flight_cycle_manager`; the ROS node is
 `flight_cycle_manager`. Existing PX4 simulation launch commands are unchanged.
 

@@ -154,7 +154,7 @@ def generate_launch_description():
                 default_value=default_python_executable,
             ),
             DeclareLaunchArgument(
-                "publish_debug_image", default_value="true"
+                "publish_debug_image", default_value="false"
             ),
             DeclareLaunchArgument(
                 "pose_filter_enabled", default_value="true"

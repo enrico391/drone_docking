@@ -16,7 +16,14 @@ flight_cycle_manager:
     pid_approach_braking_accel_m_s2: 0.5
     # Arrival band around the approach height; debug hold targets the exact height.
     pid_approach_height_tolerance_m: 0.05
-    pid_touchdown_speed_m_s: 0.15
+    
+    # INCREASED because in real drone this increased help to avoid the drone drifting away from the dock during the final descent.
+    pid_touchdown_speed_m_s: 0.25
+    # TOUCHDOWN_APPROACH only: true holds the latched X/Y/yaw reference;
+    # false commands zero X/Y velocity and yaw rate, with Z descent only.
+    # Loaded at node startup; restart the manager after changing this setting.
+    pid_enable_vel_command_x_y_yaw: false
+    
     # Allow PX4's velocity integrator to reduce thrust after physical contact,
     # then complete land detection and the stable-landed dwell. In the RC1 log
     # this reduction alone took about 11 simulation seconds at 0.15 m/s.
@@ -32,7 +39,7 @@ flight_cycle_manager:
     pid_outer_yaw_tolerance_rad: 0.6
     pid_central_yaw_tolerance_rad: 0.2
     # Stricter alignment required continuously before committing to touchdown.
-    pid_touchdown_horizontal_tolerance_m: 0.03
+    pid_touchdown_horizontal_tolerance_m: 0.02
     pid_touchdown_yaw_tolerance_rad: 0.1
     # Maximum measured horizontal speed throughout fine-alignment dwell before touchdown.
     pid_touchdown_horizontal_speed_tolerance_m_s: 0.07

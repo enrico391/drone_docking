@@ -5,6 +5,7 @@ from pathlib import Path
 from rclpy.context import Context
 from rclpy.parameter import Parameter
 import rclpy
+import pytest
 import yaml
 
 from flight_cycle_manager.px4_manager import Px4FlightCycleManager
@@ -13,7 +14,8 @@ from flight_cycle_manager.px4_manager import Px4FlightCycleManager
 ROOT = Path(__file__).parents[1]
 
 
-def test_profiles_declare_all_parameters_and_build_shared_controllers(monkeypatch):
+@pytest.mark.parametrize("enable_xy_yaw", [False, True])
+def test_profiles_declare_all_parameters_and_build_shared_controllers(monkeypatch, enable_xy_yaw):
     monkeypatch.setattr("flight_cycle_manager.px4_manager.get_package_share_directory",
                         lambda _: str(ROOT))
     profiles = [yaml.safe_load(path.read_text())["flight_cycle_manager"]["ros__parameters"]
@@ -21,6 +23,7 @@ def test_profiles_declare_all_parameters_and_build_shared_controllers(monkeypatc
     assert len(profiles) == 2
     assert set(profiles[0]).isdisjoint(profiles[1])
     expected = {key: value for profile in profiles for key, value in profile.items()}
+    expected["pid_enable_vel_command_x_y_yaw"] = enable_xy_yaw
     assert not any(key.startswith("mavlink_") or key.startswith("mission_") for key in expected)
     context = Context()
     rclpy.init(context=context)
@@ -32,6 +35,7 @@ def test_profiles_declare_all_parameters_and_build_shared_controllers(monkeypatc
         for name, value in expected.items():
             assert manager.get_parameter(name).value == value
         assert manager._pid_config.x_pid.kp == expected["pid_x_kp"]
+        assert manager._pid_config.enable_vel_command_x_y_yaw is enable_xy_yaw
         assert manager._search_config.timeout_s == expected["search_timeout_s"]
         assert manager._start_service.srv_type.__name__ == "Trigger"
     finally:

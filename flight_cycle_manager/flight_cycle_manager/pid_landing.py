@@ -120,8 +120,11 @@ class PidLandingConfig:
     approach_vertical_response_time_s: float = 0.5
     approach_braking_accel_m_s2: float = 0.5
     approach_height_tolerance_m: float = 0.01
+    enable_vel_command_x_y_yaw: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.enable_vel_command_x_y_yaw, bool):
+            raise ValueError("enable_vel_command_x_y_yaw must be a bool")
         for axis in ("x", "y", "z"):
             value = getattr(self, f"{axis}_k_v")
             if not math.isfinite(value) or value < 0.0:
@@ -969,13 +972,17 @@ class PidLandingController:
     def _touchdown_descent_command(
         self, now: float, vehicle: VehicleObservation,
     ) -> VelocityCommand:
-        """Descend while holding the latched aperture position and orientation.
+        """Descend with optional latched-reference X, Y and yaw control.
 
-        The X, Y and yaw PIDs run exactly as in the visual states, only against
-        the latched reference instead of the camera, so ground effect and wall
-        torque cannot push the vehicle off the entry axis. Missing attitude
-        telemetry falls back to the previous passive descent.
+        When disabled, command zero lateral velocity and yaw rate without
+        running the reference PIDs. Vertical descent remains active in either
+        mode. Missing attitude also falls back to vertical-only descent.
         """
+        if not self._config.enable_vel_command_x_y_yaw:
+            return VelocityCommand(
+                VelocityFrame.BODY_FLU,
+                0.0, 0.0, -self._config.touchdown_speed_m_s, 0.0,
+            )
         position_east_m, position_north_m, _ = self._finite_position(vehicle)
         heading_rad = self._finite_heading(vehicle)
         velocity_x = 0.0
