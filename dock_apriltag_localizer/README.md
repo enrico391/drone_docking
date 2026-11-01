@@ -1,6 +1,8 @@
 # dock_apriltag_localizer
 
-ROS 2 node for two-stage precision docking with multiple AprilTags.
+C++ ROS 2 component and standalone node for two-stage precision docking with
+multiple AprilTags. The combined camera launch loads this component and
+`camera::CameraNode` into one process with intra-process communication enabled.
 
 ## Concept
 - Outer tags: long-range / coarse centering.
@@ -36,40 +38,47 @@ preserved to expose future timestamps or clock mismatch. Capture-age accuracy
 requires acquisition timestamps and synchronized ROS clocks. These ages do
 not include the extra signal lag introduced by pose smoothing.
 
-## Dependencies
+## Dependencies and build
 
-ROS packages:
-```bash
-sudo apt install ros-$ROS_DISTRO-cv-bridge python3-opencv
-```
+The localizer uses native AprilTag, OpenCV, Eigen and yaml-cpp, with no Python
+AprilTag dependency at runtime. Install dependencies through rosdep:
 
-Create a workspace-local Python environment that can also import the ROS 2
-packages installed by apt:
-```bash
-cd /home/ubuntu/drone_ws
-python3 -m venv --system-site-packages apriltag_venv
-touch apriltag_venv/COLCON_IGNORE
-source apriltag_venv/bin/activate
-python -m pip install -r \
-  src/drone_docking/dock_apriltag_localizer/requirements.txt
-```
-
-`COLCON_IGNORE` prevents colcon from interpreting package metadata inside the
-virtual environment as workspace packages.
-
-## Build
 ```bash
 cd /home/ubuntu/drone_ws
 source /opt/ros/lyrical/setup.bash
-source apriltag_venv/bin/activate
-python -m colcon build --symlink-install \
-  --packages-select dock_apriltag_localizer
-source install/setup.bash
+rosdep install --from-paths src/drone_docking/dock_apriltag_localizer --ignore-src -r -y
 ```
 
-Use `python -m colcon`, not the `/usr/bin/colcon` executable. The latter has a
-system-Python shebang and can generate a `dock_localizer` entry point that
-cannot import packages installed only in `apriltag_venv`.
+No virtual environment is needed to build or run the C++ localizer. This package changed from
+`ament_python` to `ament_cmake`; use fresh build/install bases to avoid mixing
+old Python entry points with the new C++ executable:
+
+```bash
+cd /home/ubuntu/drone_ws
+source /opt/ros/lyrical/setup.bash
+python3 -m colcon build --symlink-install \
+  --build-base build_cpp --install-base install_cpp \
+  --packages-select dock_apriltag_localizer \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install_cpp/setup.bash
+```
+
+Source the existing workspace first if you need its other packages, then source
+`install_cpp/setup.bash` last so this C++ package takes precedence. For a clean
+workspace, the usual default `build`/`install` bases also work.
+
+The retained Python localizer/filter source and `requirements.txt` serve only
+as optional regression references and are not installed. The runtime package
+has no Python detector or MAVLink dependencies. The installed `dock_localizer`
+executable is C++.
+
+Run the native tests with:
+
+```bash
+python3 -m colcon test --build-base build_cpp --install-base install_cpp \
+  --packages-select dock_apriltag_localizer --event-handlers console_direct+
+python3 -m colcon test-result --test-result-base build_cpp/dock_apriltag_localizer
+```
 
 ## Run
 ```bash
@@ -78,9 +87,9 @@ ros2 launch dock_apriltag_localizer dock_localizer.launch.py \
   camera_info_topic:=/camera/camera_info
 ```
 
-The launch excludes Python user-site packages (`PYTHONNOUSERSITE=1`) so an
-unrelated `~/.local` NumPy installation cannot shadow the ROS/OpenCV runtime.
-Install localizer dependencies into `apriltag_venv`, not the user site.
+The standalone launch runs the native `dock_localizer` executable directly.
+`python_executable` is accepted as a deprecated compatibility argument for
+existing parent launch files and has no effect on the C++ localizer.
 `use_sim_time` defaults to `false`; set it to `true` when using Gazebo `/clock`.
 When included by the PX4 manager, tag geometry is passed explicitly through
 `localizer_config`, separately from the manager's `config_file`.
@@ -108,14 +117,12 @@ If this command cannot stream from the camera, fix the native camera, kernel,
 or device permissions first. The ROS workaround will not fix a native camera
 failure.
 
-Use the combined launch file to start both `camera_ros/camera_node` and the
-dock localizer:
+Use the combined launch file to compose the camera and dock localizer:
 
 ```bash
 cd /home/ubuntu/drone_ws
 source /opt/ros/lyrical/setup.bash
-source apriltag_venv/bin/activate
-source install/setup.bash
+source install_cpp/setup.bash
 
 ros2 launch dock_apriltag_localizer \
   dock_localizer_with_camera.launch.py
@@ -127,15 +134,28 @@ It starts exactly one localizer plus the driver, defaults to wall-clock time,
 and forwards the camera settings and tag configuration. This is only a camera
 selection; the manager's default flight profile remains SITL-only.
 
-The combined launch modifies the environment of `camera_node` only. It:
+The combined launch starts one `rclcpp_components/component_container_mt`
+process containing `camera::CameraNode` and
+`dock_apriltag_localizer::DockLocalizer`. Both components explicitly enable
+`use_intra_process_comms`. To compare against DDS transport while retaining
+composition, pass `use_intra_process_comms:=false`.
+
+The image subscription uses best-effort, volatile, keep-last depth 1. Incoming
+images are shared as const messages. Native mono8 frames share the grayscale
+buffer directly; RGB/BGR frames need a grayscale conversion for detection.
+Debug annotation always uses a private copy. Intra-process transport avoids
+serialization between these two components; it does not eliminate image-format
+conversion or copies required by additional subscribers.
+
+The libcamera workaround now applies to the shared container process. It:
 
 - prepends `/usr/lib/<multiarch>` to the camera process's
   `LD_LIBRARY_PATH`;
 - selects the system IPA module and proxy under `/usr/lib` and
   `/usr/libexec`;
 - selects tuning data from `/usr/share/libcamera/ipa`;
-- leaves the localizer in the ROS and Python virtual-environment setup, with
-  user-site Python packages excluded to avoid NumPy/OpenCV ABI conflicts.
+- applies the same library environment to the localizer, since both components
+  share one process. The C++ localizer does not load NumPy or pupil-apriltags.
 
 Both nodes use wall-clock time by default. `use_sim_time:=true` explicitly
 selects ROS simulation time for both.
@@ -168,6 +188,7 @@ ros2 launch dock_apriltag_localizer \
 - `/dock/mode`: `OUTER`, `CENTRAL_ACQUIRING`, `CENTRAL`, or `NO_TARGET`.
 - `/dock/visible_tag_ids`
 - `/dock/debug_image`
+- `/dock/timing` (`std_msgs/String`): per-frame JSON timing diagnostics.
 
 ## Pose filter
 
@@ -193,42 +214,6 @@ constant follows motion more closely; a larger value smooths more but adds
 latency. The jump gate allows the configured fixed jump plus the configured
 translation speed multiplied by the sample interval.
 
-## MAVLink dock-pose bridge
-
-For standalone precision-landing debugging, launch the bridge with direct
-access to ArduPilot's MAVLink serial endpoint:
-
-```bash
-ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py
-```
-
-The bridge subscribes to `/dock/pose`, converts the downward camera optical
-position to MAVLink Body-FRD, and sends a position-valid `LANDING_TARGET` for
-every received pose. The MAVLink measurement timestamp comes from the source
-image rather than the bridge transmission time. It uses MAVLink 2 with the
-`ardupilotmega` dialect and connects through `pymavlink` directly; MAVProxy is
-not required. The default endpoint is `/dev/ttyAMA0` at `921600` baud.
-
-The camera origin offset from the vehicle body origin is configurable in
-Body-FRD. For example:
-
-```bash
-ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py \
-  mavlink_connection:=/dev/ttyAMA0 mavlink_baud:=921600 \
-  camera_down_m:=0.206
-```
-
-For SITL, select its direct TCP endpoint instead:
-
-```bash
-ros2 launch dock_apriltag_localizer dock_pose_mavlink.launch.py \
-  mavlink_connection:=tcp:127.0.0.1:5760
-```
-
-Exactly one process should own the selected serial or TCP endpoint. Do not run
-this bridge at the same time as `flight_cycle_manager`, which maintains its own
-direct pymavlink connection unless its launch starts the localizer itself.
-
 ## Pose convention
 
 `/dock/pose` is `T_camera_optical_dock`: the pose of the dock origin expressed
@@ -251,7 +236,9 @@ Edit `config/dock_tags.yaml`, for example:
     rpy_deg: [0.0, 0.0, 0.0]
 ```
 
-Then reload without restarting the node:
+Then reload without restarting the node. Reload replaces the detector and tag
+configuration atomically, resets switching and filtering, and retains the old
+configuration if the new file is invalid:
 ```bash
 ros2 service call /dock_apriltag_localizer/reload_config std_srvs/srv/Trigger '{}'
 ```

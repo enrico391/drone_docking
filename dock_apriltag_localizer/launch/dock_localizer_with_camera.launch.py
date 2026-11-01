@@ -7,7 +7,8 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch_ros.actions import ComposableNodeContainer
+from launch_ros.descriptions import ComposableNode
 from launch_ros.parameter_descriptions import ParameterValue
 
 
@@ -23,19 +24,12 @@ def generate_launch_description():
         "config",
         "ov5647_800x600.yaml",
     )
-    virtual_env = os.environ.get("VIRTUAL_ENV")
-    default_python_executable = (
-        os.path.join(virtual_env, "bin", "python")
-        if virtual_env
-        else "/usr/bin/python3"
-    )
-
     image_topic = LaunchConfiguration("image_topic")
     camera_info_topic = LaunchConfiguration("camera_info_topic")
 
     # ROS Lyrical ships its own libcamera in /opt/ros. On this Raspberry Pi,
     # the Ubuntu/Raspberry Pi camera stack in /usr is the stack matched to the
-    # kernel and firmware, so load it first for the camera process only.
+    # kernel and firmware, so load it first for the shared component container.
     multiarch = sysconfig.get_config_var("MULTIARCH")
     system_library_dir = os.path.join("/usr/lib", multiarch)
     camera_library_path = os.pathsep.join(
@@ -55,12 +49,12 @@ def generate_launch_description():
         "LIBCAMERA_IPA_CONFIG_PATH": "/usr/share/libcamera/ipa",
     }
 
-    camera_node = Node(
+    camera_node = ComposableNode(
         package="camera_ros",
-        executable="camera_node",
+        plugin="camera::CameraNode",
         name="camera",
-        output="screen",
-        additional_env=system_camera_environment,
+        extra_arguments=[{"use_intra_process_comms": ParameterValue(
+            LaunchConfiguration("use_intra_process_comms"), value_type=bool)}],
         parameters=[
             {
                 "use_sim_time": ParameterValue(
@@ -83,13 +77,12 @@ def generate_launch_description():
         ],
     )
 
-    localizer_node = Node(
+    localizer_node = ComposableNode(
         package="dock_apriltag_localizer",
-        executable="dock_localizer",
+        plugin="dock_apriltag_localizer::DockLocalizer",
         name="dock_apriltag_localizer",
-        output="screen",
-        prefix=[LaunchConfiguration("python_executable")],
-        additional_env={"PYTHONNOUSERSITE": "1"},
+        extra_arguments=[{"use_intra_process_comms": ParameterValue(
+            LaunchConfiguration("use_intra_process_comms"), value_type=bool)}],
         parameters=[
             {
                 "use_sim_time": ParameterValue(
@@ -130,9 +123,20 @@ def generate_launch_description():
         ],
     )
 
+    container = ComposableNodeContainer(
+        name="dock_camera_container",
+        namespace="",
+        package="rclcpp_components",
+        executable="component_container_mt",
+        output="screen",
+        additional_env=system_camera_environment,
+        composable_node_descriptions=[camera_node, localizer_node],
+    )
+
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
+            DeclareLaunchArgument("use_intra_process_comms", default_value="true"),
             DeclareLaunchArgument("camera", default_value="0"),
             DeclareLaunchArgument("camera_width", default_value="800"),
             DeclareLaunchArgument("camera_height", default_value="600"),
@@ -151,7 +155,8 @@ def generate_launch_description():
             DeclareLaunchArgument("dock_frame", default_value="dock_target"),
             DeclareLaunchArgument(
                 "python_executable",
-                default_value=default_python_executable,
+                default_value='/usr/bin/python3',
+                description="Deprecated compatibility argument; localizer is C++.",
             ),
             DeclareLaunchArgument(
                 "publish_debug_image", default_value="false"
@@ -172,7 +177,6 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "pose_filter_reacquire_frames", default_value="3"
             ),
-            camera_node,
-            localizer_node,
+            container,
         ]
     )

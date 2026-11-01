@@ -10,6 +10,7 @@ import cv2
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PoseStamped, TransformStamped
@@ -114,6 +115,12 @@ class DockLocalizer(Node):
         self.declare_parameter('pose_filter_reset_timeout_s', 1.0)
         self.declare_parameter('pose_filter_reacquire_frames', 3)
 
+        self.image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+
         self.bridge = CvBridge()
         self.K = None
         self.dist = None
@@ -187,7 +194,7 @@ class DockLocalizer(Node):
         self.create_subscription(CameraInfo, self.get_parameter('camera_info_topic').value,
                                  self._camera_info_cb, qos_profile_sensor_data)
         self.create_subscription(Image, self.get_parameter('image_topic').value,
-                                 self._image_cb, qos_profile_sensor_data)
+                                 self._image_cb, self.image_qos)
 
         self.get_logger().info(f'Loaded {len(self.tags)} tags from {self.config_file}')
 

@@ -12,12 +12,6 @@ def generate_launch_description():
         get_package_share_directory('dock_apriltag_localizer'),
         'config', 'dock_tags.yaml'
     )
-    virtual_env = os.environ.get('VIRTUAL_ENV')
-    default_python_executable = (
-        os.path.join(virtual_env, 'bin', 'python')
-        if virtual_env else '/usr/bin/python3'
-    )
-
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('config_file', default_value=default_cfg),
@@ -25,7 +19,8 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_info_topic', default_value='/camera/camera_info'),
         DeclareLaunchArgument('dock_frame', default_value='dock_target'),
         DeclareLaunchArgument(
-            'python_executable', default_value=default_python_executable
+            'python_executable', default_value='/usr/bin/python3',
+            description='Deprecated compatibility argument; localizer is C++.'
         ),
         DeclareLaunchArgument('pose_filter_enabled', default_value='true'),
         DeclareLaunchArgument(
@@ -46,9 +41,6 @@ def generate_launch_description():
             executable='dock_localizer',
             name='dock_apriltag_localizer',
             output='screen',
-            prefix=[LaunchConfiguration('python_executable')],
-            # Keep ~/.local NumPy/OpenCV installs out of the ROS/venv runtime.
-            additional_env={'PYTHONNOUSERSITE': '1'},
             parameters=[{
                 'use_sim_time': ParameterValue(
                     LaunchConfiguration('use_sim_time'), value_type=bool,
