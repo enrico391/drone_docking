@@ -49,35 +49,12 @@ source /opt/ros/lyrical/setup.bash
 rosdep install --from-paths src/drone_docking/dock_apriltag_localizer --ignore-src -r -y
 ```
 
-No virtual environment is needed to build or run the C++ localizer. This package changed from
-`ament_python` to `ament_cmake`; use fresh build/install bases to avoid mixing
-old Python entry points with the new C++ executable:
-
-```bash
-cd /home/ubuntu/drone_ws
-source /opt/ros/lyrical/setup.bash
-python3 -m colcon build --symlink-install \
-  --build-base build_cpp --install-base install_cpp \
-  --packages-select dock_apriltag_localizer \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release
-source install_cpp/setup.bash
-```
-
-Source the existing workspace first if you need its other packages, then source
-`install_cpp/setup.bash` last so this C++ package takes precedence. For a clean
-workspace, the usual default `build`/`install` bases also work.
-
-The retained Python localizer/filter source and `requirements.txt` serve only
-as optional regression references and are not installed. The runtime package
-has no Python detector or MAVLink dependencies. The installed `dock_localizer`
-executable is C++.
-
 Run the native tests with:
 
 ```bash
-python3 -m colcon test --build-base build_cpp --install-base install_cpp \
+python3 -m colcon test \
   --packages-select dock_apriltag_localizer --event-handlers console_direct+
-python3 -m colcon test-result --test-result-base build_cpp/dock_apriltag_localizer
+python3 -m colcon test-result --test-result-base build/dock_apriltag_localizer
 ```
 
 ## Run
@@ -122,7 +99,7 @@ Use the combined launch file to compose the camera and dock localizer:
 ```bash
 cd /home/ubuntu/drone_ws
 source /opt/ros/lyrical/setup.bash
-source install_cpp/setup.bash
+source install/setup.bash
 
 ros2 launch dock_apriltag_localizer \
   dock_localizer_with_camera.launch.py

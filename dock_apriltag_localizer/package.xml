@@ -22,8 +22,6 @@
   <depend>apriltag</depend>
   <test_depend>ament_cmake_gtest</test_depend>
 
-  <test_depend>rclpy</test_depend>
-  <test_depend>python3-opencv</test_depend>
   <exec_depend>camera_ros</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
