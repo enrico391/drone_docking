@@ -26,12 +26,17 @@ TEST(Component, IntraProcessImagesProduceStampedPoseTimingAndReload) {
     auto info_pub = source->create_publisher<sensor_msgs::msg::CameraInfo>("/camera/camera_info", rclcpp::SensorDataQoS());
     geometry_msgs::msg::PoseStamped::ConstSharedPtr pose;
     std::string mode, timing;
+    double pose_received_monotonic_s = 0;
     sensor_msgs::msg::Image::ConstSharedPtr debug, observed_input;
     auto observer = source->create_subscription<sensor_msgs::msg::Image>("/camera/image_raw",
       rclcpp::SensorDataQoS().keep_last(1),
       [&](sensor_msgs::msg::Image::ConstSharedPtr msg) { observed_input = msg; });
     auto poses = source->create_subscription<geometry_msgs::msg::PoseStamped>("/dock/pose", 10,
-      [&](geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) { pose = msg; });
+      [&](geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
+        pose_received_monotonic_s = std::chrono::duration<double>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+        pose = msg;
+      });
     auto modes = source->create_subscription<std_msgs::msg::String>("/dock/mode", 10,
       [&](std_msgs::msg::String::ConstSharedPtr msg) { mode = msg->data; });
     auto timings = source->create_subscription<std_msgs::msg::String>("/dock/timing", 10,
@@ -50,6 +55,7 @@ TEST(Component, IntraProcessImagesProduceStampedPoseTimingAndReload) {
     image_pub->publish(*cv_bridge::CvImage(header, "mono8", gray).toImageMsg()); spin();
     EXPECT_EQ(mode, "NO_TARGET"); EXPECT_FALSE(pose);
     EXPECT_NE(timing.find("\"pose_age_at_publish_s\":null"), std::string::npos);
+    EXPECT_NE(timing.find("\"pose_publish_monotonic_s\":null"), std::string::npos);
     auto * family = tag36h11_create(); auto * tag = apriltag_to_image(family, 0);
     cv::Mat small(tag->height, tag->width, CV_8UC1, tag->buf, tag->stride), large;
     cv::resize(small, large, cv::Size(), 15, 15, cv::INTER_NEAREST);
@@ -57,16 +63,26 @@ TEST(Component, IntraProcessImagesProduceStampedPoseTimingAndReload) {
     image_u8_destroy(tag); tag36h11_destroy(family);
     auto input = cv_bridge::CvImage(header, "mono8", gray).toImageMsg();
     const auto original = input->data;
+    const double before_publish_monotonic_s = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
     image_pub->publish(std::make_unique<sensor_msgs::msg::Image>(*input)); spin();
     ASSERT_TRUE(pose); EXPECT_EQ(pose->header.stamp.sec, 10);
     EXPECT_EQ(pose->header.frame_id, "test_optical"); EXPECT_EQ(mode, "OUTER");
     EXPECT_NEAR(pose->pose.position.z, 1.501, 0.03);
     EXPECT_NE(timing.find("\"filter_status\":\"initialized\""), std::string::npos);
+    EXPECT_NE(timing.find("\"source_stamp_ns\":10000000000"), std::string::npos);
+    const std::string publication_key = "\"pose_publish_monotonic_s\":";
+    const auto publication_position = timing.find(publication_key);
+    ASSERT_NE(publication_position, std::string::npos);
+    const double published = std::stod(timing.substr(publication_position + publication_key.size()));
+    EXPECT_GE(published, before_publish_monotonic_s);
+    EXPECT_LE(published, pose_received_monotonic_s);
     ASSERT_TRUE(debug); EXPECT_EQ(debug->encoding, "bgr8");
     ASSERT_TRUE(observed_input); EXPECT_EQ(observed_input->data, original);
     pose.reset(); image_pub->publish(*input); spin();
     EXPECT_FALSE(pose);
     EXPECT_NE(timing.find("non_monotonic_timestamp"), std::string::npos);
+    EXPECT_NE(timing.find("\"pose_publish_monotonic_s\":null"), std::string::npos);
     auto reload = source->create_client<std_srvs::srv::Trigger>("/dock_apriltag_localizer/reload_config");
     auto response = reload->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
     ASSERT_EQ(executor.spin_until_future_complete(response, std::chrono::seconds(2)), rclcpp::FutureReturnCode::SUCCESS);

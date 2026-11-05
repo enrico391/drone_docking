@@ -1,5 +1,6 @@
 """Non-blocking PX4 flight cycle using native ROS 2/uXRCE-DDS topics only."""
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import json
 import math
@@ -7,7 +8,7 @@ from pathlib import Path
 import time
 
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from px4_msgs.msg import (
     OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleCommandAck,
     VehicleLandDetected, VehicleLocalPosition, VehicleStatus,
@@ -74,7 +75,8 @@ class Px4FlightCycleManager(Node):
                 raise ValueError(f"{name} must be finite and positive")
         if self._p["update_rate_hz"] < 10 or self._p["offboard_warmup_s"] < 1.0:
             raise ValueError("Offboard requires >=10 Hz and >=1 s warmup")
-        if self._p["auto_start"] and not self._p["simulation_mode"]:
+        if (not self._p["pid_bench_mode"] and self._p["auto_start"]
+                and not self._p["simulation_mode"]):
             raise ValueError("auto_start requires simulation_mode=true")
         for name in ("source_system", "source_component"):
             if not 1 <= self._p[name] <= 255:
@@ -89,6 +91,7 @@ class Px4FlightCycleManager(Node):
         self._status = self._local = self._land = None
         self._status_at = self._local_at = self._land_at = -math.inf
         self._dock_pose = None
+        self._dock_publish_times = OrderedDict()
         self._dock_mode = "NO_TARGET"
         self._dock_pose_at = self._dock_mode_at = -math.inf
         self._target = None
@@ -124,17 +127,23 @@ class Px4FlightCycleManager(Node):
                                      self._on_dock_pose, sensor_qos),
             self.create_subscription(String, self._p["dock_mode_topic"],
                                      self._on_dock_mode, sensor_qos),
+            self.create_subscription(String, self._p["dock_timing_topic"],
+                                     self._on_dock_timing, 10),
         ])
         state_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._state_pub = self.create_publisher(String, "~/state", state_qos)
         self._reason_pub = self.create_publisher(String, "~/reason", state_qos)
         self._debug_pub = self.create_publisher(String, "~/pid_debug", 10)
+        self._pid_velocity_pub = self.create_publisher(TwistStamped, "~/pid_velocity", 10)
         self._start_service = self.create_service(Trigger, "~/start_cycle", self._start)
         self._dock_service = self.create_service(Trigger, "~/request_dock", self._request_dock)
         self._timer = self.create_timer(
             1.0 / self._p["update_rate_hz"], self._tick, clock=self._watchdog_clock)
         self.add_on_set_parameters_callback(self._on_parameters_changed)
-        self._transition("READY", "PX4 DDS ready; waiting for fresh telemetry and start_cycle")
+        if self._p["pid_bench_mode"]:
+            self._transition("PID_BENCH_WAITING", "PID bench enabled; waiting for a fresh dock pose")
+        else:
+            self._transition("READY", "PX4 DDS ready; waiting for fresh telemetry and start_cycle")
 
     def _on_parameters_changed(self, parameters):
         updates = {parameter.name: parameter.value for parameter in parameters}
@@ -155,7 +164,7 @@ class Px4FlightCycleManager(Node):
             candidate = dict(self._p, **changed)
             config = pid_config(candidate)
             # Validate the complete candidate before touching a running controller.
-            if self._landing is not None and self._state == "LANDING_BACKEND":
+            if self._landing is not None and self._state in {"LANDING_BACKEND", "PID_BENCH"}:
                 self._landing.validate_touchdown_transition(config)
                 self._landing.reconfigure_pids(
                     tuple(getattr(config, f"{axis}_pid") for axis in PID_AXES),
@@ -170,14 +179,15 @@ class Px4FlightCycleManager(Node):
         self._p, self._pid_config = candidate, config
         return SetParametersResult(successful=True)
 
-    def _publish_pid_debug(self, now, dock=None, substate=None):
-        active = self._state == "LANDING_BACKEND" and self._landing is not None
+    def _publish_pid_debug(self, now, dock=None, substate=None, *, pose_timing=None):
+        active = self._state in {"LANDING_BACKEND", "PID_BENCH"} and self._landing is not None
         diagnostics = self._landing.diagnostics() if active else {}
         data = pose_tracking_telemetry(
             now=now, state=substate or self._state, dock=dock,
             diagnostics=diagnostics, parameters=self._p,
         )
         data["cycle_state"] = self._state
+        data["pose_timing"] = pose_timing if active else None
         data["flight_actions"] = {
             name: {"allowed": not reason, "reason": reason}
             for name, reason in (("start_cycle", self._start_cycle_blocker()),
@@ -193,7 +203,7 @@ class Px4FlightCycleManager(Node):
         self._state_pub.publish(String(data=state))
         self._reason_pub.publish(String(data=reason))
         self.get_logger().info(f"{state}: {reason}")
-        if state != "LANDING_BACKEND":
+        if state not in {"LANDING_BACKEND", "PID_BENCH"}:
             self._publish_pid_debug(self._now())
 
     def _on_status(self, message):
@@ -242,6 +252,48 @@ class Px4FlightCycleManager(Node):
     def _on_dock_pose(self, message):
         self._dock_pose, self._dock_pose_at = message, self._now()
 
+    def _on_dock_timing(self, message):
+        # Timing is a separate topic: never assume its delivery order matches poses.
+        try:
+            data = json.loads(message.data)
+            stamp_ns = data["source_stamp_ns"]
+            published = data["pose_publish_monotonic_s"]
+            if (type(stamp_ns) is not int or stamp_ns <= 0
+                    or type(published) not in (int, float)
+                    or not math.isfinite(published) or published < 0):
+                return
+        except (ValueError, TypeError, KeyError, OverflowError):
+            return
+        self._dock_publish_times[stamp_ns] = published
+        self._dock_publish_times.move_to_end(stamp_ns)
+        # Bound memory even while idle or if timing arrives without poses.
+        while len(self._dock_publish_times) > 100:
+            self._dock_publish_times.popitem(last=False)
+
+    def _pose_timing_at_control(self, dock, consumed_at):
+        if dock is None:
+            return None
+        stamp = self._dock_pose.header.stamp
+        stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+        published = self._dock_publish_times.get(stamp_ns)
+        # Different hosts/clock origins or delayed metadata must not fabricate
+        # negative latencies. The simulation runs both nodes on this Linux host.
+        if published is not None and not 0 <= published <= dock.received_at <= consumed_at:
+            published = None
+        return {
+            "source_stamp_ns": stamp_ns,
+            "source_stamp_s": dock.source_stamp_s,
+            "published_monotonic_s": published,
+            "received_monotonic_s": dock.received_at,
+            "consumed_monotonic_s": consumed_at,
+            "publish_to_receive_s": (dock.received_at - published
+                                     if published is not None else None),
+            "receive_to_pid_s": consumed_at - dock.received_at,
+            "publish_to_pid_s": (consumed_at - published
+                                 if published is not None else None),
+            "source_age_at_pid_s": (self.get_clock().now().nanoseconds - stamp_ns) * 1e-9,
+        }
+
     def _on_dock_mode(self, message):
         self._dock_mode, self._dock_mode_at = message.data, self._now()
 
@@ -266,6 +318,8 @@ class Px4FlightCycleManager(Node):
         return self._status is None or self._local is None or self._land is None
 
     def _start_cycle_blocker(self):
+        if self._p["pid_bench_mode"]:
+            return "PID bench mode enabled; flight commands disabled"
         if self._state not in self.IDLE_STATES:
             return "a cycle is already active"
         if self._telemetry_missing():
@@ -279,6 +333,8 @@ class Px4FlightCycleManager(Node):
         return ""
 
     def _request_dock_blocker(self):
+        if self._p["pid_bench_mode"]:
+            return "PID bench mode enabled; flight commands disabled"
         if self._telemetry_missing():
             return "waiting for initial PX4 status, position and land telemetry"
         if not (self._state in self.IDLE_STATES | {"HOVER"} and self._fresh()
@@ -398,6 +454,9 @@ class Px4FlightCycleManager(Node):
 
     def _tick(self):
         now = self._now()
+        if self._p["pid_bench_mode"]:
+            self._tick_pid_bench(now)
+            return
         if self._state != "LANDING_BACKEND":
             self._publish_pid_debug(now)
         if self._p["auto_start"] and not self._auto_requested and self._state == "READY":
@@ -514,9 +573,11 @@ class Px4FlightCycleManager(Node):
     def _dock(self, now):
         timeout = self._p["dock_pose_timeout_s"]
         if (self._dock_pose is None or now - self._dock_pose_at > timeout
-                or now - self._dock_mode_at > timeout):
+                or (not self._p["pid_bench_mode"] and now - self._dock_mode_at > timeout)):
             return None
         mode = DockTargetMode.__members__.get(self._dock_mode)
+        if mode is None and self._p["pid_bench_mode"]:
+            mode = DockTargetMode.OUTER
         pose = self._dock_pose.pose
         p, q = pose.position, pose.orientation
         if mode is None or p.z <= 0 or not all(math.isfinite(value) for value in (
@@ -535,6 +596,40 @@ class Px4FlightCycleManager(Node):
             return None
         return DockObservation(-p.y, -p.x, p.z, yaw, mode, source, self._dock_pose_at)
 
+    def _tick_pid_bench(self, now):
+        """Exercise the real PID on the timer, with no PX4 command publication."""
+        dock = self._dock(now)
+        if dock is None:
+            self._landing = None
+            if self._state != "PID_BENCH_WAITING":
+                self._transition("PID_BENCH_WAITING", "waiting for a fresh valid dock pose")
+            else:
+                self._publish_pid_debug(now)
+            return
+        # Alignment-only computation needs no FC telemetry. Supply a stationary
+        # observation; unknown armed/flying state bypasses the flight lifecycle.
+        vehicle = VehicleObservation(
+            (0.0, 0.0, dock.distance_m), (0.0, 0.0, 0.0),
+            None, None, None, now, 0.0,
+        )
+        if self._landing is None:
+            self._landing = PidLandingBackend(self._pid_config, align_only=True)
+            self._landing.start(now=now, dock=dock, vehicle=vehicle)
+            self._transition("PID_BENCH", "pose acquired; computing PID velocities on the bench topic")
+        pose_timing = self._pose_timing_at_control(dock, self._now())
+        decision = self._landing.update(now=now, dock=dock, vehicle=vehicle)
+        if decision.velocity is not None:
+            command = decision.velocity
+            message = TwistStamped()
+            message.header.stamp = self.get_clock().now().to_msg()
+            message.header.frame_id = "base_link"
+            message.twist.linear.x = command.velocity_x
+            message.twist.linear.y = command.velocity_y
+            message.twist.linear.z = command.velocity_z
+            message.twist.angular.z = command.yaw_rate_rad_s
+            self._pid_velocity_pub.publish(message)
+        self._publish_pid_debug(now, dock, decision.substate, pose_timing=pose_timing)
+
     def _advance_docking(self, now):
         vehicle, dock = self._vehicle(), self._dock(now)
         if self._state == "SEARCH_DOCK":
@@ -548,10 +643,11 @@ class Px4FlightCycleManager(Node):
             elif decision.outcome is not SearchOutcome.SEARCHING:
                 self._fallback(decision.reason)
         else:
+            pose_timing = self._pose_timing_at_control(dock, self._now())
             decision = self._landing.update(now=now, dock=dock, vehicle=vehicle)
             if decision.velocity is not None:
                 self._velocity = velocity_to_ned(decision.velocity, self._local.heading)
-            self._publish_pid_debug(now, dock, decision.substate)
+            self._publish_pid_debug(now, dock, decision.substate, pose_timing=pose_timing)
             if decision.request_disarm and self._pending is None:
                 # Never force-disarm: PX4 must independently confirm touchdown.
                 if self._land.landed:

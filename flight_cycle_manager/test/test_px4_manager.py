@@ -49,7 +49,8 @@ def manager(monkeypatch, request):
     node = Px4FlightCycleManager(
         context=context, now=lambda: clock[0],
         namespace=getattr(request, "param", ""),
-        parameter_overrides=[Parameter("use_sim_time", value=False)],
+        parameter_overrides=[Parameter("use_sim_time", value=False),
+                             Parameter("pid_bench_mode", value=False)],
     )
     node._timer.cancel()
     node.test_clock = clock

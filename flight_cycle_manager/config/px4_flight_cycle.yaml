@@ -1,5 +1,7 @@
 flight_cycle_manager:
   ros__parameters:
+    # This timing branch computes PID outputs on ~/pid_velocity without flight.
+    pid_bench_mode: true
     # This profile is for SITL. Real hardware needs a separately reviewed profile.
     simulation_mode: true
     use_sim_time: true
@@ -16,6 +18,7 @@ flight_cycle_manager:
     takeoff_stable_time_s: 1.0
     dock_pose_timeout_s: 1.0
     dock_pose_topic: /dock/pose
+    dock_timing_topic: /dock/timing
     dock_mode_topic: /dock/mode
     search_radius_m: 1.0
     search_tangential_speed_m_s: 0.3

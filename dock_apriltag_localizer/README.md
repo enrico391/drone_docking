@@ -31,6 +31,15 @@ filtering and pose/mode publication; `debug_image_s` measures the optional debug
 image work. `callback_processing_s` covers the callback up to timing-message
 serialization. Processing durations use a monotonic clock.
 
+`source_stamp_ns` is the exact integer camera stamp used to match the published
+pose. `pose_publish_monotonic_s` records the host's monotonic clock immediately
+before `pose_pub->publish`; it is `null` for frames without an accepted pose.
+The pose header retains the original camera acquisition stamp. The flight-cycle
+manager combines this publication timestamp with its receipt and PID-entry
+timestamps in `/flight_cycle_manager/pid_debug` to measure publication-to-PID
+delay. Both nodes must run on the same Linux host/boot for that comparison;
+ROS simulation time is independent of this elapsed-time measurement.
+
 Timing is also published for no-target and filter-rejected frames, with `mode`
 and `filter_status`. Images received before camera calibration is available
 are skipped. Zero image timestamps produce `null` ages; negative ages are

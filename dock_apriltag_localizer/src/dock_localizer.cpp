@@ -103,7 +103,7 @@ struct DockLocalizer::Impl {
     if (ns == 0) return std::nullopt;
     return static_cast<double>(node.now().nanoseconds() - ns) * 1e-9;
   }
-  void publish_pose(const Pose & transform, const std_msgs::msg::Header & header) {
+  double publish_pose(const Pose & transform, const std_msgs::msg::Header & header) {
     geometry_msgs::msg::PoseStamped pose;
     pose.header = header;
     if (pose.header.frame_id.empty()) pose.header.frame_id = camera_frame.empty() ? "camera_optical_frame" : camera_frame;
@@ -111,6 +111,10 @@ struct DockLocalizer::Impl {
     Eigen::Quaterniond q(transform.block<3, 3>(0, 0)); q.normalize();
     pose.pose.orientation.x = q.x(); pose.pose.orientation.y = q.y();
     pose.pose.orientation.z = q.z(); pose.pose.orientation.w = q.w();
+    // Linux steady_clock and Python time.monotonic share CLOCK_MONOTONIC.
+    // Keep acquisition time in the pose header; send publication time in timing.
+    const double published = std::chrono::duration<double>(
+      SteadyClock::now().time_since_epoch()).count();
     pose_pub->publish(pose);
     geometry_msgs::msg::TransformStamped tf_msg;
     tf_msg.header = pose.header; tf_msg.child_frame_id = node.get_parameter("dock_frame").as_string();
@@ -118,6 +122,7 @@ struct DockLocalizer::Impl {
     tf_msg.transform.translation.y = pose.pose.position.y;
     tf_msg.transform.translation.z = pose.pose.position.z;
     tf_msg.transform.rotation = pose.pose.orientation; tf->sendTransform(tf_msg);
+    return published;
   }
   void publish_debug(const sensor_msgs::msg::Image::ConstSharedPtr & msg,
     const std::vector<Candidate> & candidates, const std::string & mode)
@@ -166,12 +171,15 @@ struct DockLocalizer::Impl {
       for (const auto & c : candidates) ids.data.push_back(c.id);
       ids_pub->publish(ids);
       const auto selected = selector.select(candidates);
-      std::optional<double> pose_age;
+      std::optional<double> pose_age, pose_publish_monotonic_s;
       std::string filter_status = "no_target";
       if (selected.pose) {
         const double stamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
         const auto filtered = filter.update(*selected.pose, stamp); filter_status = filtered.status;
-        if (filtered.pose) { pose_age = frame_age(msg->header.stamp); publish_pose(*filtered.pose, msg->header); }
+        if (filtered.pose) {
+          pose_age = frame_age(msg->header.stamp);
+          pose_publish_monotonic_s = publish_pose(*filtered.pose, msg->header);
+        }
         else RCLCPP_WARN_THROTTLE(node.get_logger(), *node.get_clock(), 1000,
           "Rejecting dock pose: %s", filter_status.c_str());
       }
@@ -182,6 +190,8 @@ struct DockLocalizer::Impl {
       std::ostringstream json;
       json << std::setprecision(17)
         << "{\"source_stamp_s\":" << msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9
+        << ",\"source_stamp_ns\":" << static_cast<int64_t>(msg->header.stamp.sec) * 1000000000LL + msg->header.stamp.nanosec
+        << ",\"pose_publish_monotonic_s\":" << json_number(pose_publish_monotonic_s)
         << ",\"image_age_at_callback_s\":" << json_number(image_age)
         << ",\"pose_age_at_publish_s\":" << json_number(pose_age)
         << ",\"conversion_s\":" << seconds(detection_started, started)

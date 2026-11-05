@@ -5,6 +5,67 @@ It does not depend on pymavlink or include the old ArduPilot manager, mission
 tools, precision-landing backend, debug launches or CSV loggers. A lightweight
 pose-only PID tuning dashboard is available for docking.
 
+## Default pose-triggered PID bench test
+
+On this timing branch, `pid_bench_mode` defaults to `true`. The manager starts
+the real PID backend on the first fresh valid `/dock/pose`, then computes at
+`update_rate_hz` (20 Hz by default), independently of the camera's frame rate.
+No PX4 telemetry, arming, takeoff, flight-mode validation, `/dock/mode`, or
+service call is required. Bench mode publishes computed velocities only on
+`/flight_cycle_manager/pid_velocity`; it sends no PX4 control messages and
+rejects `start_cycle` and `request_dock` requests.
+
+Build and launch on the Pi with the real camera and localizer:
+
+```bash
+colcon build --packages-select flight_cycle_manager --symlink-install
+source install/setup.bash
+ros2 launch flight_cycle_manager px4_flight_cycle.launch.py use_real_camera:=true
+```
+
+For an already running camera/localizer, launch with `start_localizer:=false
+use_sim_time:=false` instead. For the manager alone:
+
+```bash
+ros2 run flight_cycle_manager px4_flight_cycle_manager --ros-args -p use_sim_time:=false
+```
+
+Measure the output in another sourced terminal:
+
+```bash
+ros2 topic hz /flight_cycle_manager/pid_velocity
+ros2 topic echo /flight_cycle_manager/pid_velocity
+ros2 bag record -o pid_bench --topics /flight_cycle_manager/pid_velocity /flight_cycle_manager/pid_debug /dock/pose
+```
+
+The output is `geometry_msgs/msg/TwistStamped`: `twist.linear.{x,y,z}` are
+body FLU velocities (forward, left, up) in m/s; `twist.angular.z` is
+positive-left yaw rate in rad/s. `header.frame_id` is `base_link` and
+`header.stamp` is ROS time immediately before publishing the completed result,
+not the camera acquisition timestamp. With a namespace, the topic follows the
+manager, e.g. `/drone1/flight_cycle_manager/pid_velocity`.
+
+The backend stays in `PID_ALIGN` using its existing alignment-only mode; it
+calculates all four PID axes, holding the first pose's distance as the vertical
+setpoint (bounded below by the configured approach height). Vehicle feedback
+is a synthetic stationary observation with zero velocity and heading. This
+measures the alignment PID path under the Pi's camera/localizer load, rather
+than all landing states or actual vehicle feedback. Live PID gain tuning and
+`pid_debug` pose timing remain available.
+
+Output starts only with a usable pose and stops when the pose is invalid or
+older than `dock_pose_timeout_s` (default 1 s). It restarts automatically with
+a fresh pose and reset PID history. Pose stamps must use the manager's ROS
+clock; the real-camera launch selects `use_sim_time:=false`. State is
+`PID_BENCH_WAITING` before acquisition and `PID_BENCH` during computation.
+Use the output stamps or `pid_debug.time_s` in the bag for interval and jitter
+analysis; `ros2 topic hz` measures the subscriber's observed arrival rate.
+
+To restore the original flight lifecycle, explicitly launch with
+`pid_bench_mode:=false` (or pass `-p pid_bench_mode:=false` to `ros2 run`).
+This setting requires restarting the manager. The lifecycle below applies
+when bench mode is disabled.
+
 ## Package layout
 
 - `launch/px4_flight_cycle.launch.py`: the only manager launch file.
@@ -25,7 +86,8 @@ visual alignment and descent stages keep their existing control. Restart the
 manager after changing this parameter.
 
 The installed executable remains `px4_flight_cycle_manager`; the ROS node is
-`flight_cycle_manager`. Existing PX4 simulation launch commands are unchanged.
+`flight_cycle_manager`. Existing launch commands now select bench execution
+unless `pid_bench_mode` is explicitly disabled.
 
 ## Lifecycle and DDS topics
 
@@ -163,6 +225,39 @@ ros2 topic echo /flight_cycle_manager/state --qos-durability transient_local
 ros2 topic echo /flight_cycle_manager/reason --qos-durability transient_local
 ros2 topic echo /flight_cycle_manager/pid_debug
 ```
+
+### Pose publication to PID timing
+
+Each landing-backend update includes `pose_timing` in `pid_debug` for the exact
+camera pose handed to the controller when it calculates the velocity command:
+
+- `publish_to_pid_s`: elapsed time from the localizer's pose publication to
+  entry into the PID update. This is the total publication-to-consumption delay.
+- `publish_to_receive_s`: publication to the manager's pose subscription callback.
+- `receive_to_pid_s`: time the received pose waited for the control update.
+- `source_age_at_pid_s`: original camera-frame age in ROS time, including image
+  transport and processing before pose publication.
+
+All values are seconds; multiply by 1000 for milliseconds. For example,
+`publish_to_pid_s: 0.035` means 35 ms. `source_stamp_ns` identifies the exact
+camera frame; publication, receipt and consumption monotonic timestamps are
+also included. Reusing a pose on successive control updates increases its
+reported age. Consumption means passing the pose into the landing backend;
+some states use a fixed reference or recovery commands instead of visual PID.
+
+The manager matches `/dock/timing` metadata by the exact integer source stamp,
+using the configurable `dock_timing_topic` (default `/dock/timing`). These
+publication delays use the Linux host's shared monotonic clock and require the
+localizer and manager to run on the same host/boot. They remain wall elapsed
+times when Gazebo is paused or runs faster/slower than real time. Camera-frame
+age uses ROS time and requires matching `use_sim_time` settings.
+
+Publication delays are `null` if matching timing has not arrived, the publisher
+does not provide it, or the publication timestamp is later than receipt. Timing
+travels on a separate topic after image processing/debug output, so an early
+control update may lack it; a later update of the same pose can use it once
+available. Control never waits for diagnostics. `pose_timing` is `null` when
+there is no valid pose input or the landing backend is inactive.
 
 `auto_start:=true` queues one simulation takeoff only; it does not request
 docking automatically. The manager launch also accepts `config_file`,

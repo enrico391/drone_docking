@@ -19,6 +19,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("namespace", default_value=""),
         DeclareLaunchArgument("px4_namespace", default_value=""),
+        DeclareLaunchArgument("pid_bench_mode", default_value="true", choices=["true", "false"],
+                              description="Run pose-triggered PID on a separate velocity topic without flight commands."),
         DeclareLaunchArgument("auto_start", default_value="false", choices=["true", "false"]),
         DeclareLaunchArgument("pid_tuner", default_value="true", choices=["true", "false"]),
         DeclareLaunchArgument("pid_tuner_port", default_value="8765"),
@@ -49,6 +51,7 @@ def generate_launch_description():
             name="flight_cycle_manager", namespace=LaunchConfiguration("namespace"), output="screen",
             parameters=[LaunchConfiguration("config_file"), LaunchConfiguration("pid_config"), {
                 "px4_namespace": LaunchConfiguration("px4_namespace"),
+                "pid_bench_mode": ParameterValue(LaunchConfiguration("pid_bench_mode"), value_type=bool),
                 "auto_start": ParameterValue(LaunchConfiguration("auto_start"), value_type=bool),
                 "use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool),
             }],
